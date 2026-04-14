@@ -2,8 +2,7 @@
 
 本目录存放的是 Linux ARM CI 相关 job 的 shell 脚本版本。
 
-容器镜像依赖准备请参考
-[container_setup.md](/C:/d/work/py_proj/doc/numpy/tools/ci/linux-arm/container_setup.md)。
+容器镜像依赖准备请参考 [container_setup.md](container_setup.md)。
 
 ## 对应关系
 
@@ -18,11 +17,11 @@
 可以在仓库根目录或任意子目录下执行这些脚本：
 
 ```bash
-tools/ci/linux-arm/lint.sh
-tools/ci/linux-arm/smoke_test.sh
-tools/ci/linux-arm/benchmark.sh
-tools/ci/linux-arm/full.sh
-tools/ci/linux-arm/incremental_coverage.sh
+.gitcode/pipline/lint.sh
+.gitcode/pipline/smoke_test.sh
+.gitcode/pipline/benchmark.sh
+.gitcode/pipline/full.sh
+.gitcode/pipline/incremental_coverage.sh
 ```
 
 所有脚本都支持以下环境变量：

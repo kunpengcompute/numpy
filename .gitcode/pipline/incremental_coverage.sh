@@ -22,7 +22,7 @@ if [[ ! -f "${coverage_xml}" ]]; then
         "${SCRIPT_DIR}/full.sh"
     else
         printf 'Coverage XML not found: %s\n' "${coverage_xml}" >&2
-        printf 'Run tools/ci/linux-arm/full.sh first or set RUN_FULL_JOB_IF_MISSING=1.\n' >&2
+        printf 'Run .gitcode/pipline/full.sh first or set RUN_FULL_JOB_IF_MISSING=1.\n' >&2
         exit 1
     fi
 fi

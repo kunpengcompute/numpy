@@ -90,11 +90,11 @@ git submodule update --init --recursive
 
 完成上述准备后，可以直接运行以下脚本：
 
-- `tools/ci/linux-arm/lint.sh`
-- `tools/ci/linux-arm/smoke_test.sh`
-- `tools/ci/linux-arm/benchmark.sh`
-- `tools/ci/linux-arm/full.sh`
-- `tools/ci/linux-arm/incremental_coverage.sh`
+- `.gitcode/pipline/lint.sh`
+- `.gitcode/pipline/smoke_test.sh`
+- `.gitcode/pipline/benchmark.sh`
+- `.gitcode/pipline/full.sh`
+- `.gitcode/pipline/incremental_coverage.sh`
 
 ## 可选的安装模式
 
