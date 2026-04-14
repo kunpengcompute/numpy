@@ -5,7 +5,17 @@ set -euo pipefail
 ci_repo_root() {
     local script_dir
     script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-    cd -- "${script_dir}/../../.." && pwd
+
+    if command -v git >/dev/null 2>&1; then
+        if git -C "${script_dir}" rev-parse --show-toplevel >/dev/null 2>&1; then
+            git -C "${script_dir}" rev-parse --show-toplevel
+            return 0
+        fi
+    fi
+
+    # Fallback for non-git environments: .gitcode/pipline lives two levels
+    # below the repository root in this copied layout.
+    cd -- "${script_dir}/../.." && pwd
 }
 
 ci_enter_repo_root() {
