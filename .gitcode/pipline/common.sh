@@ -190,6 +190,10 @@ ci_install_system_packages() {
 
 ci_dump_meson_log() {
     local log_path
+    if [[ "${CI_DUMP_MESON_LOG:-0}" != "1" ]]; then
+        return 0
+    fi
+
     log_path="$(ci_repo_root)/build/meson-logs/meson-log.txt"
     if [[ -f "${log_path}" ]]; then
         printf '\n===== Meson log =====\n' >&2
