@@ -127,23 +127,63 @@ static npy_intp
 count_run_(type *arr, npy_intp l, npy_intp num, npy_intp minrun)
 {
     npy_intp sz;
-    type vc, *pl, *pi, *pj, *pr;
+    type vc, *pl, *pi, *pj, *pr, *end;
 
     if (NPY_UNLIKELY(num - l == 1)) {
         return 1;
     }
 
     pl = arr + l;
+    end = arr + num - 1;
+    pi = pl + 1;
 
     /* (not strictly) ascending sequence */
     if (!Tag::less(*(pl + 1), *pl)) {
-        for (pi = pl + 1; pi < arr + num - 1 && !Tag::less(*(pi + 1), *pi);
-             ++pi) {
+        /* unroll loop */
+        while (pi + 4 <= end) {
+            if (Tag::less(*(pi + 1), *pi)) {
+                break;
+            }
+            ++pi;
+            if (Tag::less(*(pi + 1), *pi)) {
+                break;
+            }
+            ++pi;
+            if (Tag::less(*(pi + 1), *pi)) {
+                break;
+            }
+            ++pi;
+            if (Tag::less(*(pi + 1), *pi)) {
+                break;
+            }
+            ++pi;
+        }
+
+        for (; pi < end && !Tag::less(*(pi + 1), *pi); ++pi) {
         }
     }
     else { /* (strictly) descending sequence */
-        for (pi = pl + 1; pi < arr + num - 1 && Tag::less(*(pi + 1), *pi);
-             ++pi) {
+        /* unroll loop */
+        while (pi + 4 <= end) {
+            if (!Tag::less(*(pi + 1), *pi)) {
+                break;
+            }
+            ++pi;
+            if (!Tag::less(*(pi + 1), *pi)) {
+                break;
+            }
+            ++pi;
+            if (!Tag::less(*(pi + 1), *pi)) {
+                break;
+            }
+            ++pi;
+            if (!Tag::less(*(pi + 1), *pi)) {
+                break;
+            }
+            ++pi;
+        }
+
+        for (; pi < end && Tag::less(*(pi + 1), *pi); ++pi) {
         }
 
         for (pj = pl, pr = pi; pj < pr; ++pj, --pr) {
@@ -189,9 +229,34 @@ static void
 merge_left_(type *p1, npy_intp l1, type *p2, npy_intp l2, type *p3)
 {
     type *end = p2 + l2;
+    type *p3_end = p3 + l1;
     memcpy(p3, p1, sizeof(type) * l1);
     /* first element must be in p2 otherwise skipped in the caller */
     *p1++ = *p2++;
+
+    constexpr npy_intp BLOCK = 64 / sizeof(type);
+    while ((p1 + BLOCK <= p2) && (p2 + BLOCK <= end)) {
+        /* Fast path 1: right block entirely smaller */
+        if (Tag::less(*(p2 + BLOCK - 1), *p3)) {
+            memcpy(p1, p2, BLOCK * sizeof(type));
+            p1 += BLOCK;
+            p2 += BLOCK;
+            continue;
+        }
+
+        /* Fast path 2: left block entirely smaller/equal */
+        if ((p3 + BLOCK <= p3_end) && !Tag::less(*p2, *(p3 + BLOCK - 1))) {
+            memcpy(p1, p3, BLOCK * sizeof(type));
+            p1 += BLOCK;
+            p3 += BLOCK;
+            continue;
+        }
+
+        /* fallback: lightly-unrolled branchy merge */
+        for (int i = 0; i < BLOCK; ++i) {
+            *p1++ = Tag::less(*p2, *p3) ? *p2++ : *p3++;
+        }
+    }
 
     while (p1 < p2 && p2 < end) {
         if (Tag::less(*p2, *p3)) {
@@ -216,12 +281,37 @@ merge_right_(type *p1, npy_intp l1, type *p2, npy_intp l2, type *p3)
 {
     npy_intp ofs;
     type *start = p1 - 1;
+    type *p3_start = p3 - 1;
     memcpy(p3, p2, sizeof(type) * l2);
     p1 += l1 - 1;
     p2 += l2 - 1;
     p3 += l2 - 1;
     /* first element must be in p1 otherwise skipped in the caller */
     *p2-- = *p1--;
+
+    constexpr npy_intp BLOCK = 64 / sizeof(type);
+    while ((p2 - BLOCK >= p1) && (p1 - BLOCK >= start)) {
+        /* Fast path 1: left block entirely larger */
+        if (Tag::less(*p3, *(p1 - BLOCK + 1))) {
+            memcpy(p2 - BLOCK + 1, p1 - BLOCK + 1, BLOCK * sizeof(type));
+            p1 -= BLOCK;
+            p2 -= BLOCK;
+            continue;
+        }
+
+        /* Fast path 2: right block entirely >= left block */
+        if ((p3 - BLOCK >= p3_start) && !Tag::less(*(p3 - BLOCK + 1), *p1)) {
+            memcpy(p2 - BLOCK + 1, p3 - BLOCK + 1, BLOCK * sizeof(type));
+            p3 -= BLOCK;
+            p2 -= BLOCK;
+            continue;
+        }
+
+        /* fallback: lightly-unrolled branchy merge */
+        for (int i = 0; i < BLOCK; ++i) {
+            *p2-- = Tag::less(*p3, *p1) ? *p1-- : *p3--;
+        }
+    }
 
     while (p1 < p2 && start < p1) {
         if (Tag::less(*p3, *p1)) {
@@ -527,25 +617,63 @@ acount_run_(type *arr, npy_intp *tosort, npy_intp l, npy_intp num,
     npy_intp sz;
     type vc;
     npy_intp vi;
-    npy_intp *pl, *pi, *pj, *pr;
+    npy_intp *pl, *pi, *pj, *pr, *end;
 
     if (NPY_UNLIKELY(num - l == 1)) {
         return 1;
     }
 
     pl = tosort + l;
+    end = tosort + num - 1;
+    pi = pl + 1;
 
     /* (not strictly) ascending sequence */
     if (!Tag::less(arr[*(pl + 1)], arr[*pl])) {
-        for (pi = pl + 1;
-             pi < tosort + num - 1 && !Tag::less(arr[*(pi + 1)], arr[*pi]);
-             ++pi) {
+        /* unroll loop */
+        while (pi + 4 <= end) {
+            if (Tag::less(arr[*(pi + 1)], arr[*pi])) {
+                break;
+            }
+            ++pi;
+            if (Tag::less(arr[*(pi + 1)], arr[*pi])) {
+                break;
+            }
+            ++pi;
+            if (Tag::less(arr[*(pi + 1)], arr[*pi])) {
+                break;
+            }
+            ++pi;
+            if (Tag::less(arr[*(pi + 1)], arr[*pi])) {
+                break;
+            }
+            ++pi;
+        }
+
+        for (; pi < end && !Tag::less(arr[*(pi + 1)], arr[*pi]); ++pi) {
         }
     }
     else { /* (strictly) descending sequence */
-        for (pi = pl + 1;
-             pi < tosort + num - 1 && Tag::less(arr[*(pi + 1)], arr[*pi]);
-             ++pi) {
+        /* unroll loop */
+        while (pi + 4 <= end) {
+            if (!Tag::less(arr[*(pi + 1)], arr[*pi])) {
+                break;
+            }
+            ++pi;
+            if (!Tag::less(arr[*(pi + 1)], arr[*pi])) {
+                break;
+            }
+            ++pi;
+            if (!Tag::less(arr[*(pi + 1)], arr[*pi])) {
+                break;
+            }
+            ++pi;
+            if (!Tag::less(arr[*(pi + 1)], arr[*pi])) {
+                break;
+            }
+            ++pi;
+        }
+
+        for (; pi < end && Tag::less(arr[*(pi + 1)], arr[*pi]); ++pi) {
         }
 
         for (pj = pl, pr = pi; pj < pr; ++pj, --pr) {
@@ -685,9 +813,34 @@ amerge_left_(type *arr, npy_intp *p1, npy_intp l1, npy_intp *p2, npy_intp l2,
              npy_intp *p3)
 {
     npy_intp *end = p2 + l2;
+    npy_intp *p3_end = p3 + l1;
     memcpy(p3, p1, sizeof(npy_intp) * l1);
     /* first element must be in p2 otherwise skipped in the caller */
     *p1++ = *p2++;
+
+    constexpr npy_intp BLOCK = 64 / sizeof(npy_intp);
+    while ((p1 + BLOCK <= p2) && (p2 + BLOCK <= end)) {
+        /* Fast path 1: right block entirely smaller */
+        if (Tag::less(arr[*(p2 + BLOCK - 1)], arr[*p3])) {
+            memcpy(p1, p2, BLOCK * sizeof(npy_intp));
+            p1 += BLOCK;
+            p2 += BLOCK;
+            continue;
+        }
+
+        /* Fast path 2: left block entirely smaller/equal */
+        if ((p3 + BLOCK <= p3_end) && !Tag::less(arr[*p2], arr[*(p3 + BLOCK - 1)])) {
+            memcpy(p1, p3, BLOCK * sizeof(npy_intp));
+            p1 += BLOCK;
+            p3 += BLOCK;
+            continue;
+        }
+
+        /* fallback: lightly-unrolled branchy merge */
+        for (int i = 0; i < BLOCK; ++i) {
+            *p1++ = Tag::less(arr[*p2], arr[*p3]) ? *p2++ : *p3++;
+        }
+    }
 
     while (p1 < p2 && p2 < end) {
         if (Tag::less(arr[*p2], arr[*p3])) {
@@ -710,12 +863,37 @@ amerge_right_(type *arr, npy_intp *p1, npy_intp l1, npy_intp *p2, npy_intp l2,
 {
     npy_intp ofs;
     npy_intp *start = p1 - 1;
+    npy_intp *p3_start = p3 - 1;
     memcpy(p3, p2, sizeof(npy_intp) * l2);
     p1 += l1 - 1;
     p2 += l2 - 1;
     p3 += l2 - 1;
     /* first element must be in p1 otherwise skipped in the caller */
     *p2-- = *p1--;
+
+    constexpr npy_intp BLOCK = 64 / sizeof(npy_intp);
+    while ((p2 - BLOCK >= p1) && (p1 - BLOCK >= start)) {
+        /* Fast path 1: left block entirely larger */
+        if (Tag::less(arr[*p3], arr[*(p1 - BLOCK + 1)])) {
+            memcpy(p2 - BLOCK + 1, p1 - BLOCK + 1, BLOCK * sizeof(npy_intp));
+            p1 -= BLOCK;
+            p2 -= BLOCK;
+            continue;
+        }
+
+        /* Fast path 2: right block entirely >= left block */
+        if ((p3 - BLOCK >= p3_start) && !Tag::less(arr[*(p3 - BLOCK + 1)], arr[*p1])) {
+            memcpy(p2 - BLOCK + 1, p3 - BLOCK + 1, BLOCK * sizeof(npy_intp));
+            p3 -= BLOCK;
+            p2 -= BLOCK;
+            continue;
+        }
+
+        /* fallback: lightly-unrolled branchy merge */
+        for (int i = 0; i < BLOCK; ++i) {
+            *p2-- = Tag::less(arr[*p3], arr[*p1]) ? *p1-- : *p3--;
+        }
+    }
 
     while (p1 < p2 && start < p1) {
         if (Tag::less(arr[*p3], arr[*p1])) {
