@@ -945,6 +945,467 @@ get_view_from_index(PyArrayObject *self, PyArrayObject **view,
     return 0;
 }
 
+static inline int
+copy_small_indexed_subspace(char *dst, char *src, npy_intp total_bytes)
+{
+    switch (total_bytes) {
+        case 0:
+            return 1;
+        case 1:
+            memcpy(dst, src, 1);
+            return 1;
+        case 2:
+            memcpy(dst, src, 2);
+            return 1;
+        case 4:
+            memcpy(dst, src, 4);
+            return 1;
+        case 8:
+            memcpy(dst, src, 8);
+            return 1;
+        case 16:
+            memcpy(dst, src, 16);
+            return 1;
+        case 24:
+            memcpy(dst, src, 24);
+            return 1;
+        case 32:
+            memcpy(dst, src, 32);
+            return 1;
+    }
+    return 0;
+}
+
+/*
+ * Fast path for arr[ind] when ind is a simple 1-D integer array indexing the
+ * first axis and each selected trailing subspace is C-contiguous.
+ */
+static PyObject *
+mapiter_trivial_get_c_subspace(
+        PyArrayObject *self, PyArrayObject *ind, int is_aligned,
+        NPY_cast_info *cast_info)
+{
+    PyArrayObject *result = NULL;
+    npy_intp result_ndim = PyArray_NDIM(self);
+    npy_intp result_shape[NPY_MAXDIMS];
+    npy_intp subspace_size = 1;
+    npy_intp row_bytes, ind_size, ind_stride;
+    npy_intp self_stride = PyArray_STRIDE(self, 0);
+    char *base_ptr = PyArray_BYTES(self);
+    char *ind_ptr = PyArray_BYTES(ind);
+    char *result_ptr;
+    npy_intp fancy_dim = PyArray_DIM(self, 0);
+    int needs_api = PyDataType_FLAGCHK(PyArray_DESCR(self), NPY_NEEDS_PYAPI);
+    npy_uint64 dtype_flags = PyDataType_FLAGS(PyArray_DESCR(self));
+
+    NPY_BEGIN_THREADS_DEF;
+
+    if (PyArray_NDIM(ind) != 1 ||
+            !PyArray_TRIVIALLY_ITERABLE(ind) ||
+            PyArray_ITEMSIZE(ind) != sizeof(npy_intp) ||
+            PyArray_DESCR(ind)->kind != 'i' ||
+            !IsUintAligned(ind) ||
+            !PyDataType_ISNOTSWAPPED(PyArray_DESCR(ind)) ||
+            !PyArray_IS_C_CONTIGUOUS(self) ||
+            (dtype_flags & (NPY_ITEM_REFCOUNT | NPY_NEEDS_INIT)) != 0) {
+        return NULL;
+    }
+
+    result_shape[0] = PyArray_SIZE(ind);
+    for (int i = 1; i < PyArray_NDIM(self); i++) {
+        result_shape[i] = PyArray_DIM(self, i);
+        subspace_size *= PyArray_DIM(self, i);
+    }
+
+    Py_INCREF(PyArray_DESCR(self));
+    result = (PyArrayObject *)PyArray_NewFromDescr(
+            &PyArray_Type, PyArray_DESCR(self), result_ndim,
+            result_shape, NULL, NULL,
+            PyArray_ISFORTRAN(ind) ? NPY_ARRAY_F_CONTIGUOUS : 0, NULL);
+    if (result == NULL) {
+        return NULL;
+    }
+
+    row_bytes = PyArray_ITEMSIZE(self) * subspace_size;
+    ind_size = PyArray_SIZE(ind);
+    ind_stride = PyArray_TRIVIAL_PAIR_ITERATION_STRIDE(ind_size, ind);
+    result_ptr = PyArray_BYTES(result);
+
+    if (!needs_api) {
+        NPY_BEGIN_THREADS_THRESHOLDED(ind_size);
+    }
+    while (ind_size--) {
+        npy_intp indval = *((npy_intp *)ind_ptr);
+        char *self_ptr;
+
+        if (check_and_adjust_index(&indval, fancy_dim, 0, _save) < 0) {
+            Py_DECREF(result);
+            return NULL;
+        }
+        self_ptr = base_ptr + indval * self_stride;
+
+        if (!needs_api) {
+            if (!copy_small_indexed_subspace(result_ptr, self_ptr, row_bytes)) {
+                memcpy(result_ptr, self_ptr, row_bytes);
+            }
+        }
+        else {
+            char *args[2] = {self_ptr, result_ptr};
+            npy_intp strides[2] = {PyArray_ITEMSIZE(self), PyArray_ITEMSIZE(self)};
+            if (NPY_UNLIKELY(cast_info->func(&cast_info->context,
+                    args, &subspace_size, strides,
+                    cast_info->auxdata) < 0)) {
+                NPY_END_THREADS;
+                Py_DECREF(result);
+                return NULL;
+            }
+        }
+
+        ind_ptr += ind_stride;
+        result_ptr += row_bytes;
+    }
+    NPY_END_THREADS;
+
+    return (PyObject *)result;
+}
+
+/*
+ * Fast path for arr[:, ind, ...] when ind is a simple 1-D integer array and
+ * self is C-contiguous.  This avoids MapIter setup for a common non-first-axis
+ * fancy indexing shape while preserving the standard result axis order.
+ */
+static PyObject *
+mapiter_trivial_get_axis1_c_subspace(
+        PyArrayObject *self, PyArrayObject *ind, PyObject *slice)
+{
+    PyArrayObject *result = NULL;
+    npy_intp result_shape[NPY_MAXDIMS];
+    npy_intp start, stop, step, n_steps;
+    npy_intp outer_size, ind_size, ind_stride;
+    npy_intp trailing_size = 1;
+    npy_intp trailing_bytes;
+    npy_intp self_outer_stride = PyArray_STRIDE(self, 0);
+    npy_intp self_fancy_stride = PyArray_STRIDE(self, 1);
+    char *base_ptr = PyArray_BYTES(self);
+    char *ind_base = PyArray_BYTES(ind);
+    char *result_base;
+    npy_intp fancy_dim = PyArray_DIM(self, 1);
+    npy_uint64 dtype_flags = PyDataType_FLAGS(PyArray_DESCR(self));
+
+    NPY_BEGIN_THREADS_DEF;
+
+    if (PyArray_NDIM(self) < 2 ||
+            PyArray_NDIM(ind) != 1 ||
+            !PyArray_TRIVIALLY_ITERABLE(ind) ||
+            PyArray_ITEMSIZE(ind) != sizeof(npy_intp) ||
+            PyArray_DESCR(ind)->kind != 'i' ||
+            !IsUintAligned(ind) ||
+            !PyDataType_ISNOTSWAPPED(PyArray_DESCR(ind)) ||
+            !PyArray_IS_C_CONTIGUOUS(self) ||
+            (dtype_flags & (NPY_ITEM_REFCOUNT | NPY_NEEDS_INIT |
+                            NPY_NEEDS_PYAPI)) != 0) {
+        return NULL;
+    }
+
+    if (PySlice_GetIndicesEx(slice, PyArray_DIM(self, 0),
+                             &start, &stop, &step, &n_steps) < 0) {
+        return NULL;
+    }
+    if (start != 0 || step != 1 || n_steps != PyArray_DIM(self, 0)) {
+        return NULL;
+    }
+
+    result_shape[0] = PyArray_DIM(self, 0);
+    result_shape[1] = PyArray_SIZE(ind);
+    for (int i = 2; i < PyArray_NDIM(self); i++) {
+        result_shape[i] = PyArray_DIM(self, i);
+        trailing_size *= PyArray_DIM(self, i);
+    }
+
+    Py_INCREF(PyArray_DESCR(self));
+    result = (PyArrayObject *)PyArray_NewFromDescr(
+            &PyArray_Type, PyArray_DESCR(self), PyArray_NDIM(self),
+            result_shape, NULL, NULL, 0, NULL);
+    if (result == NULL) {
+        return NULL;
+    }
+
+    outer_size = PyArray_DIM(self, 0);
+    ind_size = PyArray_SIZE(ind);
+    ind_stride = PyArray_TRIVIAL_PAIR_ITERATION_STRIDE(ind_size, ind);
+    trailing_bytes = PyArray_ITEMSIZE(self) * trailing_size;
+    result_base = PyArray_BYTES(result);
+
+    NPY_BEGIN_THREADS_THRESHOLDED(outer_size * ind_size);
+    for (npy_intp outer = 0; outer < outer_size; outer++) {
+        char *ind_ptr = ind_base;
+        char *outer_src = base_ptr + outer * self_outer_stride;
+        char *outer_dst = result_base + outer * ind_size * trailing_bytes;
+
+        for (npy_intp j = 0; j < ind_size; j++) {
+            npy_intp indval = *((npy_intp *)ind_ptr);
+            char *src;
+            char *dst;
+
+            if (check_and_adjust_index(&indval, fancy_dim, 1, _save) < 0) {
+                Py_DECREF(result);
+                return NULL;
+            }
+
+            src = outer_src + indval * self_fancy_stride;
+            dst = outer_dst + j * trailing_bytes;
+            if (!copy_small_indexed_subspace(dst, src, trailing_bytes)) {
+                memcpy(dst, src, trailing_bytes);
+            }
+
+            ind_ptr += ind_stride;
+        }
+    }
+    NPY_END_THREADS;
+
+    return (PyObject *)result;
+}
+
+typedef struct {npy_uint64 a; npy_uint64 b;} indexed_copytype128;
+
+#if defined(NPY_CPU_ARMEL_AARCH64) || defined(NPY_CPU_ARMEB_AARCH64)
+static inline void
+copy_scalar_to_c_subspace(
+        char *dst, char *src, npy_intp itemsize, npy_intp subspace_size)
+{
+    npy_intp i;
+
+    switch (itemsize) {
+        case 1: {
+            npy_uint8 value = *(npy_uint8 *)src;
+            for (i = 0; i < subspace_size; i++) {
+                *(npy_uint8 *)dst = value;
+                dst += 1;
+            }
+            return;
+        }
+        case 2: {
+            npy_uint16 value = *(npy_uint16 *)src;
+            for (i = 0; i < subspace_size; i++) {
+                *(npy_uint16 *)dst = value;
+                dst += 2;
+            }
+            return;
+        }
+        case 4: {
+            npy_uint32 value = *(npy_uint32 *)src;
+            for (i = 0; i < subspace_size; i++) {
+                *(npy_uint32 *)dst = value;
+                dst += 4;
+            }
+            return;
+        }
+        case 8: {
+            npy_uint64 value = *(npy_uint64 *)src;
+            for (i = 0; i < subspace_size; i++) {
+                *(npy_uint64 *)dst = value;
+                dst += 8;
+            }
+            return;
+        }
+        case 16: {
+            indexed_copytype128 value = *(indexed_copytype128 *)src;
+            for (i = 0; i < subspace_size; i++) {
+                *(indexed_copytype128 *)dst = value;
+                dst += 16;
+            }
+            return;
+        }
+    }
+}
+
+/*
+ * Fast path for arr[ind] = scalar when ind is a simple 1-D integer array
+ * indexing the first axis and each selected trailing subspace is C-contiguous.
+ */
+static int
+mapiter_trivial_set_c_subspace_scalar(
+        PyArrayObject *self, PyArrayObject *ind, PyArrayObject *value,
+        int is_aligned, NPY_cast_info *cast_info)
+{
+    npy_intp subspace_size = 1;
+    npy_intp ind_size, ind_stride;
+    npy_intp self_stride = PyArray_STRIDE(self, 0);
+    npy_intp itemsize = PyArray_ITEMSIZE(self);
+    char *base_ptr = PyArray_BYTES(self);
+    char *ind_ptr = PyArray_BYTES(ind);
+    char *value_ptr = PyArray_BYTES(value);
+    npy_intp fancy_dim = PyArray_DIM(self, 0);
+    npy_intp value_stride = 0;
+    npy_uint64 dtype_flags = PyDataType_FLAGS(PyArray_DESCR(self));
+
+    NPY_BEGIN_THREADS_DEF;
+
+    if (PyArray_NDIM(ind) != 1 ||
+            PyArray_NDIM(value) != 0 ||
+            !PyArray_TRIVIALLY_ITERABLE(ind) ||
+            PyArray_ITEMSIZE(ind) != sizeof(npy_intp) ||
+            PyArray_DESCR(ind)->kind != 'i' ||
+            !IsUintAligned(ind) ||
+            !PyDataType_ISNOTSWAPPED(PyArray_DESCR(ind)) ||
+            !PyArray_IS_C_CONTIGUOUS(self) ||
+            (dtype_flags & (NPY_ITEM_REFCOUNT | NPY_NEEDS_INIT |
+                            NPY_NEEDS_PYAPI)) != 0) {
+        return 1;
+    }
+
+    for (int i = 1; i < PyArray_NDIM(self); i++) {
+        subspace_size *= PyArray_DIM(self, i);
+    }
+
+    ind_size = PyArray_SIZE(ind);
+    ind_stride = PyArray_TRIVIAL_PAIR_ITERATION_STRIDE(ind_size, ind);
+    for (npy_intp i = 0; i < ind_size; i++) {
+        npy_intp indval = *((npy_intp *)ind_ptr);
+        if (check_and_adjust_index(&indval, fancy_dim, 0, _save) < 0) {
+            return -1;
+        }
+        ind_ptr += ind_stride;
+    }
+
+    ind_ptr = PyArray_BYTES(ind);
+
+    NPY_BEGIN_THREADS_THRESHOLDED(ind_size);
+    while (ind_size--) {
+        npy_intp indval = *((npy_intp *)ind_ptr);
+        char *self_ptr;
+
+        if (indval < 0) {
+            indval += fancy_dim;
+        }
+        self_ptr = base_ptr + indval * self_stride;
+
+        if (is_aligned && (
+                itemsize == 1 || itemsize == 2 || itemsize == 4 ||
+                itemsize == 8 || itemsize == 16)) {
+            copy_scalar_to_c_subspace(self_ptr, value_ptr, itemsize, subspace_size);
+        }
+        else {
+            char *args[2] = {value_ptr, self_ptr};
+            npy_intp strides[2] = {value_stride, itemsize};
+            if (NPY_UNLIKELY(cast_info->func(&cast_info->context,
+                    args, &subspace_size, strides,
+                    cast_info->auxdata) < 0)) {
+                NPY_END_THREADS;
+                return -1;
+            }
+        }
+
+        ind_ptr += ind_stride;
+    }
+    NPY_END_THREADS;
+
+    return 0;
+}
+
+/*
+ * Fast path for arr[:, ind, ...] = scalar when ind is a simple 1-D integer
+ * array indexing the second axis and each selected trailing subspace is
+ * C-contiguous.
+ */
+static int
+mapiter_trivial_set_axis1_c_subspace_scalar(
+        PyArrayObject *self, PyArrayObject *ind, PyArrayObject *value,
+        PyObject *slice, int is_aligned, NPY_cast_info *cast_info)
+{
+    npy_intp start, stop, step, n_steps;
+    npy_intp outer_size, ind_size, ind_stride;
+    npy_intp trailing_size = 1;
+    npy_intp itemsize = PyArray_ITEMSIZE(self);
+    npy_intp self_outer_stride = PyArray_STRIDE(self, 0);
+    npy_intp self_fancy_stride = PyArray_STRIDE(self, 1);
+    char *base_ptr = PyArray_BYTES(self);
+    char *ind_base = PyArray_BYTES(ind);
+    char *value_ptr = PyArray_BYTES(value);
+    npy_intp fancy_dim = PyArray_DIM(self, 1);
+    npy_intp value_stride = 0;
+    npy_uint64 dtype_flags = PyDataType_FLAGS(PyArray_DESCR(self));
+
+    NPY_BEGIN_THREADS_DEF;
+
+    if (PyArray_NDIM(self) < 2 ||
+            PyArray_NDIM(ind) != 1 ||
+            PyArray_NDIM(value) != 0 ||
+            !PyArray_TRIVIALLY_ITERABLE(ind) ||
+            PyArray_ITEMSIZE(ind) != sizeof(npy_intp) ||
+            PyArray_DESCR(ind)->kind != 'i' ||
+            !IsUintAligned(ind) ||
+            !PyDataType_ISNOTSWAPPED(PyArray_DESCR(ind)) ||
+            !PyArray_IS_C_CONTIGUOUS(self) ||
+            (dtype_flags & (NPY_ITEM_REFCOUNT | NPY_NEEDS_INIT |
+                            NPY_NEEDS_PYAPI)) != 0) {
+        return 1;
+    }
+
+    if (PySlice_GetIndicesEx(slice, PyArray_DIM(self, 0),
+                             &start, &stop, &step, &n_steps) < 0) {
+        return -1;
+    }
+    if (start != 0 || step != 1 || n_steps != PyArray_DIM(self, 0)) {
+        return 1;
+    }
+
+    for (int i = 2; i < PyArray_NDIM(self); i++) {
+        trailing_size *= PyArray_DIM(self, i);
+    }
+
+    ind_size = PyArray_SIZE(ind);
+    ind_stride = PyArray_TRIVIAL_PAIR_ITERATION_STRIDE(ind_size, ind);
+    char *ind_ptr = ind_base;
+    for (npy_intp i = 0; i < ind_size; i++) {
+        npy_intp indval = *((npy_intp *)ind_ptr);
+        if (check_and_adjust_index(&indval, fancy_dim, 1, _save) < 0) {
+            return -1;
+        }
+        ind_ptr += ind_stride;
+    }
+
+    outer_size = PyArray_DIM(self, 0);
+
+    NPY_BEGIN_THREADS_THRESHOLDED(outer_size * ind_size);
+    for (npy_intp outer = 0; outer < outer_size; outer++) {
+        char *outer_dst = base_ptr + outer * self_outer_stride;
+        ind_ptr = ind_base;
+
+        for (npy_intp j = 0; j < ind_size; j++) {
+            npy_intp indval = *((npy_intp *)ind_ptr);
+            char *dst;
+
+            if (indval < 0) {
+                indval += fancy_dim;
+            }
+            dst = outer_dst + indval * self_fancy_stride;
+
+            if (is_aligned && (
+                    itemsize == 1 || itemsize == 2 || itemsize == 4 ||
+                    itemsize == 8 || itemsize == 16)) {
+                copy_scalar_to_c_subspace(dst, value_ptr, itemsize, trailing_size);
+            }
+            else {
+                char *args[2] = {value_ptr, dst};
+                npy_intp strides[2] = {value_stride, itemsize};
+                if (NPY_UNLIKELY(cast_info->func(&cast_info->context,
+                        args, &trailing_size, strides,
+                        cast_info->auxdata) < 0)) {
+                    NPY_END_THREADS;
+                    return -1;
+                }
+            }
+
+            ind_ptr += ind_stride;
+        }
+    }
+    NPY_END_THREADS;
+
+    return 0;
+}
+#endif
+
 
 /*
  * Implements boolean indexing. This produces a one-dimensional
@@ -1642,6 +2103,56 @@ array_subscript(PyArrayObject *self, PyObject *op)
         }
     }
 
+    if (index_type == (HAS_FANCY | HAS_ELLIPSIS) &&
+            index_num == 2 &&
+            indices[0].type == HAS_FANCY &&
+            indices[1].type == HAS_ELLIPSIS &&
+            indices[1].value == PyArray_NDIM(self) - 1 &&
+            PyArray_NDIM(self) > 1) {
+        PyArrayObject *ind = (PyArrayObject *)indices[0].object;
+
+        NPY_ARRAYMETHOD_FLAGS transfer_flags;
+        npy_intp itemsize = PyArray_ITEMSIZE(self);
+        int is_aligned = IsUintAligned(self);
+
+        if (PyArray_GetDTypeTransferFunction(is_aligned,
+                itemsize, itemsize,
+                PyArray_DESCR(self), PyArray_DESCR(self),
+                0, &cast_info, &transfer_flags) != NPY_SUCCEED) {
+            goto finish;
+        }
+
+        result = mapiter_trivial_get_c_subspace(
+                self, ind, is_aligned, &cast_info);
+        if (result != NULL) {
+            goto wrap_out_array;
+        }
+        if (PyErr_Occurred()) {
+            goto finish;
+        }
+        NPY_cast_info_xfree(&cast_info);
+    }
+
+    if ((index_type == (HAS_SLICE | HAS_FANCY) ||
+            index_type == (HAS_SLICE | HAS_FANCY | HAS_ELLIPSIS)) &&
+            (index_num == 2 || index_num == 3) &&
+            indices[0].type == HAS_SLICE &&
+            indices[1].type == HAS_FANCY &&
+            (index_num == 2 ||
+                    (indices[2].type == HAS_ELLIPSIS &&
+                     indices[2].value == PyArray_NDIM(self) - 2))) {
+        PyArrayObject *ind = (PyArrayObject *)indices[1].object;
+
+        result = mapiter_trivial_get_axis1_c_subspace(
+                self, ind, indices[0].object);
+        if (result != NULL) {
+            goto wrap_out_array;
+        }
+        if (PyErr_Occurred()) {
+            goto finish;
+        }
+    }
+
     /* fancy indexing has to be used. And view is the subspace. */
     mit = (PyArrayMapIterObject *)PyArray_MapIterNew(indices, index_num,
                                                      index_type,
@@ -2066,6 +2577,72 @@ array_assign_subscript(PyArrayObject *self, PyObject *ind, PyObject *op)
             goto success;
         }
     }
+
+#if defined(NPY_CPU_ARMEL_AARCH64) || defined(NPY_CPU_ARMEB_AARCH64)
+    if ((index_type == (HAS_SLICE | HAS_FANCY) ||
+            index_type == (HAS_SLICE | HAS_FANCY | HAS_ELLIPSIS)) &&
+            (index_num == 2 || index_num == 3) && tmp_arr &&
+            indices[0].type == HAS_SLICE &&
+            indices[1].type == HAS_FANCY &&
+            (index_num == 2 ||
+                    (indices[2].type == HAS_ELLIPSIS &&
+                     indices[2].value == PyArray_NDIM(self) - 2)) &&
+            PyArray_EquivTypes(PyArray_DESCR(self), PyArray_DESCR(tmp_arr))) {
+        PyArrayObject *ind = (PyArrayObject *)indices[1].object;
+
+        NPY_ARRAYMETHOD_FLAGS transfer_flags;
+        npy_intp itemsize = PyArray_ITEMSIZE(self);
+        int is_aligned = IsUintAligned(self) && IsUintAligned(tmp_arr);
+
+        if (PyArray_GetDTypeTransferFunction(
+                    is_aligned, itemsize, itemsize,
+                    PyArray_DESCR(tmp_arr), PyArray_DESCR(self),
+                    0, &cast_info, &transfer_flags) != NPY_SUCCEED) {
+            goto fail;
+        }
+
+        i = mapiter_trivial_set_axis1_c_subspace_scalar(
+                self, ind, tmp_arr, indices[0].object, is_aligned, &cast_info);
+        if (i == 0) {
+            goto success;
+        }
+        if (i < 0) {
+            goto fail;
+        }
+        NPY_cast_info_xfree(&cast_info);
+    }
+
+    if (index_type == (HAS_FANCY | HAS_ELLIPSIS) &&
+            index_num == 2 && tmp_arr &&
+            indices[0].type == HAS_FANCY &&
+            indices[1].type == HAS_ELLIPSIS &&
+            indices[1].value == PyArray_NDIM(self) - 1 &&
+            PyArray_NDIM(self) > 1 &&
+            PyArray_EquivTypes(PyArray_DESCR(self), PyArray_DESCR(tmp_arr))) {
+        PyArrayObject *ind = (PyArrayObject *)indices[0].object;
+
+        NPY_ARRAYMETHOD_FLAGS transfer_flags;
+        npy_intp itemsize = PyArray_ITEMSIZE(self);
+        int is_aligned = IsUintAligned(self) && IsUintAligned(tmp_arr);
+
+        if (PyArray_GetDTypeTransferFunction(
+                    is_aligned, itemsize, itemsize,
+                    PyArray_DESCR(tmp_arr), PyArray_DESCR(self),
+                    0, &cast_info, &transfer_flags) != NPY_SUCCEED) {
+            goto fail;
+        }
+
+        i = mapiter_trivial_set_c_subspace_scalar(
+                self, ind, tmp_arr, is_aligned, &cast_info);
+        if (i == 0) {
+            goto success;
+        }
+        if (i < 0) {
+            goto fail;
+        }
+        NPY_cast_info_xfree(&cast_info);
+    }
+#endif
 
     /*
      * NOTE: If tmp_arr was not allocated yet, mit should
