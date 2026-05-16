@@ -1015,6 +1015,14 @@ foreach gen_mtargets : [
     ]
   ],
   [
+    'loops_minmax_hwy.dispatch.h',
+    'src/umath/loops_minmax_hwy.dispatch.cpp',
+    use_highway ? [
+      X86_V4, X86_V3, X86_V2,
+      SVE, ASIMD, NEON
+    ] : []
+  ],
+  [
     'loops_modulo.dispatch.h',
     src_file.process('src/umath/loops_modulo.dispatch.c.src'),
     [
@@ -1253,6 +1261,14 @@ src_umath = umath_gen_headers + [
   'src/umath/string_ufuncs.cpp',
   'src/umath/stringdtype_ufuncs.cpp',
   'src/umath/wrapping_array_method.c',
+  # Highway SIMD complex maximum/minimum
+  'src/umath/loops_complex_maxmin.dispatch.cpp',
+  'src/umath/loops_complex_maxmin.h',
+  # Highway SIMD integer maximum/minimum
+  'src/umath/loops_minmax_hwy.dispatch.cpp',
+  'src/umath/loops_minmax_hwy.h',
+  'src/umath/loops_minmax_hwy_avail.c',
+  # Highway SIMD floor division
   'src/umath/loops_arithmetic_floor_hwy.h',
   'src/umath/loops_arithmetic_floor_hwy_avail.c',
   # For testing. Eventually, should use public API and be separate:
