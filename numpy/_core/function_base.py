@@ -425,7 +425,7 @@ def geomspace(start, stop, num=50, endpoint=True, dtype=None, axis=0):
         # scalar path.  A single vectorized complex multiply/divide pass can
         # differ by a few ulps from stacking repeated scalar geomspace calls,
         # which breaks exact-equality tests for array-like endpoints.
-        start_b, stop_b = _nx.broadcast_arrays(start, stop)
+        start_b, stop_b = np.broadcast_arrays(start, stop)
         if num < 0:
             raise ValueError(
                 "Number of samples, %s, must be non-negative." % num
