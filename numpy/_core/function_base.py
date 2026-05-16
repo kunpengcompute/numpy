@@ -420,6 +420,28 @@ def geomspace(start, stop, num=50, endpoint=True, dtype=None, axis=0):
         # complex to dtype('complex128'), for instance
         dtype = _nx.dtype(dtype)
 
+    if dt.kind == 'c' and (start.ndim > 0 or stop.ndim > 0):
+        # Keep array/scalar complex broadcasting bitwise consistent with the
+        # scalar path.  A single vectorized complex multiply/divide pass can
+        # differ by a few ulps from stacking repeated scalar geomspace calls,
+        # which breaks exact-equality tests for array-like endpoints.
+        start_b, stop_b = _nx.broadcast_arrays(start, stop)
+        if num < 0:
+            raise ValueError(
+                "Number of samples, %s, must be non-negative." % num
+            )
+        if num == 0:
+            result = _nx.empty((0,) + start_b.shape, dtype=dt)
+        else:
+            cols = [
+                geomspace(_start, _stop, num=num, endpoint=endpoint, dtype=dt)
+                for _start, _stop in zip(start_b.flat, stop_b.flat)
+            ]
+            result = _nx.stack(cols, axis=-1).reshape((num,) + start_b.shape)
+        if axis != 0:
+            result = _nx.moveaxis(result, 0, axis)
+        return result.astype(dtype, copy=False)
+
     # Promote both arguments to the same dtype in case, for instance, one is
     # complex and another is negative and log would produce NaN otherwise.
     # Copy since we may change things in-place further down.
