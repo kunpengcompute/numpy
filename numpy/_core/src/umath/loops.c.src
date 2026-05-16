@@ -20,10 +20,16 @@
 
 #include "ufunc_object.h"
 
+#include <float.h>
+#include <stdint.h>
 #include <string.h> /* for memchr */
 
 /* Use Libdivide for faster division */
 #include "numpy/libdivide/libdivide.h"
+
+#if defined(__aarch64__)
+    #include <arm_neon.h>
+#endif
 
 /*
  * cutoff blocksize for pairwise summation
@@ -1550,10 +1556,28 @@ LONGDOUBLE_ldexp(char **args, npy_intp const *dimensions, npy_intp const *steps,
  * # kind = add, subtract, multiply, divide#
  * # OP = +, -, *, /#
  * # PW = 1, 0, 0, 0#
+ * # is_mul = 0, 0, 1, 0#
  */
 NPY_NO_EXPORT void
 HALF_@kind@(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
+    if (!IS_BINARY_REDUCE && args[0] == args[1] && steps[0] == steps[1] &&
+            steps[0] == steps[2] && steps[0] == sizeof(npy_half)) {
+        char *src = args[0];
+        char *dst = args[2];
+        npy_intp len = dimensions[0];
+        for (; len > 0; --len, src += steps[0], dst += steps[2]) {
+            const float in1 = npy_half_to_float(*(npy_half *)src);
+#if @PW@
+            *((npy_half *)dst) = npy_float_to_half(in1 + in1);
+#elif @is_mul@
+            *((npy_half *)dst) = npy_float_to_half(in1 * in1);
+#else
+            *((npy_half *)dst) = npy_float_to_half(in1 @OP@ in1);
+#endif
+        }
+        return;
+    }
     if (IS_BINARY_REDUCE) {
         char *iop1 = args[0];
         float io1 = npy_half_to_float(*(npy_half *)iop1);
@@ -1982,6 +2006,53 @@ HALF_ldexp_int64(char **args, npy_intp const *dimensions, npy_intp const *steps,
 #define CEQ(xr,xi,yr,yi) (xr == yr && xi == yi)
 #define CNE(xr,xi,yr,yi) (xr != yr || xi != yi)
 
+#if defined(__aarch64__)
+static inline float32x4_t
+neon_cfloat_div_step_re(float32x4_t a_re, float32x4_t a_im,
+                        float32x4_t b_re, float32x4_t b_im)
+{
+    float32x4_t b_re_abs = vabsq_f32(b_re);
+    float32x4_t b_im_abs = vabsq_f32(b_im);
+    uint32x4_t mask = vcgeq_f32(b_re_abs, b_im_abs);
+
+    float32x4_t ratio = vdivq_f32(
+            vbslq_f32(mask, b_im, b_re),
+            vbslq_f32(mask, b_re, b_im));
+    float32x4_t den = vmlaq_f32(
+            vbslq_f32(mask, b_re, b_im),
+            vbslq_f32(mask, b_im, b_re),
+            ratio);
+    float32x4_t scl = vdivq_f32(vdupq_n_f32(1.0f), den);
+    float32x4_t num = vmlaq_f32(
+            vbslq_f32(mask, a_re, a_im),
+            vbslq_f32(mask, a_im, a_re),
+            ratio);
+    return vmulq_f32(num, scl);
+}
+
+static inline float32x4_t
+neon_cfloat_div_step_im(float32x4_t a_re, float32x4_t a_im,
+                        float32x4_t b_re, float32x4_t b_im)
+{
+    float32x4_t b_re_abs = vabsq_f32(b_re);
+    float32x4_t b_im_abs = vabsq_f32(b_im);
+    uint32x4_t mask = vcgeq_f32(b_re_abs, b_im_abs);
+
+    float32x4_t ratio = vdivq_f32(
+            vbslq_f32(mask, b_im, b_re),
+            vbslq_f32(mask, b_re, b_im));
+    float32x4_t den = vmlaq_f32(
+            vbslq_f32(mask, b_re, b_im),
+            vbslq_f32(mask, b_im, b_re),
+            ratio);
+    float32x4_t scl = vdivq_f32(vdupq_n_f32(1.0f), den);
+    float32x4_t num = vsubq_f32(
+            vbslq_f32(mask, a_im, vmulq_f32(a_im, ratio)),
+            vbslq_f32(mask, vmulq_f32(a_re, ratio), a_re));
+    return vmulq_f32(num, scl);
+}
+#endif
+
 /**begin repeat
  * complex types
  * #TYPE = CFLOAT, CDOUBLE, CLONGDOUBLE#
@@ -1989,6 +2060,7 @@ HALF_ldexp_int64(char **args, npy_intp const *dimensions, npy_intp const *steps,
  * #c = f, , l#
  * #C = F, , L#
  * #SIMD = 1, 1, 0#
+ * #is_cfloat = 1, 0, 0#
  */
 
 #if !@SIMD@
@@ -2096,6 +2168,75 @@ NPY_NO_EXPORT int @TYPE@_multiply_indexed
 NPY_NO_EXPORT void
 @TYPE@_divide(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
+#if @is_cfloat@ && defined(__aarch64__)
+    if (steps[0] == 2 * (npy_intp)sizeof(@ftype@) &&
+            steps[1] == 2 * (npy_intp)sizeof(@ftype@) &&
+            steps[2] == 2 * (npy_intp)sizeof(@ftype@)) {
+        const float32x4_t zero = vdupq_n_f32(0.0f);
+        const float32x4_t fin_max = vdupq_n_f32(FLT_MAX);
+        char *src0 = args[0], *src1 = args[1], *dst = args[2];
+        npy_intp len = dimensions[0];
+
+        while (len >= 4) {
+            float32x4x2_t a = vld2q_f32((const float *)src0);
+            float32x4x2_t b = vld2q_f32((const float *)src1);
+
+            uint32x4_t a_re_finite = vcleq_f32(vabsq_f32(a.val[0]), fin_max);
+            uint32x4_t a_im_finite = vcleq_f32(vabsq_f32(a.val[1]), fin_max);
+            uint32x4_t b_re_finite = vcleq_f32(vabsq_f32(b.val[0]), fin_max);
+            uint32x4_t b_im_finite = vcleq_f32(vabsq_f32(b.val[1]), fin_max);
+            uint32x4_t b_nonzero = vorrq_u32(
+                    vcgtq_f32(vabsq_f32(b.val[0]), zero),
+                    vcgtq_f32(vabsq_f32(b.val[1]), zero));
+            uint32x4_t ok = vandq_u32(
+                    vandq_u32(vandq_u32(a_re_finite, a_im_finite),
+                              vandq_u32(b_re_finite, b_im_finite)),
+                    b_nonzero);
+            uint64x2_t ok64 = vreinterpretq_u64_u32(ok);
+            if ((vgetq_lane_u64(ok64, 0) & vgetq_lane_u64(ok64, 1)) != UINT64_MAX) {
+                break;
+            }
+
+            float32x4x2_t r;
+            r.val[0] = neon_cfloat_div_step_re(a.val[0], a.val[1], b.val[0], b.val[1]);
+            r.val[1] = neon_cfloat_div_step_im(a.val[0], a.val[1], b.val[0], b.val[1]);
+            vst2q_f32((float *)dst, r);
+
+            src0 += 8 * (npy_intp)sizeof(@ftype@);
+            src1 += 8 * (npy_intp)sizeof(@ftype@);
+            dst += 8 * (npy_intp)sizeof(@ftype@);
+            len -= 4;
+        }
+
+        for (; len > 0; --len, src0 += steps[0], src1 += steps[1], dst += steps[2]) {
+            const @ftype@ in1r = ((@ftype@ *)src0)[0];
+            const @ftype@ in1i = ((@ftype@ *)src0)[1];
+            const @ftype@ in2r = ((@ftype@ *)src1)[0];
+            const @ftype@ in2i = ((@ftype@ *)src1)[1];
+            const @ftype@ in2r_abs = npy_fabs@c@(in2r);
+            const @ftype@ in2i_abs = npy_fabs@c@(in2i);
+            if (in2r_abs >= in2i_abs) {
+                if (in2r_abs == 0 && in2i_abs == 0) {
+                    ((@ftype@ *)dst)[0] = in1r/in2r_abs;
+                    ((@ftype@ *)dst)[1] = in1i/in2i_abs;
+                }
+                else {
+                    const @ftype@ rat = in2i/in2r;
+                    const @ftype@ scl = 1.0@c@/(in2r + in2i*rat);
+                    ((@ftype@ *)dst)[0] = (in1r + in1i*rat)*scl;
+                    ((@ftype@ *)dst)[1] = (in1i - in1r*rat)*scl;
+                }
+            }
+            else {
+                const @ftype@ rat = in2r/in2i;
+                const @ftype@ scl = 1.0@c@/(in2i + in2r*rat);
+                ((@ftype@ *)dst)[0] = (in1r*rat + in1i)*scl;
+                ((@ftype@ *)dst)[1] = (in1i*rat - in1r)*scl;
+            }
+        }
+        return;
+    }
+#endif
     BINARY_LOOP {
         const @ftype@ in1r = ((@ftype@ *)ip1)[0];
         const @ftype@ in1i = ((@ftype@ *)ip1)[1];
