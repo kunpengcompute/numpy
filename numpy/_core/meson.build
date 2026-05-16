@@ -1049,6 +1049,11 @@ foreach gen_mtargets : [
     ]
   ],
   [
+    'loops_power.dispatch.h',
+    'src/umath/loops_power.dispatch.cpp',
+    [X86_V4, X86_V3, SVE, NEON_VFPV4]
+  ],
+  [
     'loops_umath_fp.dispatch.h',
     src_file.process('src/umath/loops_umath_fp.dispatch.c.src'),
     [X86_V4]
