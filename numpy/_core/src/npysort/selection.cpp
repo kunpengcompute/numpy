@@ -28,10 +28,14 @@
 #include <utility>
 #include "x86_simd_qsort.hpp"
 #include "highway_qsort.hpp"
+#if defined(__aarch64__) || defined(__powerpc64__) || defined(__PPC64__)
 #include "partition_highway.hpp"
+#define NPY_HAVE_PARTITION_HIGHWAY 1
+#else
+#define NPY_HAVE_PARTITION_HIGHWAY 0
+#endif
 
 #define NOT_USED NPY_UNUSED(unused)
-#define DISABLE_HIGHWAY_OPTIMIZATION (defined(__arm__) || defined(__aarch64__))
 
 template<typename T>
 inline bool quickselect_dispatch(T* v, npy_intp num, npy_intp kth)
@@ -275,6 +279,7 @@ static inline void
 unguarded_partition_(type *v, npy_intp *tosort, const type pivot, npy_intp *ll,
                      npy_intp *hh)
 {
+#if NPY_HAVE_PARTITION_HIGHWAY
     if constexpr (!arg && std::is_same_v<type, npy_int64>) {
         npy_intp vec_ll = *ll;
         npy_intp vec_hh = *hh;
@@ -303,6 +308,7 @@ unguarded_partition_(type *v, npy_intp *tosort, const type pivot, npy_intp *ll,
             return;
         }
     }
+#endif
 
     Idx<arg> idx(tosort);
     Sortee<type, arg> sortee(v, tosort);
