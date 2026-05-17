@@ -105,4 +105,4 @@ numpy/version.py linguist-generated
 ./doc/source/dev/gitwash/git_links.inc text
 ./doc/source/reference/simd/*.inc text
 ./numpy/_core/src/_simd/*.inc text diff=c
-
+* text=auto eol=lf
