@@ -26,7 +26,14 @@ static inline int sorted_status(T *arr, npy_intp num)
         return 1;
     bool maybe_ascending = true;
     bool maybe_descending = true;
+    bool has_nan = false;
     for (npy_intp i = 1; i < num; ++i) {
+        if constexpr (std::is_floating_point_v<T>) {
+            if (std::isnan(arr[i]) || std::isnan(arr[i - 1])) {
+                has_nan = true;
+                continue;
+            }
+        }
         if (arr[i] < arr[i - 1]) {
             maybe_ascending = false;
             if (!maybe_descending) return 0;
@@ -36,6 +43,10 @@ static inline int sorted_status(T *arr, npy_intp num)
             if (!maybe_ascending) return 0;
         }
     }
+    // NaN breaks the < comparison: with NaN present both flags can
+    // remain true even for unsorted data (e.g. [NaN, 0.5, NaN, NaN]).
+    // Fall through to the actual sort path.
+    if (has_nan) return 0;
     if (maybe_ascending) return 1;
     if (maybe_descending) return -1;
     return 0;

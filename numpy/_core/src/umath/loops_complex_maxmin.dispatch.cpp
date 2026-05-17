@@ -37,9 +37,11 @@ namespace hn = hwy::HWY_NAMESPACE;
  * is handled by the caller checking std::isnan before these macros.
  */
 #define CGE(in1r, in1i, in2r, in2i) \
-        ((in1r) > (in2r) || ((in1r) == (in2r) && (in1i) >= (in2i)))
+        (((in1r) > (in2r) && !std::isnan(in1i) && !std::isnan(in2i)) \
+         || ((in1r) == (in2r) && (in1i) >= (in2i)))
 #define CLE(in1r, in1i, in2r, in2i) \
-        ((in1r) < (in2r) || ((in1r) == (in2r) && (in1i) <= (in2i)))
+        (((in1r) < (in2r) && !std::isnan(in1i) && !std::isnan(in2i)) \
+         || ((in1r) == (in2r) && (in1i) <= (in2i)))
 
 namespace {
 
@@ -98,21 +100,21 @@ simd_map(const T *src1, const T *src2, T *dst, npy_intp n)
         hn::LoadInterleaved2(d, src1 + 2 * i, v1r, v1i);
         hn::LoadInterleaved2(d, src2 + 2 * i, v2r, v2i);
 
+        M nan_in1 = hn::Or(hn::IsNaN(v1r), hn::IsNaN(v1i));
+        M nan_in2 = hn::Or(hn::IsNaN(v2r), hn::IsNaN(v2i));
         M keep_in1;
         if constexpr (IsMax) {
             M r_gt = hn::Gt(v1r, v2r);
             M r_eq = hn::Eq(v1r, v2r);
             M i_ge = hn::Ge(v1i, v2i);
             M cge_mask = hn::Or(r_gt, hn::And(r_eq, i_ge));
-            M nan_mask = hn::Or(hn::IsNaN(v1r), hn::IsNaN(v1i));
-            keep_in1 = hn::Or(nan_mask, cge_mask);
+            keep_in1 = hn::Or(nan_in1, hn::AndNot(cge_mask, nan_in2));
         } else {
             M r_lt = hn::Lt(v1r, v2r);
             M r_eq = hn::Eq(v1r, v2r);
             M i_le = hn::Le(v1i, v2i);
             M cle_mask = hn::Or(r_lt, hn::And(r_eq, i_le));
-            M nan_mask = hn::Or(hn::IsNaN(v1r), hn::IsNaN(v1i));
-            keep_in1 = hn::Or(nan_mask, cle_mask);
+            keep_in1 = hn::Or(nan_in1, hn::AndNot(cle_mask, nan_in2));
         }
 
         V vr = hn::IfThenElse(keep_in1, v1r, v2r);
@@ -148,21 +150,21 @@ simd_reduce(const T *src1, const T *src2, T *dst, npy_intp n)
         V v2r, v2i;
         hn::LoadInterleaved2(d, src2 + 2 * i, v2r, v2i);
 
+        M nan_acc = hn::Or(hn::IsNaN(acc_r), hn::IsNaN(acc_i));
+        M nan_in2 = hn::Or(hn::IsNaN(v2r), hn::IsNaN(v2i));
         M keep_acc;
         if constexpr (IsMax) {
             M r_gt = hn::Gt(acc_r, v2r);
             M r_eq = hn::Eq(acc_r, v2r);
             M i_ge = hn::Ge(acc_i, v2i);
-            keep_acc = hn::Or(
-                    hn::Or(hn::IsNaN(acc_r), hn::IsNaN(acc_i)),
-                    hn::Or(r_gt, hn::And(r_eq, i_ge)));
+            M cge_mask = hn::Or(r_gt, hn::And(r_eq, i_ge));
+            keep_acc = hn::Or(nan_acc, hn::AndNot(cge_mask, nan_in2));
         } else {
             M r_lt = hn::Lt(acc_r, v2r);
             M r_eq = hn::Eq(acc_r, v2r);
             M i_le = hn::Le(acc_i, v2i);
-            keep_acc = hn::Or(
-                    hn::Or(hn::IsNaN(acc_r), hn::IsNaN(acc_i)),
-                    hn::Or(r_lt, hn::And(r_eq, i_le)));
+            M cle_mask = hn::Or(r_lt, hn::And(r_eq, i_le));
+            keep_acc = hn::Or(nan_acc, hn::AndNot(cle_mask, nan_in2));
         }
 
         acc_r = hn::IfThenElse(keep_acc, acc_r, v2r);
@@ -219,19 +221,20 @@ simd_bcast1(const T *src1, const T *src2, T *dst, npy_intp n)
         V v2r, v2i;
         hn::LoadInterleaved2(d, src2 + 2 * i, v2r, v2i);
 
+        M nan_2 = hn::Or(hn::IsNaN(v2r), hn::IsNaN(v2i));
         M keep_in1;
         if constexpr (IsMax) {
             M r_gt = hn::Gt(v1r, v2r);
             M r_eq = hn::Eq(v1r, v2r);
             M i_ge = hn::Ge(v1i, v2i);
-            keep_in1 = hn::Or(nan_1,
-                    hn::Or(r_gt, hn::And(r_eq, i_ge)));
+            M cge_mask = hn::Or(r_gt, hn::And(r_eq, i_ge));
+            keep_in1 = hn::Or(nan_1, hn::AndNot(cge_mask, nan_2));
         } else {
             M r_lt = hn::Lt(v1r, v2r);
             M r_eq = hn::Eq(v1r, v2r);
             M i_le = hn::Le(v1i, v2i);
-            keep_in1 = hn::Or(nan_1,
-                    hn::Or(r_lt, hn::And(r_eq, i_le)));
+            M cle_mask = hn::Or(r_lt, hn::And(r_eq, i_le));
+            keep_in1 = hn::Or(nan_1, hn::AndNot(cle_mask, nan_2));
         }
         hn::StoreInterleaved2(
                 hn::IfThenElse(keep_in1, v1r, v2r),
@@ -261,21 +264,21 @@ simd_bcast2(const T *src1, const T *src2, T *dst, npy_intp n)
         V v1r, v1i;
         hn::LoadInterleaved2(d, src1 + 2 * i, v1r, v1i);
 
+        M nan_in1 = hn::Or(hn::IsNaN(v1r), hn::IsNaN(v1i));
+        M nan_in2 = hn::Or(hn::IsNaN(v2r), hn::IsNaN(v2i));
         M keep_in1;
         if constexpr (IsMax) {
             M r_gt = hn::Gt(v1r, v2r);
             M r_eq = hn::Eq(v1r, v2r);
             M i_ge = hn::Ge(v1i, v2i);
-            keep_in1 = hn::Or(
-                    hn::Or(hn::IsNaN(v1r), hn::IsNaN(v1i)),
-                    hn::Or(r_gt, hn::And(r_eq, i_ge)));
+            M cge_mask = hn::Or(r_gt, hn::And(r_eq, i_ge));
+            keep_in1 = hn::Or(nan_in1, hn::AndNot(cge_mask, nan_in2));
         } else {
             M r_lt = hn::Lt(v1r, v2r);
             M r_eq = hn::Eq(v1r, v2r);
             M i_le = hn::Le(v1i, v2i);
-            keep_in1 = hn::Or(
-                    hn::Or(hn::IsNaN(v1r), hn::IsNaN(v1i)),
-                    hn::Or(r_lt, hn::And(r_eq, i_le)));
+            M cle_mask = hn::Or(r_lt, hn::And(r_eq, i_le));
+            keep_in1 = hn::Or(nan_in1, hn::AndNot(cle_mask, nan_in2));
         }
         hn::StoreInterleaved2(
                 hn::IfThenElse(keep_in1, v1r, v2r),
