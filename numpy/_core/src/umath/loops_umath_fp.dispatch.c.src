@@ -61,7 +61,7 @@ simd_@func@_@sfx@(const npyv_lanetype_@sfx@ *src, npy_intp ssrc,
  * #func_suffix = f16, 8_ha#
  */
 /**begin repeat1
- * #func = pow, atan2#
+ * #func = atan2#
  */
 
 static void
@@ -139,75 +139,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@func@)
  *  #type = npy_double, npy_float#
  *  #vsub = , f#
  *  #sfx  = f64, f32#
- *  #sqrt  = sqrt, sqrtf#
  */
-/**begin repeat1
- *  #func = power#
- *  #intrin = pow#
- */
-NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@func@)
-(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
-{
-    int stride_zero = steps[1]==0;
-    if (stride_zero) {
-        BINARY_DEFS
-        const @type@ in2 = *(@type@ *)ip2;
-        int fastop_found = 1;
-        BINARY_LOOP_SLIDING {
-            const @type@ in1 = *(@type@ *)ip1;
-            if (in2 == -1.0) {
-                *(@type@ *)op1 = 1.0 / in1;
-            }
-            else if (in2 == 0.0) {
-                *(@type@ *)op1 = 1.0;
-            }
-            else if (in2 == 0.5) {
-                *(@type@ *)op1 = @sqrt@(in1);
-            }
-            else if (in2 == 1.0) {
-                *(@type@ *)op1 = in1;
-            }
-            else if (in2 == 2.0) {
-                *(@type@ *)op1 = in1 * in1;
-            }
-            else {
-                fastop_found = 0;
-                break;
-            }
-        }
-        if (fastop_found) {
-            return;
-        }
-    }
-#if NPY_SIMD && defined(NPY_HAVE_AVX512_SKX) && defined(NPY_CAN_LINK_SVML)
-    const @type@ *src1 = (@type@*)args[0];
-    const @type@ *src2 = (@type@*)args[1];
-          @type@ *dst  = (@type@*)args[2];
-
-    const npy_intp len = dimensions[0];
-
-    if (!is_mem_overlap(src1, steps[0], dst, steps[2], len) &&
-        !is_mem_overlap(src2, steps[1], dst, steps[2], len) &&
-        npyv_loadable_stride_@sfx@(steps[0]) &&
-        npyv_loadable_stride_@sfx@(steps[1]) &&
-        npyv_storable_stride_@sfx@(steps[2])
-    ) {
-        const npy_intp ssrc1 = steps[0] / sizeof(@type@);
-        const npy_intp ssrc2 = steps[1] / sizeof(@type@);
-        const npy_intp sdst  = steps[2] / sizeof(@type@);
-
-        simd_@intrin@_@sfx@(src1, ssrc1, src2, ssrc2, dst, sdst, len);
-        return;
-    }
-#endif
-    BINARY_LOOP {
-        const @type@ in1 = *(@type@ *)ip1;
-        const @type@ in2 = *(@type@ *)ip2;
-        *(@type@ *)op1 = npy_@intrin@@vsub@(in1, in2);
-    }
-}
-/**end repeat1**/
-
 /**begin repeat1
  *  #func = arctan2#
  *  #intrin = atan2#

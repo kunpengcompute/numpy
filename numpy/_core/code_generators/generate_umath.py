@@ -478,7 +478,7 @@ defdict = {
           None,
           TD(ints),
           TD('e', f='pow', astype={'e': 'f'}),
-          TD('fd', dispatch=[('loops_umath_fp', 'fd')]),
+          TD('fd', dispatch=[('loops_power', 'fd')]),
           TD(inexact, f='pow', astype={'e': 'f'}),
           TD(O, f='npy_ObjectPower'),
           ),
