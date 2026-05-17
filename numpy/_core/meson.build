@@ -1023,6 +1023,14 @@ foreach gen_mtargets : [
     ] : []
   ],
   [
+    'loops_arithm_sum_hwy.dispatch.h',
+    'src/umath/loops_arithm_sum_hwy.dispatch.cpp',
+    use_highway ? [
+      X86_V4, X86_V3, X86_V2,
+      SVE, ASIMD, NEON
+    ] : []
+  ],
+  [
     'loops_modulo.dispatch.h',
     src_file.process('src/umath/loops_modulo.dispatch.c.src'),
     [
@@ -1271,6 +1279,9 @@ src_umath = umath_gen_headers + [
   # Highway SIMD floor division
   'src/umath/loops_arithmetic_floor_hwy.h',
   'src/umath/loops_arithmetic_floor_hwy_avail.c',
+  # Highway SIMD pairwise sum
+  'src/umath/loops_arithm_sum_hwy.h',
+  'src/umath/loops_arithm_sum_hwy_avail.c',
   # For testing. Eventually, should use public API and be separate:
   'src/umath/_scaled_float_dtype.c',
 ]
