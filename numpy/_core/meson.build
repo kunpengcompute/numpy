@@ -957,6 +957,14 @@ foreach gen_mtargets : [
     ]
   ],
   [
+    'loops_explog.dispatch.h',
+    'src/umath/loops_explog.dispatch.cpp',
+    [
+      ASIMD, NEON,
+      X86_V4, X86_V3,
+    ]
+  ],
+  [
     'loops_exponent_log.dispatch.h',
     src_file.process('src/umath/loops_exponent_log.dispatch.c.src'),
     [
@@ -1008,8 +1016,9 @@ foreach gen_mtargets : [
     'loops_trigonometric.dispatch.h',
     'src/umath/loops_trigonometric.dispatch.cpp',
     [
-      X86_V4, X86_V3,
+      AVX512_SPR, X86_V4, X86_V3,
       VSX4, VSX3, VSX2,
+      ASIMD, NEON,
       NEON_VFPV4,
       VXE2, VXE,
       LSX,
@@ -1019,6 +1028,14 @@ foreach gen_mtargets : [
     'loops_umath_fp.dispatch.h',
     src_file.process('src/umath/loops_umath_fp.dispatch.c.src'),
     [X86_V4]
+  ],
+  [
+    'loops_umath_unary.dispatch.h',
+    'src/umath/loops_umath_unary.dispatch.cpp',
+    [
+      AVX512_SPR, X86_V4,
+      ASIMD, NEON,
+    ]
   ],
   [
     'loops_unary.dispatch.h',
