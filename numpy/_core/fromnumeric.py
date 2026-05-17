@@ -3808,6 +3808,17 @@ def mean(a, axis=None, dtype=None, out=None, keepdims=np._NoValue, *,
     9.0
 
     """
+    if keepdims is np._NoValue and where is np._NoValue:
+        if type(a) is not mu.ndarray:
+            try:
+                mean = a.mean
+            except AttributeError:
+                pass
+            else:
+                return mean(axis=axis, dtype=dtype, out=out)
+
+        return _methods._mean(a, axis, dtype, out)
+
     kwargs = {}
     if keepdims is not np._NoValue:
         kwargs['keepdims'] = keepdims
@@ -4001,6 +4012,18 @@ def std(a, axis=None, dtype=None, out=None, ddof=0, keepdims=np._NoValue, *,
     Percentage execution time saved 30%
 
     """
+    if (keepdims is np._NoValue and where is np._NoValue and
+            mean is np._NoValue and correction is np._NoValue):
+        if type(a) is not mu.ndarray:
+            try:
+                std = a.std
+            except AttributeError:
+                pass
+            else:
+                return std(axis=axis, dtype=dtype, out=out, ddof=ddof)
+
+        return _methods._std(a, axis, dtype, out, ddof)
+
     kwargs = {}
     if keepdims is not np._NoValue:
         kwargs['keepdims'] = keepdims
@@ -4204,6 +4227,18 @@ def var(a, axis=None, dtype=None, out=None, ddof=0, keepdims=np._NoValue, *,
     Percentage execution time saved 32%
 
     """
+    if (keepdims is np._NoValue and where is np._NoValue and
+            mean is np._NoValue and correction is np._NoValue):
+        if type(a) is not mu.ndarray:
+            try:
+                var = a.var
+            except AttributeError:
+                pass
+            else:
+                return var(axis=axis, dtype=dtype, out=out, ddof=ddof)
+
+        return _methods._var(a, axis, dtype, out, ddof)
+
     kwargs = {}
     if keepdims is not np._NoValue:
         kwargs['keepdims'] = keepdims
