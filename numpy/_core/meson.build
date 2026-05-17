@@ -895,6 +895,13 @@ foreach gen_mtargets : [
       ASIMDHP, VSX2,  # VXE FIXME: disable VXE due to runtime segfault
     ] : []
   ],
+  [
+    'partition_highway.dispatch.h',
+    'src/npysort/partition_highway.dispatch.cpp',
+    use_highway ? [
+      ASIMD, VSX2,  # VXE FIXME: disable VXE due to runtime segfault
+    ] : []
+  ],
 ]
 
 

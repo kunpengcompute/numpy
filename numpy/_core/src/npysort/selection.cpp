@@ -24,12 +24,18 @@
 
 #include <array>
 #include <cstdlib>
+#include <type_traits>
 #include <utility>
 #include "x86_simd_qsort.hpp"
 #include "highway_qsort.hpp"
+#if defined(__aarch64__) || defined(__powerpc64__) || defined(__PPC64__)
+#include "partition_highway.hpp"
+#define NPY_HAVE_PARTITION_HIGHWAY 1
+#else
+#define NPY_HAVE_PARTITION_HIGHWAY 0
+#endif
 
 #define NOT_USED NPY_UNUSED(unused)
-#define DISABLE_HIGHWAY_OPTIMIZATION (defined(__arm__) || defined(__aarch64__))
 
 template<typename T>
 inline bool quickselect_dispatch(T* v, npy_intp num, npy_intp kth)
@@ -161,6 +167,43 @@ inexact()
 }
 
 /*
+ * Fast path for inputs that already satisfy the partition invariant around
+ * kth.  This is common for ordered and uniform data.  It is cheap for random
+ * data because it usually fails after checking only a few right-side elements.
+ */
+template <typename Tag, typename IdxT>
+static inline bool
+already_partitioned_(typename Tag::type *v, npy_intp num, npy_intp kth, IdxT idx)
+{
+    using type = typename Tag::type;
+    const type pivot = v[idx(kth)];
+
+    for (npy_intp i = 0; i < kth; ++i) {
+        if (Tag::less(pivot, v[idx(i)])) {
+            return false;
+        }
+    }
+    for (npy_intp i = kth + 1; i < num; ++i) {
+        if (Tag::less(v[idx(i)], pivot)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static inline bool
+use_already_partitioned_check(npy_intp nkth)
+{
+    /*
+     * The already-partitioned fast path is only safe for a single kth request.
+     * Reusing it across ascending multi-kth calls perturbs the pivot stack
+     * ordering assumptions used by introselect_ and can corrupt earlier kth
+     * results when later partitions run.
+     */
+    return nkth == 1;
+}
+
+/*
  * median of 3 pivot strategy
  * gets min and median and moves median to low and min to low + 1
  * for efficient partitioning, see unguarded_partition
@@ -236,6 +279,37 @@ static inline void
 unguarded_partition_(type *v, npy_intp *tosort, const type pivot, npy_intp *ll,
                      npy_intp *hh)
 {
+#if NPY_HAVE_PARTITION_HIGHWAY
+    if constexpr (!arg && std::is_same_v<type, npy_int64>) {
+        npy_intp vec_ll = *ll;
+        npy_intp vec_hh = *hh;
+        int ok = 0;
+        NPY_CPU_DISPATCH_CALL_XB(
+                ok = np::highway::partition_simd::PartitionInt64,
+                (reinterpret_cast<npy_int64 *>(v), *ll, *hh,
+                 static_cast<npy_int64>(pivot), &vec_ll, &vec_hh));
+        if (ok) {
+            *ll = vec_ll;
+            *hh = vec_hh;
+            return;
+        }
+    }
+    else if constexpr (!arg && std::is_same_v<type, npy_double>) {
+        npy_intp vec_ll = *ll;
+        npy_intp vec_hh = *hh;
+        int ok = 0;
+        NPY_CPU_DISPATCH_CALL_XB(
+                ok = np::highway::partition_simd::PartitionDouble,
+                (reinterpret_cast<npy_double *>(v), *ll, *hh,
+                 static_cast<npy_double>(pivot), &vec_ll, &vec_hh));
+        if (ok) {
+            *ll = vec_ll;
+            *hh = vec_hh;
+            return;
+        }
+    }
+#endif
+
     Idx<arg> idx(tosort);
     Sortee<type, arg> sortee(v, tosort);
 
@@ -462,6 +536,12 @@ introselect_noarg(void *v, npy_intp num, npy_intp kth, npy_intp *pivots,
                   npy_intp *npiv, npy_intp nkth, void *)
 {
     using T = typename std::conditional<std::is_same_v<Tag, npy::half_tag>, np::Half, typename Tag::type>::type;
+    if (use_already_partitioned_check(nkth) &&
+            already_partitioned_<Tag>((typename Tag::type *)v, num, kth,
+                                      Idx<false>(nullptr))) {
+        store_pivot(kth, kth, pivots, npiv);
+        return 0;
+    }
     if ((nkth == 1) && (quickselect_dispatch((T *)v, num, kth))) {
         return 0;
     }
@@ -475,6 +555,12 @@ introselect_arg(void *v, npy_intp *tosort, npy_intp num, npy_intp kth,
                 npy_intp *pivots, npy_intp *npiv, npy_intp nkth, void *)
 {
     using T = typename Tag::type;
+    if (use_already_partitioned_check(nkth) &&
+            already_partitioned_<Tag>((typename Tag::type *)v, num, kth,
+                                      Idx<true>(tosort))) {
+        store_pivot(kth, kth, pivots, npiv);
+        return 0;
+    }
     if ((nkth == 1) && (argquickselect_dispatch((T *)v, tosort, num, kth))) {
         return 0;
     }
