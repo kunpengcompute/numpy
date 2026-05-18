@@ -679,22 +679,6 @@ npyv_cast_float32_to_float64_contig(
     return 0;
 }
 
-static NPY_GCC_OPT_3 int
-npyv_cast_float32_to_int64_contig(
-        const npy_float *src, npy_int64 *dst, npy_intp len)
-{
-    npy_intp i = 0;
-    for (; i <= len - 4; i += 4) {
-        float32x4_t v = vld1q_f32(src + i);
-        vst1q_s64(dst + i, vcvtq_s64_f64(vcvt_f64_f32(vget_low_f32(v))));
-        vst1q_s64(dst + i + 2,
-                vcvtq_s64_f64(vcvt_f64_f32(vget_high_f32(v))));
-    }
-    for (; i < len; ++i) {
-        dst[i] = (npy_int64)src[i];
-    }
-    return 0;
-}
 #endif
 
 /************* STRIDED CASTING SPECIALIZED FUNCTIONS *************/
@@ -1075,7 +1059,7 @@ static GCC_CAST_OPT_LEVEL int
     assert(N == 0 || npy_is_aligned(dst, NPY_ALIGNOF(_TYPE2)));
 #endif
 
-#if @contig@ && defined(NPY_HAVE_NEON) && defined(__aarch64__)
+#if @contig@ && !@same_value@ && defined(NPY_HAVE_NEON) && defined(__aarch64__)
     if (!@is_bool1@ && !@is_unsigned1@ && !@is_emu_half1@ &&
             !@is_native_half1@ && !@is_float1@ && !@is_double1@ &&
             !@is_complex1@ && sizeof(_TYPE1) == 2 &&
@@ -1142,13 +1126,6 @@ static GCC_CAST_OPT_LEVEL int
             @is_double2@ && !@is_complex2@ && sizeof(_TYPE2) == 8) {
         return npyv_cast_float32_to_float64_contig(
                 (const npy_float *)src, (npy_double *)dst, N);
-    }
-    else if (@is_float1@ && !@is_complex1@ && sizeof(_TYPE1) == 4 &&
-            !@is_bool2@ && !@is_unsigned2@ && !@is_emu_half2@ &&
-            !@is_native_half2@ && !@is_float2@ && !@is_double2@ &&
-            !@is_complex2@ && sizeof(_TYPE2) == 8) {
-        return npyv_cast_float32_to_int64_contig(
-                (const npy_float *)src, (npy_int64 *)dst, N);
     }
 #endif
 
