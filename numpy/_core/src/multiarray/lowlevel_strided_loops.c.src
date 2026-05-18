@@ -23,6 +23,7 @@
 #include "array_assign.h"
 #include "array_method.h"
 #include "usertypes.h"
+#include "simd/simd.h"
 
 #include "umathmodule.h"
 #include "gil_utils.h"
@@ -525,6 +526,177 @@ NPY_NO_EXPORT PyArrayMethod_StridedLoop *
 
 /**end repeat**/
 
+#if defined(NPY_HAVE_NEON) && defined(__aarch64__)
+static NPY_GCC_OPT_3 int
+npyv_cast_int16_to_int32_contig(
+        const npy_int16 *src, npy_int32 *dst, npy_intp len)
+{
+    npy_intp i = 0;
+    for (; i <= len - 8; i += 8) {
+        int16x8_t v = vld1q_s16(src + i);
+        vst1q_s32(dst + i, vmovl_s16(vget_low_s16(v)));
+        vst1q_s32(dst + i + 4, vmovl_s16(vget_high_s16(v)));
+    }
+    for (; i < len; ++i) {
+        dst[i] = src[i];
+    }
+    return 0;
+}
+
+static NPY_GCC_OPT_3 int
+npyv_cast_int16_to_float32_contig(
+        const npy_int16 *src, npy_float *dst, npy_intp len)
+{
+    npy_intp i = 0;
+    for (; i <= len - 8; i += 8) {
+        int16x8_t v = vld1q_s16(src + i);
+        vst1q_f32(dst + i, vcvtq_f32_s32(vmovl_s16(vget_low_s16(v))));
+        vst1q_f32(dst + i + 4, vcvtq_f32_s32(vmovl_s16(vget_high_s16(v))));
+    }
+    for (; i < len; ++i) {
+        dst[i] = (npy_float)src[i];
+    }
+    return 0;
+}
+
+static NPY_GCC_OPT_3 int
+npyv_cast_int16_to_int64_contig(
+        const npy_int16 *src, npy_int64 *dst, npy_intp len)
+{
+    npy_intp i = 0;
+    for (; i <= len - 8; i += 8) {
+        int16x8_t v = vld1q_s16(src + i);
+        int32x4_t lo32 = vmovl_s16(vget_low_s16(v));
+        int32x4_t hi32 = vmovl_s16(vget_high_s16(v));
+        vst1q_s64(dst + i, vmovl_s32(vget_low_s32(lo32)));
+        vst1q_s64(dst + i + 2, vmovl_s32(vget_high_s32(lo32)));
+        vst1q_s64(dst + i + 4, vmovl_s32(vget_low_s32(hi32)));
+        vst1q_s64(dst + i + 6, vmovl_s32(vget_high_s32(hi32)));
+    }
+    for (; i < len; ++i) {
+        dst[i] = src[i];
+    }
+    return 0;
+}
+
+static NPY_GCC_OPT_3 int
+npyv_cast_int16_to_float64_contig(
+        const npy_int16 *src, npy_double *dst, npy_intp len)
+{
+    npy_intp i = 0;
+    for (; i <= len - 8; i += 8) {
+        int16x8_t v = vld1q_s16(src + i);
+        int32x4_t lo32 = vmovl_s16(vget_low_s16(v));
+        int32x4_t hi32 = vmovl_s16(vget_high_s16(v));
+        vst1q_f64(dst + i,
+                vcvtq_f64_s64(vmovl_s32(vget_low_s32(lo32))));
+        vst1q_f64(dst + i + 2,
+                vcvtq_f64_s64(vmovl_s32(vget_high_s32(lo32))));
+        vst1q_f64(dst + i + 4,
+                vcvtq_f64_s64(vmovl_s32(vget_low_s32(hi32))));
+        vst1q_f64(dst + i + 6,
+                vcvtq_f64_s64(vmovl_s32(vget_high_s32(hi32))));
+    }
+    for (; i < len; ++i) {
+        dst[i] = (npy_double)src[i];
+    }
+    return 0;
+}
+
+static NPY_GCC_OPT_3 int
+npyv_cast_int32_to_float32_contig(
+        const npy_int32 *src, npy_float *dst, npy_intp len)
+{
+    npy_intp i = 0;
+    for (; i <= len - 4; i += 4) {
+        vst1q_f32(dst + i, vcvtq_f32_s32(vld1q_s32(src + i)));
+    }
+    for (; i < len; ++i) {
+        dst[i] = (npy_float)src[i];
+    }
+    return 0;
+}
+
+static NPY_GCC_OPT_3 int
+npyv_cast_int32_to_int64_contig(
+        const npy_int32 *src, npy_int64 *dst, npy_intp len)
+{
+    npy_intp i = 0;
+    for (; i <= len - 4; i += 4) {
+        int32x4_t v = vld1q_s32(src + i);
+        vst1q_s64(dst + i, vmovl_s32(vget_low_s32(v)));
+        vst1q_s64(dst + i + 2, vmovl_s32(vget_high_s32(v)));
+    }
+    for (; i < len; ++i) {
+        dst[i] = src[i];
+    }
+    return 0;
+}
+
+static NPY_GCC_OPT_3 int
+npyv_cast_int32_to_float64_contig(
+        const npy_int32 *src, npy_double *dst, npy_intp len)
+{
+    npy_intp i = 0;
+    for (; i <= len - 4; i += 4) {
+        int32x4_t v = vld1q_s32(src + i);
+        vst1q_f64(dst + i, vcvtq_f64_s64(vmovl_s32(vget_low_s32(v))));
+        vst1q_f64(dst + i + 2, vcvtq_f64_s64(vmovl_s32(vget_high_s32(v))));
+    }
+    for (; i < len; ++i) {
+        dst[i] = (npy_double)src[i];
+    }
+    return 0;
+}
+
+static NPY_GCC_OPT_3 int
+npyv_cast_int64_to_float64_contig(
+        const npy_int64 *src, npy_double *dst, npy_intp len)
+{
+    npy_intp i = 0;
+    for (; i <= len - 2; i += 2) {
+        vst1q_f64(dst + i, vcvtq_f64_s64(vld1q_s64(src + i)));
+    }
+    for (; i < len; ++i) {
+        dst[i] = (npy_double)src[i];
+    }
+    return 0;
+}
+
+static NPY_GCC_OPT_3 int
+npyv_cast_float32_to_float64_contig(
+        const npy_float *src, npy_double *dst, npy_intp len)
+{
+    npy_intp i = 0;
+    for (; i <= len - 4; i += 4) {
+        float32x4_t v = vld1q_f32(src + i);
+        vst1q_f64(dst + i, vcvt_f64_f32(vget_low_f32(v)));
+        vst1q_f64(dst + i + 2, vcvt_f64_f32(vget_high_f32(v)));
+    }
+    for (; i < len; ++i) {
+        dst[i] = src[i];
+    }
+    return 0;
+}
+
+static NPY_GCC_OPT_3 int
+npyv_cast_float32_to_int64_contig(
+        const npy_float *src, npy_int64 *dst, npy_intp len)
+{
+    npy_intp i = 0;
+    for (; i <= len - 4; i += 4) {
+        float32x4_t v = vld1q_f32(src + i);
+        vst1q_s64(dst + i, vcvtq_s64_f64(vcvt_f64_f32(vget_low_f32(v))));
+        vst1q_s64(dst + i + 2,
+                vcvtq_s64_f64(vcvt_f64_f32(vget_high_f32(v))));
+    }
+    for (; i < len; ++i) {
+        dst[i] = (npy_int64)src[i];
+    }
+    return 0;
+}
+#endif
+
 /************* STRIDED CASTING SPECIALIZED FUNCTIONS *************/
 
 #if defined(NPY_HAVE_NEON_FP16)
@@ -659,6 +831,7 @@ npy_uint64 _npy_halfbits_to_doublebits(npy_uint16 h){
  * #is_float2 = 0*12, 1, 0, 0, 1, 0, 0#
  * #is_double2 = 0*13, 1, 0, 0, 1, 0#
  * #is_complex2 = 0*15, 1*3#
+ * #is_unsigned2 = 1*6, 0*12#
  */
 
 /**begin repeat2
@@ -900,6 +1073,83 @@ static GCC_CAST_OPT_LEVEL int
    /* sanity check */
     assert(N == 0 || npy_is_aligned(src, NPY_ALIGNOF(_TYPE1)));
     assert(N == 0 || npy_is_aligned(dst, NPY_ALIGNOF(_TYPE2)));
+#endif
+
+#if @contig@ && defined(NPY_HAVE_NEON) && defined(__aarch64__)
+    if (!@is_bool1@ && !@is_unsigned1@ && !@is_emu_half1@ &&
+            !@is_native_half1@ && !@is_float1@ && !@is_double1@ &&
+            !@is_complex1@ && sizeof(_TYPE1) == 2 &&
+            !@is_bool2@ && !@is_unsigned2@ && !@is_emu_half2@ &&
+            !@is_native_half2@ && !@is_float2@ && !@is_double2@ &&
+            !@is_complex2@ && sizeof(_TYPE2) == 4) {
+        return npyv_cast_int16_to_int32_contig(
+                (const npy_int16 *)src, (npy_int32 *)dst, N);
+    }
+    else if (!@is_bool1@ && !@is_unsigned1@ && !@is_emu_half1@ &&
+            !@is_native_half1@ && !@is_float1@ && !@is_double1@ &&
+            !@is_complex1@ && sizeof(_TYPE1) == 2 &&
+            @is_float2@ && !@is_complex2@ && sizeof(_TYPE2) == 4) {
+        return npyv_cast_int16_to_float32_contig(
+                (const npy_int16 *)src, (npy_float *)dst, N);
+    }
+    else if (!@is_bool1@ && !@is_unsigned1@ && !@is_emu_half1@ &&
+            !@is_native_half1@ && !@is_float1@ && !@is_double1@ &&
+            !@is_complex1@ && sizeof(_TYPE1) == 2 &&
+            !@is_bool2@ && !@is_unsigned2@ && !@is_emu_half2@ &&
+            !@is_native_half2@ && !@is_float2@ && !@is_double2@ &&
+            !@is_complex2@ && sizeof(_TYPE2) == 8) {
+        return npyv_cast_int16_to_int64_contig(
+                (const npy_int16 *)src, (npy_int64 *)dst, N);
+    }
+    else if (!@is_bool1@ && !@is_unsigned1@ && !@is_emu_half1@ &&
+            !@is_native_half1@ && !@is_float1@ && !@is_double1@ &&
+            !@is_complex1@ && sizeof(_TYPE1) == 2 &&
+            @is_double2@ && !@is_complex2@ && sizeof(_TYPE2) == 8) {
+        return npyv_cast_int16_to_float64_contig(
+                (const npy_int16 *)src, (npy_double *)dst, N);
+    }
+    else if (!@is_bool1@ && !@is_unsigned1@ && !@is_emu_half1@ &&
+            !@is_native_half1@ && !@is_float1@ && !@is_double1@ &&
+            !@is_complex1@ && sizeof(_TYPE1) == 4 &&
+            @is_float2@ && !@is_complex2@ && sizeof(_TYPE2) == 4) {
+        return npyv_cast_int32_to_float32_contig(
+                (const npy_int32 *)src, (npy_float *)dst, N);
+    }
+    else if (!@is_bool1@ && !@is_unsigned1@ && !@is_emu_half1@ &&
+            !@is_native_half1@ && !@is_float1@ && !@is_double1@ &&
+            !@is_complex1@ && sizeof(_TYPE1) == 4 &&
+            !@is_bool2@ && !@is_unsigned2@ && !@is_emu_half2@ &&
+            !@is_native_half2@ && !@is_float2@ && !@is_double2@ &&
+            !@is_complex2@ && sizeof(_TYPE2) == 8) {
+        return npyv_cast_int32_to_int64_contig(
+                (const npy_int32 *)src, (npy_int64 *)dst, N);
+    }
+    else if (!@is_bool1@ && !@is_unsigned1@ && !@is_emu_half1@ &&
+            !@is_native_half1@ && !@is_float1@ && !@is_double1@ &&
+            !@is_complex1@ && sizeof(_TYPE1) == 4 &&
+            @is_double2@ && !@is_complex2@ && sizeof(_TYPE2) == 8) {
+        return npyv_cast_int32_to_float64_contig(
+                (const npy_int32 *)src, (npy_double *)dst, N);
+    }
+    else if (!@is_bool1@ && !@is_unsigned1@ && !@is_emu_half1@ &&
+            !@is_native_half1@ && !@is_float1@ && !@is_double1@ &&
+            !@is_complex1@ && sizeof(_TYPE1) == 8 &&
+            @is_double2@ && !@is_complex2@ && sizeof(_TYPE2) == 8) {
+        return npyv_cast_int64_to_float64_contig(
+                (const npy_int64 *)src, (npy_double *)dst, N);
+    }
+    else if (@is_float1@ && !@is_complex1@ && sizeof(_TYPE1) == 4 &&
+            @is_double2@ && !@is_complex2@ && sizeof(_TYPE2) == 8) {
+        return npyv_cast_float32_to_float64_contig(
+                (const npy_float *)src, (npy_double *)dst, N);
+    }
+    else if (@is_float1@ && !@is_complex1@ && sizeof(_TYPE1) == 4 &&
+            !@is_bool2@ && !@is_unsigned2@ && !@is_emu_half2@ &&
+            !@is_native_half2@ && !@is_float2@ && !@is_double2@ &&
+            !@is_complex2@ && sizeof(_TYPE2) == 8) {
+        return npyv_cast_float32_to_int64_contig(
+                (const npy_float *)src, (npy_int64 *)dst, N);
+    }
 #endif
 
     /* printf("@prefix@_cast_@name1@_to_@name2@_@func_name@, N=%ld\n", N); */
