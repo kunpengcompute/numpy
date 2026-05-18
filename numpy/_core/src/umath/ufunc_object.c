@@ -84,8 +84,6 @@ typedef struct {
     void *clongdouble;
 } scalar_fast_path_entry;
 
-#define SCALAR_FUNC_CAST(type) ((type)
-
 static const scalar_fast_path_entry scalar_fast_path_table[] = {
     {"sqrt", (void *)npy_sqrtf, (void *)npy_sqrt, (void *)npy_sqrtl,
              (void *)npy_csqrtf, (void *)npy_csqrt, (void *)npy_csqrtl},
