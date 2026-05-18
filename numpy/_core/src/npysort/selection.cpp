@@ -284,6 +284,14 @@ unguarded_partition_(type *v, npy_intp *tosort, const type pivot, npy_intp *ll,
         npy_intp vec_ll = *ll;
         npy_intp vec_hh = *hh;
         int ok = 0;
+        /*
+         * `highway_qsort.dispatch.h` is included in earlier dispatch helpers
+         * and defines `NPY_CPU_DISPATCH_CALL_XB` with a broader target set
+         * including SVE.  The partition SIMD implementation only provides the
+         * targets declared by `partition_highway.dispatch.h`, so re-include the
+         * matching dispatch header here before expanding the macro.
+         */
+        #include "partition_highway.dispatch.h"
         NPY_CPU_DISPATCH_CALL_XB(
                 ok = np::highway::partition_simd::PartitionInt64,
                 (reinterpret_cast<npy_int64 *>(v), *ll, *hh,
@@ -298,6 +306,7 @@ unguarded_partition_(type *v, npy_intp *tosort, const type pivot, npy_intp *ll,
         npy_intp vec_ll = *ll;
         npy_intp vec_hh = *hh;
         int ok = 0;
+        #include "partition_highway.dispatch.h"
         NPY_CPU_DISPATCH_CALL_XB(
                 ok = np::highway::partition_simd::PartitionDouble,
                 (reinterpret_cast<npy_double *>(v), *ll, *hh,
