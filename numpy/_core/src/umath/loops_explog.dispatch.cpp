@@ -12,10 +12,7 @@
 #include "lowlevel_strided_loops.h"
 #include "fast_loop_macros.h"
 #include "npy_simd_data.h"
-
-extern "C" {
 #include "npy_svml.h"
-}
 
 #if defined(__aarch64__)
 #define SIMD_ARM_NEON
@@ -3300,8 +3297,12 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_log)
 typedef __m256i npyvh_f16;
 #define npyv_cvt_f16_f32 _mm512_cvtph_ps
 #define npyv_cvt_f32_f16 _mm512_cvtps_ph
-#define npyvh_load_f16(PTR) _mm256_loadu_si256((const __m256i*)(PTR))
-#define npyvh_store_f16(PTR, data) _mm256_storeu_si256((__m256i*)PTR, data)
+NPY_FINLINE npyvh_f16 npyvh_load_f16(const void *ptr) {
+    return _mm256_loadu_si256((const __m256i*)(ptr));
+}
+NPY_FINLINE void npyvh_store_f16(void *ptr, npyvh_f16 data) {
+    _mm256_storeu_si256((__m256i*)ptr, data);
+}
 NPY_FINLINE npyvh_f16 npyvh_load_till_f16(const npy_half *ptr, npy_uintp nlane, npy_half fill)
 {
     assert(nlane > 0);
