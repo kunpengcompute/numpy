@@ -7,11 +7,18 @@
 #include "loops.h"
 // Provides the various *_LOOP macros
 #include "fast_loop_macros.h"
+#include <string.h>
 #if defined(__aarch64__)
     #include <arm_neon.h>
 #endif
 
 #if defined(__aarch64__)
+static inline void
+bool_const_aarch64_contig(char **args, npy_intp len, npy_bool value)
+{
+    memset(args[1], value, (size_t)len * sizeof(npy_bool));
+}
+
 /**begin repeat
  * #type = npy_ubyte, npy_ushort, npy_uint, npy_ulong, npy_ulonglong#
  * #TYPE = UBYTE, USHORT, UINT, ULONG, ULONGLONG#
@@ -502,6 +509,12 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_logical_xor)
 NPY_NO_EXPORT void  NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
+#if defined(__aarch64__)
+    if (IS_OUTPUT_CONT(npy_bool)) {
+        bool_const_aarch64_contig(args, dimensions[0], @val@);
+        return;
+    }
+#endif
     /*
      * The (void)in; suppresses an unused variable warning raised by gcc and allows
      * us to reuse this macro even though we do not depend on in
