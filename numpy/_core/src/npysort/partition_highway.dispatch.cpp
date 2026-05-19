@@ -106,12 +106,15 @@ DoPartition(T *HWY_RESTRICT v, npy_intp ll, npy_intp hh, T pivot,
 
 template <typename T>
 static NPY_INLINE int
-RunPartition(T *v, npy_intp ll, npy_intp hh, T pivot,
+RunPartition(T *v, npy_intp ll, npy_intp hh, T pivot, T *tmp,
              npy_intp *out_ll, npy_intp *out_hh)
 {
     const npy_intp n = hh - ll + 1;
     const npy_intp nbytes = n * static_cast<npy_intp>(sizeof(T));
 
+    if (tmp != nullptr) {
+        return DoPartition(v, ll, hh, pivot, tmp, out_ll, out_hh) ? 1 : 0;
+    }
     if (nbytes <= kMaxStackBytes) {
         alignas(64) T stack_buf[kMaxStackBytes / sizeof(T)];
         return DoPartition(v, ll, hh, pivot, stack_buf, out_ll, out_hh) ? 1 : 0;
@@ -128,16 +131,18 @@ RunPartition(T *v, npy_intp ll, npy_intp hh, T pivot,
 
 int NPY_CPU_DISPATCH_CURFX(PartitionInt64)(
         npy_int64 *v, npy_intp ll, npy_intp hh, npy_int64 pivot,
+        npy_int64 *tmp,
         npy_intp *out_ll, npy_intp *out_hh)
 {
-    return RunPartition(v, ll, hh, pivot, out_ll, out_hh);
+    return RunPartition(v, ll, hh, pivot, tmp, out_ll, out_hh);
 }
 
 int NPY_CPU_DISPATCH_CURFX(PartitionDouble)(
         npy_double *v, npy_intp ll, npy_intp hh, npy_double pivot,
+        npy_double *tmp,
         npy_intp *out_ll, npy_intp *out_hh)
 {
-    return RunPartition(v, ll, hh, pivot, out_ll, out_hh);
+    return RunPartition(v, ll, hh, pivot, tmp, out_ll, out_hh);
 }
 
 } // namespace np::highway::partition_simd

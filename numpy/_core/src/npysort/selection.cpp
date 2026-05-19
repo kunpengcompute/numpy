@@ -231,6 +231,61 @@ median3_swap_(type *v, npy_intp *tosort, npy_intp low, npy_intp mid,
     std::swap(sortee(mid), sortee(low + 1));
 }
 
+template <typename Tag, bool arg, typename type>
+static inline void
+pivot_swap_with_guards_(type *v, npy_intp *tosort, npy_intp low,
+                        npy_intp pivot_idx, npy_intp high)
+{
+    Idx<arg> idx(tosort);
+    Sortee<type, arg> sortee(v, tosort);
+
+    if (Tag::less(v[idx(pivot_idx)], v[idx(low)])) {
+        std::swap(sortee(pivot_idx), sortee(low));
+    }
+    if (Tag::less(v[idx(high)], v[idx(pivot_idx)])) {
+        std::swap(sortee(high), sortee(pivot_idx));
+    }
+    if (Tag::less(v[idx(pivot_idx)], v[idx(low)])) {
+        std::swap(sortee(pivot_idx), sortee(low));
+    }
+
+    std::swap(sortee(low), sortee(pivot_idx));
+    std::swap(sortee(pivot_idx), sortee(low + 1));
+}
+
+template <typename Tag, bool arg, typename type>
+static inline npy_intp
+median3_index_(type *v, npy_intp *tosort, npy_intp a, npy_intp b, npy_intp c)
+{
+    Idx<arg> idx(tosort);
+
+    if (Tag::less(v[idx(a)], v[idx(b)])) {
+        if (Tag::less(v[idx(b)], v[idx(c)])) {
+            return b;
+        }
+        return Tag::less(v[idx(a)], v[idx(c)]) ? c : a;
+    }
+    if (Tag::less(v[idx(a)], v[idx(c)])) {
+        return a;
+    }
+    return Tag::less(v[idx(b)], v[idx(c)]) ? c : b;
+}
+
+template <typename Tag, bool arg, typename type>
+static inline npy_intp
+ninther_index_(type *v, npy_intp *tosort, npy_intp low, npy_intp high)
+{
+    const npy_intp eighth = (high - low) / 8;
+    const npy_intp m1 = median3_index_<Tag, arg>(
+            v, tosort, low, low + eighth, low + 2 * eighth);
+    const npy_intp m2 = median3_index_<Tag, arg>(
+            v, tosort, low + 3 * eighth, low + 4 * eighth, low + 5 * eighth);
+    const npy_intp m3 = median3_index_<Tag, arg>(
+            v, tosort, low + 6 * eighth, low + 7 * eighth, high);
+
+    return median3_index_<Tag, arg>(v, tosort, m1, m2, m3);
+}
+
 /* select index of median of five elements */
 template <typename Tag, bool arg, typename type>
 static npy_intp
@@ -278,10 +333,19 @@ median5_(type *v, npy_intp *tosort)
 template <typename Tag, bool arg, typename type>
 static inline void
 unguarded_partition_(type *v, npy_intp *tosort, const type pivot, npy_intp *ll,
-                     npy_intp *hh)
+                     npy_intp *hh, void *partition_scratch)
 {
 #if NPY_HAVE_PARTITION_HIGHWAY
+    const npy_intp span = *hh - *ll + 1;
+    constexpr npy_intp partition_highway_min_items = 1024;
+    constexpr npy_intp partition_highway_max_bytes = 32768;
     if constexpr (!arg && std::is_same_v<type, npy_int64>) {
+        if (partition_scratch == nullptr ||
+                span < partition_highway_min_items ||
+                span * static_cast<npy_intp>(sizeof(type)) >
+                        partition_highway_max_bytes) {
+            goto scalar_partition;
+        }
         npy_intp vec_ll = *ll;
         npy_intp vec_hh = *hh;
         int ok = 0;
@@ -296,7 +360,9 @@ unguarded_partition_(type *v, npy_intp *tosort, const type pivot, npy_intp *ll,
         NPY_CPU_DISPATCH_CALL_XB(
                 ok = np::highway::partition_simd::PartitionInt64,
                 (reinterpret_cast<npy_int64 *>(v), *ll, *hh,
-                 static_cast<npy_int64>(pivot), &vec_ll, &vec_hh));
+                 static_cast<npy_int64>(pivot),
+                 reinterpret_cast<npy_int64 *>(partition_scratch),
+                 &vec_ll, &vec_hh));
         if (ok) {
             *ll = vec_ll;
             *hh = vec_hh;
@@ -304,6 +370,12 @@ unguarded_partition_(type *v, npy_intp *tosort, const type pivot, npy_intp *ll,
         }
     }
     else if constexpr (!arg && std::is_same_v<type, npy_double>) {
+        if (partition_scratch == nullptr ||
+                span < partition_highway_min_items ||
+                span * static_cast<npy_intp>(sizeof(type)) >
+                        partition_highway_max_bytes) {
+            goto scalar_partition;
+        }
         npy_intp vec_ll = *ll;
         npy_intp vec_hh = *hh;
         int ok = 0;
@@ -311,7 +383,9 @@ unguarded_partition_(type *v, npy_intp *tosort, const type pivot, npy_intp *ll,
         NPY_CPU_DISPATCH_CALL_XB(
                 ok = np::highway::partition_simd::PartitionDouble,
                 (reinterpret_cast<npy_double *>(v), *ll, *hh,
-                 static_cast<npy_double>(pivot), &vec_ll, &vec_hh));
+                 static_cast<npy_double>(pivot),
+                 reinterpret_cast<npy_double *>(partition_scratch),
+                 &vec_ll, &vec_hh));
         if (ok) {
             *ll = vec_ll;
             *hh = vec_hh;
@@ -319,7 +393,7 @@ unguarded_partition_(type *v, npy_intp *tosort, const type pivot, npy_intp *ll,
         }
     }
 #endif
-
+scalar_partition:
     Idx<arg> idx(tosort);
     Sortee<type, arg> sortee(v, tosort);
 
@@ -493,6 +567,78 @@ edge_heap_select_(type *v, npy_intp *tosort, npy_intp low, npy_intp high,
     return 0;
 }
 
+template <typename Tag, bool arg, typename type>
+static inline bool
+sampled_descending_(type *v, npy_intp *tosort, npy_intp low, npy_intp high)
+{
+    Idx<arg> idx(tosort);
+    const npy_intp span = high - low;
+    const npy_intp samples = 8;
+    const npy_intp step = std::max<npy_intp>(span / samples, 1);
+    npy_intp prev = low;
+
+    for (npy_intp cur = low + step; cur < high; cur += step) {
+        if (!Tag::less(v[idx(cur)], v[idx(prev)])) {
+            return false;
+        }
+        prev = cur;
+    }
+    return Tag::less(v[idx(high)], v[idx(prev)]);
+}
+
+template <typename Tag, bool arg, typename type>
+static inline bool
+sampled_monotonic_(type *v, npy_intp *tosort, npy_intp low, npy_intp high)
+{
+    Idx<arg> idx(tosort);
+    const npy_intp span = high - low;
+    const npy_intp samples = 8;
+    const npy_intp step = std::max<npy_intp>(span / samples, 1);
+    npy_intp prev = low;
+    bool nondecreasing = true;
+    bool nonincreasing = true;
+
+    for (npy_intp cur = low + step; cur < high; cur += step) {
+        if (Tag::less(v[idx(cur)], v[idx(prev)])) {
+            nondecreasing = false;
+        }
+        if (Tag::less(v[idx(prev)], v[idx(cur)])) {
+            nonincreasing = false;
+        }
+        if (!nondecreasing && !nonincreasing) {
+            return false;
+        }
+        prev = cur;
+    }
+    if (Tag::less(v[idx(high)], v[idx(prev)])) {
+        nondecreasing = false;
+    }
+    if (Tag::less(v[idx(prev)], v[idx(high)])) {
+        nonincreasing = false;
+    }
+    return nondecreasing || nonincreasing;
+}
+
+template <typename Tag, bool arg, typename type>
+static inline bool
+descending_sorted_and_reverse_(type *v, npy_intp *tosort, npy_intp low,
+                               npy_intp high)
+{
+    Idx<arg> idx(tosort);
+    Sortee<type, arg> sortee(v, tosort);
+
+    for (npy_intp i = low + 1; i <= high; ++i) {
+        if (Tag::less(v[idx(i - 1)], v[idx(i)])) {
+            return false;
+        }
+    }
+
+    for (npy_intp i = 0; low + i < high - i; ++i) {
+        std::swap(sortee(low + i), sortee(high - i));
+    }
+    return true;
+}
+
 /*
  * iterative median of 3 quickselect with cutoff to median-of-medians-of5
  * receives stack of already computed pivots in v to minimize the
@@ -511,8 +657,13 @@ NPY_NO_EXPORT int
 introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
              npy_intp *pivots, npy_intp *npiv)
 {
-    constexpr npy_intp edge_heap_select_limit = 1024;
+    constexpr npy_intp edge_heap_select_limit = 128;
     constexpr npy_intp bad_split_ratio = 16;
+    constexpr npy_intp partition_highway_max_bytes = 32768;
+    constexpr npy_intp ninther_bad_split_threshold = 2;
+    constexpr npy_intp mom5_bad_split_threshold = 5;
+    constexpr npy_intp ninther_min_span = 1024;
+    constexpr npy_intp mom5_min_span = 4096;
     Idx<arg> idx(tosort);
     Sortee<type, arg> sortee(v, tosort);
 
@@ -520,6 +671,7 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
     npy_intp high = num - 1;
     int depth_limit;
     int bad_split_count = 0;
+    void *partition_scratch = nullptr;
 
     if (npiv == NULL) {
         pivots = NULL;
@@ -552,9 +704,15 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         store_pivot(kth, kth, pivots, npiv);
         return 0;
     }
-    else if (kth - low + 1 <= edge_heap_select_limit ||
-             high - kth + 1 <= edge_heap_select_limit) {
+    else if ((kth - low + 1 <= edge_heap_select_limit ||
+              high - kth + 1 <= edge_heap_select_limit) &&
+             !sampled_descending_<Tag, arg>(v, tosort, low, high)) {
         edge_heap_select_<Tag, arg>(v, tosort, low, high, kth);
+        store_pivot(kth, kth, pivots, npiv);
+        return 0;
+    }
+    else if (sampled_descending_<Tag, arg>(v, tosort, low, high) &&
+             descending_sorted_and_reverse_<Tag, arg>(v, tosort, low, high)) {
         store_pivot(kth, kth, pivots, npiv);
         return 0;
     }
@@ -574,6 +732,12 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         return 0;
     }
 
+    if constexpr (!arg &&
+            (std::is_same_v<type, npy_int64> || std::is_same_v<type, npy_double>)) {
+        partition_scratch = std::malloc(static_cast<size_t>(
+                partition_highway_max_bytes));
+    }
+
     depth_limit = npy_get_msb(num) * 2;
 
     /* guarantee three elements */
@@ -581,18 +745,33 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         npy_intp ll = low + 1;
         npy_intp hh = high;
         const npy_intp span = high - low + 1;
-        const bool use_robust_pivot = bad_split_count >= 2;
+        const bool sampled_monotonic =
+                span >= ninther_min_span &&
+                sampled_monotonic_<Tag, arg>(v, tosort, low, high);
+        const bool use_ninther_pivot =
+                !sampled_monotonic &&
+                span >= ninther_min_span &&
+                bad_split_count >= ninther_bad_split_threshold;
+        const bool use_mom5_pivot =
+                !sampled_monotonic &&
+                span >= mom5_min_span &&
+                (bad_split_count >= mom5_bad_split_threshold ||
+                 depth_limit <= 0);
 
         /*
-         * if we aren't making sufficient progress with median of 3
-         * fall back to median-of-median5 pivot for linear worst case
-         * med3 for small sizes is required to do unguarded partition
+         * Prefer median-of-three in the common case.  Use a cheaper wider
+         * sample (ninther) before falling all the way back to the much more
+         * expensive median-of-median5 pivot.
          */
-        if (hh - ll < 5 || (!use_robust_pivot && depth_limit > 0)) {
+        if (hh - ll < 5 || (!use_ninther_pivot && !use_mom5_pivot)) {
             const npy_intp mid = low + (high - low) / 2;
             /* median of 3 pivot strategy,
              * swapping for efficient partition */
             median3_swap_<Tag, arg>(v, tosort, low, mid, high);
+        }
+        else if (!use_mom5_pivot) {
+            const npy_intp mid = ninther_index_<Tag, arg>(v, tosort, low, high);
+            pivot_swap_with_guards_<Tag, arg>(v, tosort, low, mid, high);
         }
         else {
             npy_intp mid;
@@ -606,7 +785,7 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
             hh++;
         }
 
-        if (!use_robust_pivot) {
+        if (!use_ninther_pivot && !use_mom5_pivot) {
             depth_limit--;
         }
         else {
@@ -618,7 +797,8 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
          * previous swapping removes need for bound checks
          * pivot 3-lowest [x x x] 3-highest
          */
-        unguarded_partition_<Tag, arg>(v, tosort, v[idx(low)], &ll, &hh);
+        unguarded_partition_<Tag, arg>(v, tosort, v[idx(low)], &ll, &hh,
+                                       partition_scratch);
 
         /* move pivot into position */
         std::swap(sortee(low), sortee(hh));
@@ -652,6 +832,10 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         }
     }
     store_pivot(kth, kth, pivots, npiv);
+
+    if (partition_scratch != nullptr) {
+        std::free(partition_scratch);
+    }
 
     return 0;
 }

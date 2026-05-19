@@ -11,13 +11,13 @@ namespace np::highway::partition_simd {
 NPY_CPU_DISPATCH_DECLARE(
     int PartitionInt64,
     (npy_int64 *v, npy_intp ll, npy_intp hh, npy_int64 pivot,
-     npy_intp *out_ll, npy_intp *out_hh)
+     npy_int64 *tmp, npy_intp *out_ll, npy_intp *out_hh)
 )
 
 NPY_CPU_DISPATCH_DECLARE(
     int PartitionDouble,
     (npy_double *v, npy_intp ll, npy_intp hh, npy_double pivot,
-     npy_intp *out_ll, npy_intp *out_hh)
+     npy_double *tmp, npy_intp *out_ll, npy_intp *out_hh)
 )
 
 } // namespace np::highway::partition_simd
