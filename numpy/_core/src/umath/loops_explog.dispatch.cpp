@@ -14,8 +14,8 @@
 #include "npy_simd_data.h"
 #include "npy_svml.h"
 
-#if defined(__aarch64__)
-#define SIMD_ARM_NEON
+#if defined(__aarch64__) && NPY_SIMD_FMA3
+#define SIMD_ARM 1
 #endif
 
 #if !defined(_MSC_VER) && defined(NPY_HAVE_AVX512F)
@@ -859,7 +859,7 @@ simd_log_FLOAT(npy_float * op,
 }
 #endif // SIMD_AVX512F
 
-#if defined(SIMD_ARM_NEON)
+#if SIMD_ARM
 #include <arm_neon.h>
 
 #define V_EXP_TABLE_BITS 7
@@ -2692,7 +2692,7 @@ simd_log_neon_HALF(const npy_half *src, npy_intp ssrc,
   free(tmp_dst);
 }
 
-#endif // SIMD_ARM_NEON
+#endif // SIMD_ARM
 
 #if NPY_SIMD && defined(NPY_HAVE_AVX512_SKX) && defined(NPY_CAN_LINK_SVML)
 static void
@@ -3113,7 +3113,7 @@ AVX512F_log_DOUBLE(npy_double * op,
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_exp)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
 {
-#if defined(SIMD_ARM_NEON)
+#if SIMD_ARM
     const npy_intp len = dimensions[0];
     if (len == 1) {
         UNARY_LOOP {
@@ -3154,7 +3154,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_exp)
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_log)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
 {
-#if defined(SIMD_ARM_NEON)
+#if SIMD_ARM
     const npy_intp len = dimensions[0];
     if (len == 1) {
         UNARY_LOOP {
@@ -3209,7 +3209,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_exp)
         simd_exp_f64(src, ssrc, dst, sdst, len);
         return;
     }
-#elif defined(SIMD_ARM_NEON)
+#elif SIMD_ARM
     const npy_intp len = dimensions[0];
     if (len == 1) {
         UNARY_LOOP {
@@ -3256,7 +3256,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_log)
         simd_log_f64(src, ssrc, dst, sdst, len);
         return;
     }
-#elif defined(SIMD_ARM_NEON)
+#elif SIMD_ARM
     const npy_intp len = dimensions[0];
     if (len == 1) {
         UNARY_LOOP {
@@ -3358,7 +3358,7 @@ static void avx512_log_f16(const npy_half *src, npy_half *dst, npy_intp len)
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_exp)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
 {
-#if defined(SIMD_ARM_NEON)
+#if SIMD_ARM
     const npy_intp len = dimensions[0];
     if (len == 1) {
         UNARY_LOOP {
@@ -3406,7 +3406,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_exp)
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_log)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
 {
-#if defined(SIMD_ARM_NEON)
+#if SIMD_ARM
     const npy_intp len = dimensions[0];
     if (len == 1) {
         UNARY_LOOP {
