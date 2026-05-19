@@ -239,7 +239,12 @@ struct TypeToInt<double> {
  * Inf/out-of-range: handled by Highway (produces NaN, triggers FP exception)
  * X86 platforms use scalar libm implementation
  */
-#if defined(__aarch64__) && HWY_HAVE_FLOAT64
+#if defined(__aarch64__) && NPY_SIMD && NPY_SIMD_F64 && HWY_HAVE_FLOAT64
+
+/* Keep this block behind the SIMD/F64 guards above.  The smoke-test build uses
+ * -Dcpu-baseline=none, where NPY_SIMD_WIDTH can be 0; the overlap loops below
+ * advance by NPY_SIMD_WIDTH / sizeof(npy_double) and would otherwise never
+ * make progress. */
 
 template <typename T>
 struct OpSin {
