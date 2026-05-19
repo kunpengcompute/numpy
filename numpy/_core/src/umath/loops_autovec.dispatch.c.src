@@ -55,6 +55,52 @@ static inline void
         *op1 = *ip1 @OP@ *ip2;
     }
 }
+
+static inline void
+@TYPE@_@kind@_aarch64_contig_scalar(char **args, npy_intp len, int scalar_arg)
+{
+    const @type@ scalar = *(@type@ *)args[scalar_arg];
+    const npy_ubyte *ip1 = (const npy_ubyte *)args[scalar_arg == 0 ? 1 : 0];
+    npy_ubyte *op1 = (npy_ubyte *)args[2];
+    const npy_ubyte *scalar_bytes = (const npy_ubyte *)&scalar;
+    const npy_intp elsize = (npy_intp)sizeof(@type@);
+    npy_intp nbytes = len * elsize;
+    uint8x16_t sv;
+
+    if (elsize == 1) {
+        sv = vdupq_n_u8((npy_ubyte)scalar);
+    }
+    else if (elsize == 2) {
+        sv = vreinterpretq_u8_u16(vdupq_n_u16((npy_uint16)scalar));
+    }
+    else if (elsize == 4) {
+        sv = vreinterpretq_u8_u32(vdupq_n_u32((npy_uint32)scalar));
+    }
+    else {
+        sv = vreinterpretq_u8_u64(vdupq_n_u64((npy_uint64)scalar));
+    }
+
+    for (; nbytes >= 64; nbytes -= 64, ip1 += 64, op1 += 64) {
+        uint8x16_t a0 = vld1q_u8(ip1);
+        uint8x16_t a1 = vld1q_u8(ip1 + 16);
+        uint8x16_t a2 = vld1q_u8(ip1 + 32);
+        uint8x16_t a3 = vld1q_u8(ip1 + 48);
+
+        vst1q_u8(op1, @intrin@(a0, sv));
+        vst1q_u8(op1 + 16, @intrin@(a1, sv));
+        vst1q_u8(op1 + 32, @intrin@(a2, sv));
+        vst1q_u8(op1 + 48, @intrin@(a3, sv));
+    }
+
+    for (; nbytes >= 16; nbytes -= 16, ip1 += 16, op1 += 16) {
+        uint8x16_t a = vld1q_u8(ip1);
+        vst1q_u8(op1, @intrin@(a, sv));
+    }
+
+    for (npy_intp i = 0; i < nbytes; ++i) {
+        op1[i] = ip1[i] @OP@ scalar_bytes[i & (elsize - 1)];
+    }
+}
 /**end repeat1**/
 /**end repeat**/
 
@@ -370,6 +416,18 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
                 abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE &&
                 abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) {
             @TYPE@_@kind@_aarch64_contig(args, dimensions[0]);
+            return;
+        }
+        if (IS_BINARY_CONT_S1(@type@, @type@) &&
+                (abs_ptrdiff(args[2], args[1]) == 0 ||
+                 abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE)) {
+            @TYPE@_@kind@_aarch64_contig_scalar(args, dimensions[0], 0);
+            return;
+        }
+        if (IS_BINARY_CONT_S2(@type@, @type@) &&
+                (abs_ptrdiff(args[2], args[0]) == 0 ||
+                 abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE)) {
+            @TYPE@_@kind@_aarch64_contig_scalar(args, dimensions[0], 1);
             return;
         }
 #endif
