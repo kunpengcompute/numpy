@@ -173,23 +173,7 @@ while IFS= read -r deselect_nodeid; do
     [[ -n "${deselect_nodeid}" ]] || continue
     full_pytest_args+=(--deselect="${deselect_nodeid}")
 done <<< "${FULL_PYTEST_DESELECTS}"
-
-read -r python_major python_minor <<< "$(python - <<'PY'
-import sys
-print(sys.version_info[0], sys.version_info[1])
-PY
-)"
-
-if (( python_major > 3 || (python_major == 3 && python_minor >= 12) )); then
-    case " ${FULL_PYTEST_ARGS} " in
-        *" --ignore=numpy/distutils/tests "*)
-            ;;
-        *)
-            ci_log "Python ${python_major}.${python_minor} detected; excluding numpy/distutils/tests."
-            full_pytest_args+=(--ignore=numpy/distutils/tests)
-            ;;
-    esac
-fi
+ci_apply_numpy_distutils_policy full_pytest_args full
 
 ci_log "Preparing coverage artifact directories."
 rm -rf -- "${coverage_html_dir}" "${coverage_xml}"
