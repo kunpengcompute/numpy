@@ -2692,7 +2692,7 @@ simd_log_neon_HALF(const npy_half *src, npy_intp ssrc,
   free(tmp_dst);
 }
 
-#endif // SIMD_ARM_NEON
+#endif // SIMD_ARM
 
 #if NPY_SIMD && defined(NPY_HAVE_AVX512_SKX) && defined(NPY_CAN_LINK_SVML)
 static void
