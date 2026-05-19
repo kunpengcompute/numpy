@@ -183,6 +183,35 @@ UBYTE_logical_not_aarch64_contig(char **args, npy_intp len)
     }
 }
 
+static inline void
+UBYTE_logical_to_bool_aarch64_contig(
+        const npy_ubyte *ip1, npy_bool *op1, npy_intp len)
+{
+    const uint8x16_t zero = vdupq_n_u8(0);
+    const uint8x16_t one = vdupq_n_u8(1);
+
+    for (; len >= 64; len -= 64, ip1 += 64, op1 += 64) {
+        uint8x16_t a0 = vmvnq_u8(vceqq_u8(vld1q_u8(ip1), zero));
+        uint8x16_t a1 = vmvnq_u8(vceqq_u8(vld1q_u8(ip1 + 16), zero));
+        uint8x16_t a2 = vmvnq_u8(vceqq_u8(vld1q_u8(ip1 + 32), zero));
+        uint8x16_t a3 = vmvnq_u8(vceqq_u8(vld1q_u8(ip1 + 48), zero));
+
+        vst1q_u8(op1, vandq_u8(a0, one));
+        vst1q_u8(op1 + 16, vandq_u8(a1, one));
+        vst1q_u8(op1 + 32, vandq_u8(a2, one));
+        vst1q_u8(op1 + 48, vandq_u8(a3, one));
+    }
+
+    for (; len >= 16; len -= 16, ip1 += 16, op1 += 16) {
+        uint8x16_t a = vmvnq_u8(vceqq_u8(vld1q_u8(ip1), zero));
+        vst1q_u8(op1, vandq_u8(a, one));
+    }
+
+    for (; len > 0; --len, ++ip1, ++op1) {
+        *op1 = !!*ip1;
+    }
+}
+
 /**begin repeat
  * #type = npy_ubyte, npy_ushort, npy_uint, npy_ulong, npy_ulonglong#
  * #TYPE = UBYTE, USHORT, UINT, ULONG, ULONGLONG#
@@ -552,6 +581,8 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
 /**begin repeat1
  * #kind = logical_and, logical_or#
  * #OP = &&, ||#
+ * #array_if = scalar, !scalar#
+ * #const_if_not_array = NPY_FALSE, NPY_TRUE#
  */
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
@@ -566,6 +597,21 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
             abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE &&
             abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) {
         UBYTE_@kind@_aarch64_logical_contig(args, dimensions[0]);
+        return;
+    }
+    if (sizeof(@type@) == sizeof(npy_ubyte) &&
+            IS_BINARY_CONT_S1(@type@, npy_bool) &&
+            abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) {
+        const npy_bool scalar = !!*(const @type@ *)args[0];
+        if (@array_if@) {
+            UBYTE_logical_to_bool_aarch64_contig(
+                    (const npy_ubyte *)args[1], (npy_bool *)args[2],
+                    dimensions[0]);
+        }
+        else {
+            bool_const_aarch64_contig(
+                    args + 1, dimensions[0], @const_if_not_array@);
+        }
         return;
     }
 #endif
@@ -585,6 +631,19 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_logical_xor)
             abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE &&
             abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) {
         UBYTE_logical_xor_aarch64_logical_contig(args, dimensions[0]);
+        return;
+    }
+    if (sizeof(@type@) == sizeof(npy_ubyte) &&
+            IS_BINARY_CONT_S1(@type@, npy_bool) &&
+            abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) {
+        if (!!*(const @type@ *)args[0]) {
+            UBYTE_logical_not_aarch64_contig(args + 1, dimensions[0]);
+        }
+        else {
+            UBYTE_logical_to_bool_aarch64_contig(
+                    (const npy_ubyte *)args[1], (npy_bool *)args[2],
+                    dimensions[0]);
+        }
         return;
     }
 #endif
