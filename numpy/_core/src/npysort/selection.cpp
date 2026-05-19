@@ -478,14 +478,10 @@ sift_down_max_(type *v, npy_intp *tosort, npy_intp base, npy_intp heap_size,
     Idx<arg> idx(tosort);
     Sortee<type, arg> sortee(v, tosort);
 
-    while (true) {
+    while (pos < heap_size / 2) {
         npy_intp left = pos * 2 + 1;
         npy_intp right = left + 1;
         npy_intp child;
-
-        if (left >= heap_size) {
-            return;
-        }
 
         child = left;
         if (right < heap_size &&
@@ -493,7 +489,7 @@ sift_down_max_(type *v, npy_intp *tosort, npy_intp base, npy_intp heap_size,
             child = right;
         }
         if (!Tag::less(v[idx(base + pos)], v[idx(base + child)])) {
-            return;
+            break;
         }
         std::swap(sortee(base + pos), sortee(base + child));
         pos = child;
@@ -508,14 +504,10 @@ sift_down_min_(type *v, npy_intp *tosort, npy_intp base, npy_intp heap_size,
     Idx<arg> idx(tosort);
     Sortee<type, arg> sortee(v, tosort);
 
-    while (true) {
+    while (pos < heap_size / 2) {
         npy_intp left = pos * 2 + 1;
         npy_intp right = left + 1;
         npy_intp child;
-
-        if (left >= heap_size) {
-            return;
-        }
 
         child = left;
         if (right < heap_size &&
@@ -523,7 +515,7 @@ sift_down_min_(type *v, npy_intp *tosort, npy_intp base, npy_intp heap_size,
             child = right;
         }
         if (!Tag::less(v[idx(base + child)], v[idx(base + pos)])) {
-            return;
+            break;
         }
         std::swap(sortee(base + pos), sortee(base + child));
         pos = child;
