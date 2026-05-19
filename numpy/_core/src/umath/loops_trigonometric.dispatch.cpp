@@ -13,6 +13,10 @@
 
 namespace hn = hwy::HWY_NAMESPACE;
 
+#if defined(__aarch64__) && NPY_SIMD_FMA3
+#define SIMD_ARM 1
+#endif
+
 /*
  * Vectorized approximate sine/cosine algorithms: The following code is a
  * vectorized version of the algorithm presented here:
@@ -239,13 +243,7 @@ struct TypeToInt<double> {
  * Inf/out-of-range: handled by Highway (produces NaN, triggers FP exception)
  * X86 platforms use scalar libm implementation
  */
-#if defined(__aarch64__) && NPY_SIMD && NPY_SIMD_F64 && HWY_HAVE_FLOAT64
-
-/* Keep this block behind the SIMD/F64 guards above.  The smoke-test build uses
- * -Dcpu-baseline=none, where NPY_SIMD_WIDTH can be 0; the overlap loops below
- * advance by NPY_SIMD_WIDTH / sizeof(npy_double) and would otherwise never
- * make progress. */
-
+#if SIMD_ARM
 template <typename T>
 struct OpSin {
 static constexpr T c_inv_pi = 0x1.45f306dc9c883p-2;
@@ -788,7 +786,7 @@ NPY_CPU_DISPATCH_CURFX(FLOAT_cos)(char **args, npy_intp const *dimensions,
 #endif
 }
 
-#if NPY_SIMD_FMA3 && defined(__aarch64__)
+#if SIMD_ARM
 static void HWY_ATTR
 simd_sincos_f16_impl(const npy_half *src, npy_intp ssrc, npy_half *dst, npy_intp sdst,
                      npy_intp len, SIMD_TRIG_OP trig_op)
@@ -943,7 +941,7 @@ simd_sincos_f16_impl(const npy_half *src, npy_intp ssrc, npy_half *dst, npy_intp
 }
 #endif
 
-#if NPY_SIMD_FMA3 && defined(__aarch64__)
+#if SIMD_ARM
 namespace {
 using namespace np::simd;
 
@@ -1097,7 +1095,7 @@ HWY_INLINE hn::Vec<D> TanPolyFloat(D d, hn::Vec<D> x)
 }
 #endif
 
-#if NPY_SIMD_FMA3 && defined(__aarch64__)
+#if SIMD_ARM
 static void HWY_ATTR
 simd_tan_f32_impl_contiguous(const npy_float *src, npy_float *dst, npy_intp len)
 {
@@ -1246,7 +1244,7 @@ simd_tan_f32_impl(const npy_float *src, npy_intp ssrc, npy_float *dst, npy_intp 
 }
 #endif
 
-#if NPY_SIMD_FMA3 && defined(__aarch64__)
+#if SIMD_ARM
 static void HWY_ATTR
 simd_tan_f16_impl(const npy_half *src, npy_intp ssrc, npy_half *dst, npy_intp sdst, npy_intp len)
 {
@@ -1365,7 +1363,7 @@ simd_tan_f16_impl(const npy_half *src, npy_intp ssrc, npy_half *dst, npy_intp sd
 }
 #endif
 
-#if NPY_SIMD_FMA3 && defined(__aarch64__)
+#if SIMD_ARM
 static void HWY_ATTR
 simd_tan_f64_impl_contiguous(const npy_double *src, npy_double *dst, npy_intp len)
 {
@@ -1575,7 +1573,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_tan)
         simd_svml_tan_f64(src, ssrc, dst, sdst, len);
         return;
     }
-#elif NPY_SIMD_FMA3 && defined(__aarch64__)
+#elif SIMD_ARM
     const npy_double *src = (npy_double*)args[0];
           npy_double *dst = (npy_double*)args[1];
     const npy_intp len = dimensions[0];
@@ -1612,7 +1610,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_tan)
         simd_svml_tan_f32(src, ssrc, dst, sdst, len);
         return;
     }
-#elif NPY_SIMD_FMA3 && defined(__aarch64__)
+#elif SIMD_ARM
     const npy_float *src = (npy_float*)args[0];
           npy_float *dst = (npy_float*)args[1];
     const npy_intp len = dimensions[0];
@@ -1724,7 +1722,7 @@ NPY_CPU_DISPATCH_CURFX(HALF_sin)(char **args, npy_intp const *dimensions,
     #endif
         return;
     }
-#elif NPY_SIMD_FMA3 && defined(__aarch64__)
+#elif SIMD_ARM
     const npy_half *src = (npy_half*)args[0];
           npy_half *dst = (npy_half*)args[1];
     const npy_intp len = dimensions[0];
@@ -1763,7 +1761,7 @@ NPY_CPU_DISPATCH_CURFX(HALF_cos)(char **args, npy_intp const *dimensions,
     #endif
         return;
     }
-#elif NPY_SIMD_FMA3 && defined(__aarch64__)
+#elif SIMD_ARM
     const npy_half *src = (npy_half*)args[0];
           npy_half *dst = (npy_half*)args[1];
     const npy_intp len = dimensions[0];
@@ -1800,7 +1798,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_tan)
     #endif
         return;
     }
-#elif NPY_SIMD_FMA3 && defined(__aarch64__)
+#elif SIMD_ARM
     const npy_half *src = (npy_half*)args[0];
           npy_half *dst = (npy_half*)args[1];
     const npy_intp len = dimensions[0];

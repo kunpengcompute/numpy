@@ -10,11 +10,11 @@
 
 namespace hn = hwy::HWY_NAMESPACE;
 
-#if defined(__aarch64__)
+#if defined(__aarch64__) && NPY_SIMD_FMA3
 #define SIMD_ARM 1
 #endif
 
-#if NPY_SIMD_FMA3 && SIMD_ARM
+#if SIMD_ARM
 static void HWY_ATTR
 simd_sqrt_f16_impl(const npy_half *src, npy_intp ssrc, npy_half *dst, npy_intp sdst, npy_intp len)
 {
