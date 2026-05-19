@@ -186,10 +186,12 @@ int ComputeArgMinMaxFloating(const T* HWY_RESTRICT arr, npy_intp len)
         V best1 = best0;
         V best2 = best0;
         V best3 = best0;
+#if !((HWY_TARGET & HWY_NEON) || (HWY_TARGET & HWY_NEON_WITHOUT_AES) || (HWY_TARGET & HWY_NEON_BF16))
         V best4 = best0;
         V best5 = best0;
         V best6 = best0;
         V best7 = best0;
+#endif
 
         // Deferred NaN detection: accumulate validity mask
         M valid_acc = hn::Eq(best0, best0);
