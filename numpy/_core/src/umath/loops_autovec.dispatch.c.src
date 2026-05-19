@@ -7,6 +7,155 @@
 #include "loops.h"
 // Provides the various *_LOOP macros
 #include "fast_loop_macros.h"
+#if defined(__aarch64__)
+    #include <arm_neon.h>
+#endif
+
+#if defined(__aarch64__)
+static inline void
+bitwise_count_unsigned_aarch64_contig(char **args, npy_intp len, size_t elsize)
+{
+    const npy_ubyte *ip1 = (const npy_ubyte *)args[0];
+    npy_ubyte *op1 = (npy_ubyte *)args[1];
+    npy_intp n = len;
+
+    if (elsize == 1) {
+        for (; n >= 64; n -= 64, ip1 += 64, op1 += 64) {
+            uint8x16_t a0 = vld1q_u8(ip1);
+            uint8x16_t a1 = vld1q_u8(ip1 + 16);
+            uint8x16_t a2 = vld1q_u8(ip1 + 32);
+            uint8x16_t a3 = vld1q_u8(ip1 + 48);
+
+            vst1q_u8(op1, vcntq_u8(a0));
+            vst1q_u8(op1 + 16, vcntq_u8(a1));
+            vst1q_u8(op1 + 32, vcntq_u8(a2));
+            vst1q_u8(op1 + 48, vcntq_u8(a3));
+        }
+        for (; n >= 16; n -= 16, ip1 += 16, op1 += 16) {
+            uint8x16_t a = vld1q_u8(ip1);
+            vst1q_u8(op1, vcntq_u8(a));
+        }
+    }
+    else if (elsize == 2) {
+        for (; n >= 8; n -= 8, ip1 += 16, op1 += 8) {
+            uint8x16_t bytes = vcntq_u8(vld1q_u8(ip1));
+            vst1_u8(op1, vmovn_u16(vpaddlq_u8(bytes)));
+        }
+    }
+    else if (elsize == 4) {
+        for (; n >= 8; n -= 8, ip1 += 32, op1 += 8) {
+            uint16x8_t pair0 = vpaddlq_u8(vcntq_u8(vld1q_u8(ip1)));
+            uint16x8_t pair1 = vpaddlq_u8(vcntq_u8(vld1q_u8(ip1 + 16)));
+            uint16x4_t lo = vmovn_u32(vpaddlq_u16(pair0));
+            uint16x4_t hi = vmovn_u32(vpaddlq_u16(pair1));
+            vst1_u8(op1, vmovn_u16(vcombine_u16(lo, hi)));
+        }
+    }
+    else if (elsize == 8) {
+        for (; n >= 8; n -= 8, ip1 += 64, op1 += 8) {
+            uint32x4_t quad0 = vpaddlq_u16(vpaddlq_u8(vcntq_u8(vld1q_u8(ip1))));
+            uint32x4_t quad1 = vpaddlq_u16(vpaddlq_u8(vcntq_u8(vld1q_u8(ip1 + 16))));
+            uint32x4_t quad2 = vpaddlq_u16(vpaddlq_u8(vcntq_u8(vld1q_u8(ip1 + 32))));
+            uint32x4_t quad3 = vpaddlq_u16(vpaddlq_u8(vcntq_u8(vld1q_u8(ip1 + 48))));
+            uint16x4_t lo = vmovn_u32(vcombine_u32(
+                    vmovn_u64(vpaddlq_u32(quad0)),
+                    vmovn_u64(vpaddlq_u32(quad1))));
+            uint16x4_t hi = vmovn_u32(vcombine_u32(
+                    vmovn_u64(vpaddlq_u32(quad2)),
+                    vmovn_u64(vpaddlq_u32(quad3))));
+            vst1_u8(op1, vmovn_u16(vcombine_u16(lo, hi)));
+        }
+    }
+
+    for (; n > 0; --n, ip1 += elsize, ++op1) {
+        npy_ubyte count = 0;
+        for (size_t i = 0; i < elsize; ++i) {
+            count += npy_popcountuhh(ip1[i]);
+        }
+        *op1 = count;
+    }
+}
+
+static inline void
+bitwise_count_signed_aarch64_contig(char **args, npy_intp len, size_t elsize)
+{
+    const npy_ubyte *ip1 = (const npy_ubyte *)args[0];
+    npy_ubyte *op1 = (npy_ubyte *)args[1];
+    npy_intp n = len;
+
+    if (elsize == 1) {
+        for (; n >= 64; n -= 64, ip1 += 64, op1 += 64) {
+            int8x16_t a0 = vabsq_s8(vld1q_s8((const int8_t *)ip1));
+            int8x16_t a1 = vabsq_s8(vld1q_s8((const int8_t *)(ip1 + 16)));
+            int8x16_t a2 = vabsq_s8(vld1q_s8((const int8_t *)(ip1 + 32)));
+            int8x16_t a3 = vabsq_s8(vld1q_s8((const int8_t *)(ip1 + 48)));
+
+            vst1q_u8(op1, vcntq_u8(vreinterpretq_u8_s8(a0)));
+            vst1q_u8(op1 + 16, vcntq_u8(vreinterpretq_u8_s8(a1)));
+            vst1q_u8(op1 + 32, vcntq_u8(vreinterpretq_u8_s8(a2)));
+            vst1q_u8(op1 + 48, vcntq_u8(vreinterpretq_u8_s8(a3)));
+        }
+        for (; n >= 16; n -= 16, ip1 += 16, op1 += 16) {
+            int8x16_t a = vabsq_s8(vld1q_s8((const int8_t *)ip1));
+            vst1q_u8(op1, vcntq_u8(vreinterpretq_u8_s8(a)));
+        }
+    }
+    else if (elsize == 2) {
+        for (; n >= 8; n -= 8, ip1 += 16, op1 += 8) {
+            int16x8_t a = vabsq_s16(vld1q_s16((const int16_t *)ip1));
+            uint8x16_t bytes = vcntq_u8(vreinterpretq_u8_s16(a));
+            vst1_u8(op1, vmovn_u16(vpaddlq_u8(bytes)));
+        }
+    }
+    else if (elsize == 4) {
+        for (; n >= 8; n -= 8, ip1 += 32, op1 += 8) {
+            int32x4_t a0 = vabsq_s32(vld1q_s32((const int32_t *)ip1));
+            int32x4_t a1 = vabsq_s32(vld1q_s32((const int32_t *)(ip1 + 16)));
+            uint16x8_t pair0 = vpaddlq_u8(vcntq_u8(vreinterpretq_u8_s32(a0)));
+            uint16x8_t pair1 = vpaddlq_u8(vcntq_u8(vreinterpretq_u8_s32(a1)));
+            uint16x4_t lo = vmovn_u32(vpaddlq_u16(pair0));
+            uint16x4_t hi = vmovn_u32(vpaddlq_u16(pair1));
+            vst1_u8(op1, vmovn_u16(vcombine_u16(lo, hi)));
+        }
+    }
+    else if (elsize == 8) {
+        for (; n >= 8; n -= 8, ip1 += 64, op1 += 8) {
+            int64x2_t a0 = vabsq_s64(vld1q_s64((const int64_t *)ip1));
+            int64x2_t a1 = vabsq_s64(vld1q_s64((const int64_t *)(ip1 + 16)));
+            int64x2_t a2 = vabsq_s64(vld1q_s64((const int64_t *)(ip1 + 32)));
+            int64x2_t a3 = vabsq_s64(vld1q_s64((const int64_t *)(ip1 + 48)));
+            uint32x4_t quad0 = vpaddlq_u16(vpaddlq_u8(vcntq_u8(vreinterpretq_u8_s64(a0))));
+            uint32x4_t quad1 = vpaddlq_u16(vpaddlq_u8(vcntq_u8(vreinterpretq_u8_s64(a1))));
+            uint32x4_t quad2 = vpaddlq_u16(vpaddlq_u8(vcntq_u8(vreinterpretq_u8_s64(a2))));
+            uint32x4_t quad3 = vpaddlq_u16(vpaddlq_u8(vcntq_u8(vreinterpretq_u8_s64(a3))));
+            uint16x4_t lo = vmovn_u32(vcombine_u32(
+                    vmovn_u64(vpaddlq_u32(quad0)),
+                    vmovn_u64(vpaddlq_u32(quad1))));
+            uint16x4_t hi = vmovn_u32(vcombine_u32(
+                    vmovn_u64(vpaddlq_u32(quad2)),
+                    vmovn_u64(vpaddlq_u32(quad3))));
+            vst1_u8(op1, vmovn_u16(vcombine_u16(lo, hi)));
+        }
+    }
+
+    for (; n > 0; --n, ip1 += elsize, ++op1) {
+        switch (elsize) {
+        case 1:
+            *op1 = npy_popcounthh(*(const npy_byte *)ip1);
+            break;
+        case 2:
+            *op1 = npy_popcounth(*(const npy_short *)ip1);
+            break;
+        case 4:
+            *op1 = npy_popcount(*(const npy_int *)ip1);
+            break;
+        default:
+            *op1 = npy_popcountll(*(const npy_longlong *)ip1);
+            break;
+        }
+    }
+}
+#endif
 
 /*
  *****************************************************************************
@@ -117,6 +266,20 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_right_shift)
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_bitwise_count)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
+#if defined(__aarch64__)
+    if (IS_UNARY_CONT(@type@, npy_ubyte) &&
+            abs_ptrdiff(args[1], args[0]) >= AUTOVEC_OVERLAP_SIZE) {
+        if (@SIGNED@) {
+            bitwise_count_signed_aarch64_contig(
+                    args, dimensions[0], sizeof(@type@));
+        }
+        else {
+            bitwise_count_unsigned_aarch64_contig(
+                    args, dimensions[0], sizeof(@type@));
+        }
+        return;
+    }
+#endif
     UNARY_LOOP_FAST(@type@, npy_ubyte, *out = npy_popcount@c@(in));
 }
 
