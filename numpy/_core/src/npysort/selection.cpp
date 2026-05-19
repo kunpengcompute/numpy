@@ -22,6 +22,7 @@
 #include "npysort_common.h"
 #include "numpy_tag.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <type_traits>
@@ -395,6 +396,103 @@ dumb_select_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth)
     return 0;
 }
 
+template <typename Tag, bool arg, typename type>
+static inline void
+sift_down_max_(type *v, npy_intp *tosort, npy_intp base, npy_intp heap_size,
+               npy_intp pos)
+{
+    Idx<arg> idx(tosort);
+    Sortee<type, arg> sortee(v, tosort);
+
+    while (true) {
+        npy_intp left = pos * 2 + 1;
+        npy_intp right = left + 1;
+        npy_intp child;
+
+        if (left >= heap_size) {
+            return;
+        }
+
+        child = left;
+        if (right < heap_size &&
+                Tag::less(v[idx(base + left)], v[idx(base + right)])) {
+            child = right;
+        }
+        if (!Tag::less(v[idx(base + pos)], v[idx(base + child)])) {
+            return;
+        }
+        std::swap(sortee(base + pos), sortee(base + child));
+        pos = child;
+    }
+}
+
+template <typename Tag, bool arg, typename type>
+static inline void
+sift_down_min_(type *v, npy_intp *tosort, npy_intp base, npy_intp heap_size,
+               npy_intp pos)
+{
+    Idx<arg> idx(tosort);
+    Sortee<type, arg> sortee(v, tosort);
+
+    while (true) {
+        npy_intp left = pos * 2 + 1;
+        npy_intp right = left + 1;
+        npy_intp child;
+
+        if (left >= heap_size) {
+            return;
+        }
+
+        child = left;
+        if (right < heap_size &&
+                Tag::less(v[idx(base + right)], v[idx(base + left)])) {
+            child = right;
+        }
+        if (!Tag::less(v[idx(base + child)], v[idx(base + pos)])) {
+            return;
+        }
+        std::swap(sortee(base + pos), sortee(base + child));
+        pos = child;
+    }
+}
+
+template <typename Tag, bool arg, typename type>
+static int
+edge_heap_select_(type *v, npy_intp *tosort, npy_intp low, npy_intp high,
+                  npy_intp kth)
+{
+    Idx<arg> idx(tosort);
+    Sortee<type, arg> sortee(v, tosort);
+    const npy_intp left_count = kth - low + 1;
+    const npy_intp right_count = high - kth + 1;
+
+    if (left_count <= right_count) {
+        for (npy_intp pos = left_count / 2; pos > 0; --pos) {
+            sift_down_max_<Tag, arg>(v, tosort, low, left_count, pos - 1);
+        }
+        for (npy_intp i = low + left_count; i <= high; ++i) {
+            if (Tag::less(v[idx(i)], v[idx(low)])) {
+                std::swap(sortee(i), sortee(low));
+                sift_down_max_<Tag, arg>(v, tosort, low, left_count, 0);
+            }
+        }
+        std::swap(sortee(low), sortee(kth));
+    }
+    else {
+        for (npy_intp pos = right_count / 2; pos > 0; --pos) {
+            sift_down_min_<Tag, arg>(v, tosort, kth, right_count, pos - 1);
+        }
+        for (npy_intp i = low; i < kth; ++i) {
+            if (Tag::less(v[idx(kth)], v[idx(i)])) {
+                std::swap(sortee(i), sortee(kth));
+                sift_down_min_<Tag, arg>(v, tosort, kth, right_count, 0);
+            }
+        }
+    }
+
+    return 0;
+}
+
 /*
  * iterative median of 3 quickselect with cutoff to median-of-medians-of5
  * receives stack of already computed pivots in v to minimize the
@@ -413,12 +511,15 @@ NPY_NO_EXPORT int
 introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
              npy_intp *pivots, npy_intp *npiv)
 {
+    constexpr npy_intp edge_heap_select_limit = 1024;
+    constexpr npy_intp bad_split_ratio = 16;
     Idx<arg> idx(tosort);
     Sortee<type, arg> sortee(v, tosort);
 
     npy_intp low = 0;
     npy_intp high = num - 1;
     int depth_limit;
+    int bad_split_count = 0;
 
     if (npiv == NULL) {
         pivots = NULL;
@@ -451,6 +552,12 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         store_pivot(kth, kth, pivots, npiv);
         return 0;
     }
+    else if (kth - low + 1 <= edge_heap_select_limit ||
+             high - kth + 1 <= edge_heap_select_limit) {
+        edge_heap_select_<Tag, arg>(v, tosort, low, high, kth);
+        store_pivot(kth, kth, pivots, npiv);
+        return 0;
+    }
 
     else if (inexact<type>() && kth == num - 1) {
         /* useful to check if NaN present via partition(d, (x, -1)) */
@@ -473,13 +580,15 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
     for (; low + 1 < high;) {
         npy_intp ll = low + 1;
         npy_intp hh = high;
+        const npy_intp span = high - low + 1;
+        const bool use_robust_pivot = bad_split_count >= 2;
 
         /*
          * if we aren't making sufficient progress with median of 3
          * fall back to median-of-median5 pivot for linear worst case
          * med3 for small sizes is required to do unguarded partition
          */
-        if (depth_limit > 0 || hh - ll < 5) {
+        if (hh - ll < 5 || (!use_robust_pivot && depth_limit > 0)) {
             const npy_intp mid = low + (high - low) / 2;
             /* median of 3 pivot strategy,
              * swapping for efficient partition */
@@ -497,7 +606,12 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
             hh++;
         }
 
-        depth_limit--;
+        if (!use_robust_pivot) {
+            depth_limit--;
+        }
+        else {
+            bad_split_count = 0;
+        }
 
         /*
          * find place to put pivot (in low):
@@ -512,6 +626,15 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         /* kth pivot stored later */
         if (hh != kth) {
             store_pivot(hh, kth, pivots, npiv);
+        }
+
+        const npy_intp left_size = hh - low;
+        const npy_intp right_size = high - hh;
+        if (std::min(left_size, right_size) * bad_split_ratio < span) {
+            bad_split_count++;
+        }
+        else {
+            bad_split_count = 0;
         }
 
         if (hh >= kth) {
