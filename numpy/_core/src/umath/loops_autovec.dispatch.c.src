@@ -12,6 +12,52 @@
 #endif
 
 #if defined(__aarch64__)
+/**begin repeat
+ * #type = npy_ubyte, npy_ushort, npy_uint, npy_ulong, npy_ulonglong#
+ * #TYPE = UBYTE, USHORT, UINT, ULONG, ULONGLONG#
+ */
+/**begin repeat1
+ * #kind = bitwise_and, bitwise_or, bitwise_xor#
+ * #intrin = vandq_u8, vorrq_u8, veorq_u8#
+ * #OP = &, |, ^#
+ */
+static inline void
+@TYPE@_@kind@_aarch64_contig(char **args, npy_intp len)
+{
+    const npy_ubyte *ip1 = (const npy_ubyte *)args[0];
+    const npy_ubyte *ip2 = (const npy_ubyte *)args[1];
+    npy_ubyte *op1 = (npy_ubyte *)args[2];
+    npy_intp nbytes = len * (npy_intp)sizeof(@type@);
+
+    for (; nbytes >= 64; nbytes -= 64, ip1 += 64, ip2 += 64, op1 += 64) {
+        uint8x16_t a0 = vld1q_u8(ip1);
+        uint8x16_t b0 = vld1q_u8(ip2);
+        uint8x16_t a1 = vld1q_u8(ip1 + 16);
+        uint8x16_t b1 = vld1q_u8(ip2 + 16);
+        uint8x16_t a2 = vld1q_u8(ip1 + 32);
+        uint8x16_t b2 = vld1q_u8(ip2 + 32);
+        uint8x16_t a3 = vld1q_u8(ip1 + 48);
+        uint8x16_t b3 = vld1q_u8(ip2 + 48);
+
+        vst1q_u8(op1, @intrin@(a0, b0));
+        vst1q_u8(op1 + 16, @intrin@(a1, b1));
+        vst1q_u8(op1 + 32, @intrin@(a2, b2));
+        vst1q_u8(op1 + 48, @intrin@(a3, b3));
+    }
+
+    for (; nbytes >= 16; nbytes -= 16, ip1 += 16, ip2 += 16, op1 += 16) {
+        uint8x16_t a = vld1q_u8(ip1);
+        uint8x16_t b = vld1q_u8(ip2);
+        vst1q_u8(op1, @intrin@(a, b));
+    }
+
+    for (; nbytes > 0; --nbytes, ++ip1, ++ip2, ++op1) {
+        *op1 = *ip1 @OP@ *ip2;
+    }
+}
+/**end repeat1**/
+/**end repeat**/
+
 static inline void
 bitwise_count_unsigned_aarch64_contig(char **args, npy_intp len, size_t elsize)
 {
@@ -319,6 +365,14 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
         BINARY_REDUCE_LOOP_FAST(@type@, io1 @OP@= in2);
     }
     else {
+#if defined(__aarch64__)
+        if (IS_BINARY_CONT(@type@, @type@) &&
+                abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE &&
+                abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) {
+            @TYPE@_@kind@_aarch64_contig(args, dimensions[0]);
+            return;
+        }
+#endif
         BINARY_LOOP_FAST(@type@, @type@, *out = in1 @OP@ in2);
     }
 }
@@ -476,5 +530,3 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_isinf)
     NPY_CPU_DISPATCH_CURFX(ULONGLONG_isinf)(args, dimensions, steps, func);
 }
 /**end repeat**/
-
-
