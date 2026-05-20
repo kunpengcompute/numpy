@@ -284,6 +284,122 @@ fail:
     return NULL;
 }
 
+NPY_NO_EXPORT PyObject *
+arr_histogramdd_uniform2d(PyObject *NPY_UNUSED(self), PyObject *const *args,
+                          Py_ssize_t len_args, PyObject *kwnames)
+{
+    PyObject *sample_obj = NULL;
+    PyObject *nx_obj = NULL, *ny_obj = NULL;
+    PyObject *xmin_obj = NULL, *xmax_obj = NULL;
+    PyObject *ymin_obj = NULL, *ymax_obj = NULL;
+    PyArrayObject *sample = NULL, *hist = NULL;
+    npy_intp nx, ny, dims[2];
+    npy_intp i, n;
+    double xmin, xmax, ymin, ymax;
+    double xscale, yscale;
+    double *sample_data, *hist_data;
+
+    NPY_PREPARE_ARGPARSER;
+    if (npy_parse_arguments("_histogramdd_uniform2d", args, len_args, kwnames,
+                "sample", NULL, &sample_obj,
+                "nx", NULL, &nx_obj,
+                "ny", NULL, &ny_obj,
+                "xmin", NULL, &xmin_obj,
+                "xmax", NULL, &xmax_obj,
+                "ymin", NULL, &ymin_obj,
+                "ymax", NULL, &ymax_obj,
+                NULL, NULL, NULL) < 0) {
+        return NULL;
+    }
+
+    nx = PyArray_PyIntAsIntp(nx_obj);
+    if (error_converting(nx)) {
+        return NULL;
+    }
+    ny = PyArray_PyIntAsIntp(ny_obj);
+    if (error_converting(ny)) {
+        return NULL;
+    }
+    xmin = PyFloat_AsDouble(xmin_obj);
+    if (PyErr_Occurred()) {
+        return NULL;
+    }
+    xmax = PyFloat_AsDouble(xmax_obj);
+    if (PyErr_Occurred()) {
+        return NULL;
+    }
+    ymin = PyFloat_AsDouble(ymin_obj);
+    if (PyErr_Occurred()) {
+        return NULL;
+    }
+    ymax = PyFloat_AsDouble(ymax_obj);
+    if (PyErr_Occurred()) {
+        return NULL;
+    }
+
+    if (nx < 1 || ny < 1) {
+        PyErr_SetString(PyExc_ValueError, "bins must be positive");
+        return NULL;
+    }
+    if (nx > NPY_MAX_INTP / ny ||
+            nx * ny > NPY_MAX_INTP / (npy_intp)sizeof(double)) {
+        PyErr_SetString(PyExc_ValueError, "histogram is too large");
+        return NULL;
+    }
+    if (!(npy_isfinite(xmin) && npy_isfinite(xmax) && xmin < xmax &&
+          npy_isfinite(ymin) && npy_isfinite(ymax) && ymin < ymax)) {
+        PyErr_SetString(PyExc_ValueError, "range must be finite and increasing");
+        return NULL;
+    }
+
+    sample = (PyArrayObject *)PyArray_FromAny(sample_obj,
+            PyArray_DescrFromType(NPY_DOUBLE), 2, 2,
+            NPY_ARRAY_C_CONTIGUOUS | NPY_ARRAY_ALIGNED, NULL);
+    if (sample == NULL) {
+        return NULL;
+    }
+    if (PyArray_DIM(sample, 1) != 2) {
+        PyErr_SetString(PyExc_ValueError, "sample must have shape (N, 2)");
+        Py_DECREF(sample);
+        return NULL;
+    }
+
+    dims[0] = nx;
+    dims[1] = ny;
+    hist = (PyArrayObject *)PyArray_ZEROS(2, dims, NPY_DOUBLE, 0);
+    if (hist == NULL) {
+        Py_DECREF(sample);
+        return NULL;
+    }
+
+    n = PyArray_DIM(sample, 0);
+    sample_data = (double *)PyArray_DATA(sample);
+    hist_data = (double *)PyArray_DATA(hist);
+    xscale = (double)nx / (xmax - xmin);
+    yscale = (double)ny / (ymax - ymin);
+
+    NPY_BEGIN_ALLOW_THREADS;
+    for (i = 0; i < n; i++) {
+        double x = sample_data[2 * i];
+        double y = sample_data[2 * i + 1];
+        npy_intp ix, iy;
+
+        if (!(x >= xmin && x <= xmax && y >= ymin && y <= ymax)) {
+            continue;
+        }
+        ix = (x == xmax) ? (nx - 1) : (npy_intp)((x - xmin) * xscale);
+        iy = (y == ymax) ? (ny - 1) : (npy_intp)((y - ymin) * yscale);
+
+        if (ix >= 0 && ix < nx && iy >= 0 && iy < ny) {
+            hist_data[ix * ny + iy] += 1.0;
+        }
+    }
+    NPY_END_ALLOW_THREADS;
+
+    Py_DECREF(sample);
+    return (PyObject *)hist;
+}
+
 /* Internal function to expose check_array_monotonic to python */
 NPY_NO_EXPORT PyObject *
 arr__monotonicity(PyObject *NPY_UNUSED(self), PyObject *args, PyObject *kwds)
