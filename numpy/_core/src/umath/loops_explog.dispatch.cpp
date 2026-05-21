@@ -1369,16 +1369,22 @@ simd_exp_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
       vst1q_f64(outp + 12, result6);
       vst1q_f64(outp + 14, result7);
     } else {
-      for (int i = 0; i < 2; i++) {
-        outp[i * sdst] = vgetq_lane_f64(result0, i);
-        outp[(2 + i) * sdst] = vgetq_lane_f64(result1, i);
-        outp[(4 + i) * sdst] = vgetq_lane_f64(result2, i);
-        outp[(6 + i) * sdst] = vgetq_lane_f64(result3, i);
-        outp[(8 + i) * sdst] = vgetq_lane_f64(result4, i);
-        outp[(10 + i) * sdst] = vgetq_lane_f64(result5, i);
-        outp[(12 + i) * sdst] = vgetq_lane_f64(result6, i);
-        outp[(14 + i) * sdst] = vgetq_lane_f64(result7, i);
-      }
+      outp[0 * sdst] = vgetq_lane_f64(result0, 0);
+        outp[1 * sdst] = vgetq_lane_f64(result0, 1);
+        outp[2 * sdst] = vgetq_lane_f64(result1, 0);
+        outp[3 * sdst] = vgetq_lane_f64(result1, 1);
+        outp[4 * sdst] = vgetq_lane_f64(result2, 0);
+        outp[5 * sdst] = vgetq_lane_f64(result2, 1);
+        outp[6 * sdst] = vgetq_lane_f64(result3, 0);
+        outp[7 * sdst] = vgetq_lane_f64(result3, 1);
+        outp[8 * sdst] = vgetq_lane_f64(result4, 0);
+        outp[9 * sdst] = vgetq_lane_f64(result4, 1);
+        outp[10 * sdst] = vgetq_lane_f64(result5, 0);
+        outp[11 * sdst] = vgetq_lane_f64(result5, 1);
+        outp[12 * sdst] = vgetq_lane_f64(result6, 0);
+        outp[13 * sdst] = vgetq_lane_f64(result6, 1);
+        outp[14 * sdst] = vgetq_lane_f64(result7, 0);
+        outp[15 * sdst] = vgetq_lane_f64(result7, 1);
     }
 
     infp += ssrc * UNROLL * VEC_SIZE;
@@ -1449,11 +1455,12 @@ simd_exp_neon_FLOAT(const npy_float *src, npy_intp ssrc,
   const float32x4_t shift = vdupq_n_f32(0x1.8p+23f);
   const float32x4_t ln2_hi = vdupq_n_f32(0x1.62e4p-1f);
   const float32x4_t ln2_lo = vdupq_n_f32(0x1.7f7d1cp-20f);
-  const float32x4_t c0 = vdupq_n_f32(0x1.0e4020p-7f);
-  const float32x4_t c1 = vdupq_n_f32(0x1.573e2ep-5f);
-  const float32x4_t c2 = vdupq_n_f32(0x1.555e66p-3f);
-  const float32x4_t c3 = vdupq_n_f32(0x1.fffdb6p-2f);
-  const float32x4_t c4 = vdupq_n_f32(0x1.ffffecp-1f);
+  const float32x4_t c0 = vdupq_n_f32(0x1.111112p-7f);
+  const float32x4_t c1 = vdupq_n_f32(0x1.555556p-5f);
+  const float32x4_t c2 = vdupq_n_f32(0x1.555556p-3f);
+  const float32x4_t c3 = vdupq_n_f32(0x1.0p-1f);
+  const float32x4_t c4 = vdupq_n_f32(0x1.0p+0f);
+  const float32x4_t c5 = vdupq_n_f32(0x1.6c16c16cp-10f);
   const uint32x4_t exponent_bias = vdupq_n_u32(0x3f800000);
   const float32x4_t exp_max = vdupq_n_f32(88.72283935546875f);
   const float32x4_t exp_min = vdupq_n_f32(-103.97208404541015625f);
@@ -1628,6 +1635,14 @@ simd_exp_neon_FLOAT(const npy_float *src, npy_intp ssrc,
     float32x4_t r25 = vmulq_f32(r5, r5);
     float32x4_t r26 = vmulq_f32(r6, r6);
     float32x4_t r27 = vmulq_f32(r7, r7);
+    float32x4_t r40 = vmulq_f32(r20, r20);
+    float32x4_t r41 = vmulq_f32(r21, r21);
+    float32x4_t r42 = vmulq_f32(r22, r22);
+    float32x4_t r43 = vmulq_f32(r23, r23);
+    float32x4_t r44 = vmulq_f32(r24, r24);
+    float32x4_t r45 = vmulq_f32(r25, r25);
+    float32x4_t r46 = vmulq_f32(r26, r26);
+    float32x4_t r47 = vmulq_f32(r27, r27);
     float32x4_t p0 = vfmaq_f32(c1, r0, c0);
     float32x4_t p1 = vfmaq_f32(c1, r1, c0);
     float32x4_t p2 = vfmaq_f32(c1, r2, c0);
@@ -1660,6 +1675,22 @@ simd_exp_neon_FLOAT(const npy_float *src, npy_intp ssrc,
     float32x4_t poly5 = vfmaq_f32(vmulq_f32(c4, r5), q5, r25);
     float32x4_t poly6 = vfmaq_f32(vmulq_f32(c4, r6), q6, r26);
     float32x4_t poly7 = vfmaq_f32(vmulq_f32(c4, r7), q7, r27);
+    float32x4_t r60 = vmulq_f32(r40, r20);
+    float32x4_t r61 = vmulq_f32(r41, r21);
+    float32x4_t r62 = vmulq_f32(r42, r22);
+    float32x4_t r63 = vmulq_f32(r43, r23);
+    float32x4_t r64 = vmulq_f32(r44, r24);
+    float32x4_t r65 = vmulq_f32(r45, r25);
+    float32x4_t r66 = vmulq_f32(r46, r26);
+    float32x4_t r67 = vmulq_f32(r47, r27);
+    poly0 = vfmaq_f32(poly0, c5, r60);
+    poly1 = vfmaq_f32(poly1, c5, r61);
+    poly2 = vfmaq_f32(poly2, c5, r62);
+    poly3 = vfmaq_f32(poly3, c5, r63);
+    poly4 = vfmaq_f32(poly4, c5, r64);
+    poly5 = vfmaq_f32(poly5, c5, r65);
+    poly6 = vfmaq_f32(poly6, c5, r66);
+    poly7 = vfmaq_f32(poly7, c5, r67);
     float32x4_t result0 = vfmaq_f32(scale0, poly0, scale0);
     float32x4_t result1 = vfmaq_f32(scale1, poly1, scale1);
     float32x4_t result2 = vfmaq_f32(scale2, poly2, scale2);
@@ -1738,16 +1769,38 @@ simd_exp_neon_FLOAT(const npy_float *src, npy_intp ssrc,
       vst1q_f32(outp + 24, result6);
       vst1q_f32(outp + 28, result7);
     } else {
-      for (int i = 0; i < 4; i++) {
-        outp[i * sdst] = vgetq_lane_f32(result0, i);
-        outp[(4 + i) * sdst] = vgetq_lane_f32(result1, i);
-        outp[(8 + i) * sdst] = vgetq_lane_f32(result2, i);
-        outp[(12 + i) * sdst] = vgetq_lane_f32(result3, i);
-        outp[(16 + i) * sdst] = vgetq_lane_f32(result4, i);
-        outp[(20 + i) * sdst] = vgetq_lane_f32(result5, i);
-        outp[(24 + i) * sdst] = vgetq_lane_f32(result6, i);
-        outp[(28 + i) * sdst] = vgetq_lane_f32(result7, i);
-      }
+      outp[0 * sdst] = vgetq_lane_f32(result0, 0);
+      outp[1 * sdst] = vgetq_lane_f32(result0, 1);
+      outp[2 * sdst] = vgetq_lane_f32(result0, 2);
+      outp[3 * sdst] = vgetq_lane_f32(result0, 3);
+      outp[4 * sdst] = vgetq_lane_f32(result1, 0);
+      outp[5 * sdst] = vgetq_lane_f32(result1, 1);
+      outp[6 * sdst] = vgetq_lane_f32(result1, 2);
+      outp[7 * sdst] = vgetq_lane_f32(result1, 3);
+      outp[8 * sdst] = vgetq_lane_f32(result2, 0);
+      outp[9 * sdst] = vgetq_lane_f32(result2, 1);
+      outp[10 * sdst] = vgetq_lane_f32(result2, 2);
+      outp[11 * sdst] = vgetq_lane_f32(result2, 3);
+      outp[12 * sdst] = vgetq_lane_f32(result3, 0);
+      outp[13 * sdst] = vgetq_lane_f32(result3, 1);
+      outp[14 * sdst] = vgetq_lane_f32(result3, 2);
+      outp[15 * sdst] = vgetq_lane_f32(result3, 3);
+      outp[16 * sdst] = vgetq_lane_f32(result4, 0);
+      outp[17 * sdst] = vgetq_lane_f32(result4, 1);
+      outp[18 * sdst] = vgetq_lane_f32(result4, 2);
+      outp[19 * sdst] = vgetq_lane_f32(result4, 3);
+      outp[20 * sdst] = vgetq_lane_f32(result5, 0);
+      outp[21 * sdst] = vgetq_lane_f32(result5, 1);
+      outp[22 * sdst] = vgetq_lane_f32(result5, 2);
+      outp[23 * sdst] = vgetq_lane_f32(result5, 3);
+      outp[24 * sdst] = vgetq_lane_f32(result6, 0);
+      outp[25 * sdst] = vgetq_lane_f32(result6, 1);
+      outp[26 * sdst] = vgetq_lane_f32(result6, 2);
+      outp[27 * sdst] = vgetq_lane_f32(result6, 3);
+      outp[28 * sdst] = vgetq_lane_f32(result7, 0);
+      outp[29 * sdst] = vgetq_lane_f32(result7, 1);
+      outp[30 * sdst] = vgetq_lane_f32(result7, 2);
+      outp[31 * sdst] = vgetq_lane_f32(result7, 3);
     }
 
     infp += ssrc * UNROLL * VEC_SIZE;
@@ -1782,10 +1835,13 @@ simd_exp_neon_FLOAT(const npy_float *src, npy_intp ssrc,
     float32x4_t scale = vreinterpretq_f32_u32(vaddq_u32(e, exponent_bias));
 
     float32x4_t r2 = vmulq_f32(r, r);
+    float32x4_t r4 = vmulq_f32(r2, r2);
     float32x4_t p = vfmaq_f32(c1, r, c0);
     float32x4_t q = vfmaq_f32(c3, r, c2);
     q = vfmaq_f32(q, p, r2);
     float32x4_t poly = vfmaq_f32(vmulq_f32(c4, r), q, r2);
+    float32x4_t r6 = vmulq_f32(r4, r2);
+    poly = vfmaq_f32(poly, c5, r6);
     float32x4_t result = vfmaq_f32(scale, poly, scale);
 
     result = vbslq_f32(is_nan, nan_val, result);
@@ -1801,7 +1857,10 @@ simd_exp_neon_FLOAT(const npy_float *src, npy_intp ssrc,
         vst1q_lane_f32(outp + 2, result, 2);
       } else vst1q_f32(outp, result);
     } else {
-      for (int i = 0; i < current_len; i++) outp[i * sdst] = vgetq_lane_f32(result, i);
+      if (current_len >= 1) outp[0 * sdst] = vgetq_lane_f32(result, 0);
+      if (current_len >= 2) outp[1 * sdst] = vgetq_lane_f32(result, 1);
+      if (current_len >= 3) outp[2 * sdst] = vgetq_lane_f32(result, 2);
+      if (current_len >= 4) outp[3 * sdst] = vgetq_lane_f32(result, 3);
     }
 
     infp += ssrc * current_len;
@@ -2054,12 +2113,14 @@ simd_log_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
       vst1q_f64(outp + 4, result2);
       vst1q_f64(outp + 6, result3);
     } else {
-      for (int i = 0; i < 2; i++) {
-        outp[i * sdst] = vgetq_lane_f64(result0, i);
-        outp[(2 + i) * sdst] = vgetq_lane_f64(result1, i);
-        outp[(4 + i) * sdst] = vgetq_lane_f64(result2, i);
-        outp[(6 + i) * sdst] = vgetq_lane_f64(result3, i);
-      }
+      outp[0 * sdst] = vgetq_lane_f64(result0, 0);
+        outp[1 * sdst] = vgetq_lane_f64(result0, 1);
+        outp[2 * sdst] = vgetq_lane_f64(result1, 0);
+        outp[3 * sdst] = vgetq_lane_f64(result1, 1);
+        outp[4 * sdst] = vgetq_lane_f64(result2, 0);
+        outp[5 * sdst] = vgetq_lane_f64(result2, 1);
+        outp[6 * sdst] = vgetq_lane_f64(result3, 0);
+        outp[7 * sdst] = vgetq_lane_f64(result3, 1);
     }
 
     infp += ssrc * UNROLL * VEC_SIZE;
@@ -2104,32 +2165,60 @@ simd_log_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
       }
     } else {
       feclearexcept(FE_ALL_EXCEPT);
-      for (int i = 0; i < current_len; i++) {
-        double val = (ssrc == 1) ? infp[i] : infp[i * ssrc];
-        uint64_t lane_nan = vgetq_lane_u64(is_nan, i);
-        uint64_t lane_pinf = vgetq_lane_u64(is_pos_inf, i);
-        uint64_t lane_ninf = vgetq_lane_u64(is_neg_inf, i);
-        uint64_t lane_neg = vgetq_lane_u64(is_neg, i);
-        uint64_t lane_zero = vgetq_lane_u64(is_zero, i);
+      if (current_len >= 1) {
+        double val = (ssrc == 1) ? infp[0] : infp[0 * ssrc];
+        uint64_t lane_nan = vgetq_lane_u64(is_nan, 0);
+        uint64_t lane_pinf = vgetq_lane_u64(is_pos_inf, 0);
+        uint64_t lane_ninf = vgetq_lane_u64(is_neg_inf, 0);
+        uint64_t lane_neg = vgetq_lane_u64(is_neg, 0);
+        uint64_t lane_zero = vgetq_lane_u64(is_zero, 0);
         if (lane_nan) {
-          if (sdst == 1) outp[i] = val;
-          else outp[i * sdst] = val;
+          if (sdst == 1) outp[0] = val;
+          else outp[0 * sdst] = val;
         } else if (lane_pinf) {
-          if (sdst == 1) outp[i] = NPY_INFINITY;
-          else outp[i * sdst] = NPY_INFINITY;
+          if (sdst == 1) outp[0] = NPY_INFINITY;
+          else outp[0 * sdst] = NPY_INFINITY;
         } else if (lane_ninf) {
-          if (sdst == 1) outp[i] = NPY_NAN;
-          else outp[i * sdst] = NPY_NAN;
+          if (sdst == 1) outp[0] = NPY_NAN;
+          else outp[0 * sdst] = NPY_NAN;
         } else if (lane_zero) {
-          if (sdst == 1) outp[i] = -NPY_INFINITY;
-          else outp[i * sdst] = -NPY_INFINITY;
+          if (sdst == 1) outp[0] = -NPY_INFINITY;
+          else outp[0 * sdst] = -NPY_INFINITY;
         } else if (lane_neg) {
-          if (sdst == 1) outp[i] = -NPY_NAN;
-          else outp[i * sdst] = -NPY_NAN;
+          if (sdst == 1) outp[0] = -NPY_NAN;
+          else outp[0 * sdst] = -NPY_NAN;
         } else {
           double result = npy_log(val);
-          if (sdst == 1) outp[i] = result;
-          else outp[i * sdst] = result;
+          if (sdst == 1) outp[0] = result;
+          else outp[0 * sdst] = result;
+        }
+      }
+      if (current_len >= 2) {
+        double val = (ssrc == 1) ? infp[1] : infp[1 * ssrc];
+        uint64_t lane_nan = vgetq_lane_u64(is_nan, 1);
+        uint64_t lane_pinf = vgetq_lane_u64(is_pos_inf, 1);
+        uint64_t lane_ninf = vgetq_lane_u64(is_neg_inf, 1);
+        uint64_t lane_neg = vgetq_lane_u64(is_neg, 1);
+        uint64_t lane_zero = vgetq_lane_u64(is_zero, 1);
+        if (lane_nan) {
+          if (sdst == 1) outp[1] = val;
+          else outp[1 * sdst] = val;
+        } else if (lane_pinf) {
+          if (sdst == 1) outp[1] = NPY_INFINITY;
+          else outp[1 * sdst] = NPY_INFINITY;
+        } else if (lane_ninf) {
+          if (sdst == 1) outp[1] = NPY_NAN;
+          else outp[1 * sdst] = NPY_NAN;
+        } else if (lane_zero) {
+          if (sdst == 1) outp[1] = -NPY_INFINITY;
+          else outp[1 * sdst] = -NPY_INFINITY;
+        } else if (lane_neg) {
+          if (sdst == 1) outp[1] = -NPY_NAN;
+          else outp[1 * sdst] = -NPY_NAN;
+        } else {
+          double result = npy_log(val);
+          if (sdst == 1) outp[1] = result;
+          else outp[1 * sdst] = result;
         }
       }
     }
@@ -2363,12 +2452,22 @@ simd_log_neon_FLOAT(const npy_float *src, npy_intp ssrc,
       vst1q_f32(outp + 8, result2);
       vst1q_f32(outp + 12, result3);
     } else {
-      for (int i = 0; i < 4; i++) {
-        outp[i * sdst] = vgetq_lane_f32(result0, i);
-        outp[(4 + i) * sdst] = vgetq_lane_f32(result1, i);
-        outp[(8 + i) * sdst] = vgetq_lane_f32(result2, i);
-        outp[(12 + i) * sdst] = vgetq_lane_f32(result3, i);
-      }
+      outp[0 * sdst] = vgetq_lane_f32(result0, 0);
+        outp[1 * sdst] = vgetq_lane_f32(result0, 1);
+        outp[2 * sdst] = vgetq_lane_f32(result0, 2);
+        outp[3 * sdst] = vgetq_lane_f32(result0, 3);
+        outp[4 * sdst] = vgetq_lane_f32(result1, 0);
+        outp[5 * sdst] = vgetq_lane_f32(result1, 1);
+        outp[6 * sdst] = vgetq_lane_f32(result1, 2);
+        outp[7 * sdst] = vgetq_lane_f32(result1, 3);
+        outp[8 * sdst] = vgetq_lane_f32(result2, 0);
+        outp[9 * sdst] = vgetq_lane_f32(result2, 1);
+        outp[10 * sdst] = vgetq_lane_f32(result2, 2);
+        outp[11 * sdst] = vgetq_lane_f32(result2, 3);
+        outp[12 * sdst] = vgetq_lane_f32(result3, 0);
+        outp[13 * sdst] = vgetq_lane_f32(result3, 1);
+        outp[14 * sdst] = vgetq_lane_f32(result3, 2);
+        outp[15 * sdst] = vgetq_lane_f32(result3, 3);
     }
 
     infp += ssrc * UNROLL * VEC_SIZE;
@@ -2414,7 +2513,10 @@ simd_log_neon_FLOAT(const npy_float *src, npy_intp ssrc,
           vst1q_lane_f32(outp + 2, result, 2);
         } else vst1q_f32(outp, result);
       } else {
-        for (int i = 0; i < current_len; i++) outp[i * sdst] = vgetq_lane_f32(result, i);
+if (current_len >= 1) outp[0 * sdst] = vgetq_lane_f32(result, 0);
+      if (current_len >= 2) outp[1 * sdst] = vgetq_lane_f32(result, 1);
+      if (current_len >= 3) outp[2 * sdst] = vgetq_lane_f32(result, 2);
+      if (current_len >= 4) outp[3 * sdst] = vgetq_lane_f32(result, 3);
       }
     } else {
       feclearexcept(FE_ALL_EXCEPT);
