@@ -767,7 +767,8 @@ defdict = {
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.radians'),
           None,
-          TD(fltsP, f='radians', astype={'e': 'f'}),
+          TD('efdg', cfunc_alias='radians_unrolled'),
+          TD(P, f='radians'),
           ),
 'deg2rad':
     Ufunc(1, 1, None,
