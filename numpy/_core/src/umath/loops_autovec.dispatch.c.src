@@ -27,6 +27,16 @@
 #define LONG_left_shift_needs_clear_floatstatus
 #define ULONG_left_shift_needs_clear_floatstatus
 
+/*
+ * Enable loop unrolling for 64-bit multiplication on AArch64,
+ * where NEON does not provide native vectorized int64 multiply intrinsics.
+ */
+#ifdef __aarch64__
+#define AUTO_VEC_UNROLL_LOOPS NPY_GCC_UNROLL_LOOPS
+#else
+#define AUTO_VEC_UNROLL_LOOPS
+#endif
+
 /**begin repeat
  * #TYPE = BYTE, UBYTE, SHORT, USHORT, INT, UINT,
  *         LONG, ULONG, LONGLONG, ULONGLONG#
@@ -36,6 +46,7 @@
  *          npy_double, npy_double, npy_double, npy_double#
  * #SIGNED = 1, 0, 1, 0, 1, 0, 1, 0, 1, 0#
  * #c = hh,uhh,h,uh,,u,l,ul,ll,ull#
+ * #big = 0, 0, 0, 0, 0, 0, 1, 1, 1, 1#
  */
 
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_positive)
@@ -60,8 +71,11 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_reciprocal)
  * Arithmetic
  * #kind = add, subtract, multiply#
  * #OP = +, -, *#
- * #is_mul = 0*2, 1#
+ * #UNROLL = 0, 0, 1#
  */
+#if @big@ && @UNROLL@
+AUTO_VEC_UNROLL_LOOPS
+#endif
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
