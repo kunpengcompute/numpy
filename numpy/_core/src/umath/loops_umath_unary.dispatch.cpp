@@ -29,15 +29,20 @@ simd_sqrt_f16_impl(const npy_half *src, npy_intp ssrc, npy_half *dst, npy_intp s
     npy_half NPY_DECL_ALIGNED(NPY_SIMD_WIDTH) fallback_buf[hn::MaxLanes(f16_tag_t) * 2];
 
     for (; len > 0; len -= lanes, src16 += ssrc * lanes, dst16 += sdst * lanes) {
-        hn::Vec<decltype(f16_tag_t)> x16_in;
+        const npy_intp current_len = len < lanes ? len : lanes;
+        
+        hn::Vec<decltype(f16_tag_t)> x16_in = hn::Zero(f16_tag_t);
+        
         if (ssrc == 1) {
-            x16_in = hn::LoadN(f16_tag_t, src16, len);
+            auto mask = hn::FirstN(f16_tag_t, current_len);
+            x16_in = hn::IfThenElse(mask, hn::LoadN(f16_tag_t, src16, current_len), x16_in);
         } else {
-            ::hwy::float16_t tmp[hn::MaxLanes(f16_tag_t)];
-            for (int j = 0; j < lanes && j < len; ++j) {
+            ::hwy::float16_t NPY_DECL_ALIGNED(NPY_SIMD_WIDTH) tmp[hn::MaxLanes(f16_tag_t)];
+            for (int j = 0; j < current_len; ++j) {
                 tmp[j] = src16[j * ssrc];
             }
-            x16_in = hn::LoadN(f16_tag_t, tmp, lanes);
+            auto mask = hn::FirstN(f16_tag_t, current_len);
+            x16_in = hn::IfThenElse(mask, hn::Load(f16_tag_t, tmp), x16_in);
         }
 
         hn::Store(x16_in, f16_tag_t, (::hwy::float16_t*)fallback_buf);
@@ -54,7 +59,7 @@ simd_sqrt_f16_impl(const npy_half *src, npy_intp ssrc, npy_half *dst, npy_intp s
 
         hn::Store(y16_out, f16_tag_t, (::hwy::float16_t*)fallback_buf + lanes);
 
-        for (int j = 0; j < lanes / 2 && j < len; ++j) {
+        for (int j = 0; j < lanes / 2 && j < current_len; ++j) {
             npy_half out = *((npy_half*)(fallback_buf + lanes) + j);
             if (sdst == 1) {
                 dst16[j] = ::hwy::float16_t::FromBits(out);
@@ -62,7 +67,7 @@ simd_sqrt_f16_impl(const npy_half *src, npy_intp ssrc, npy_half *dst, npy_intp s
                 dst16[j * sdst] = ::hwy::float16_t::FromBits(out);
             }
         }
-        for (int j = 0; j < lanes / 2 && (lanes / 2 + j) < len; ++j) {
+        for (int j = 0; j < lanes / 2 && (lanes / 2 + j) < current_len; ++j) {
             npy_half out = *((npy_half*)(fallback_buf + lanes) + lanes / 2 + j);
             if (sdst == 1) {
                 dst16[lanes / 2 + j] = ::hwy::float16_t::FromBits(out);
