@@ -237,12 +237,20 @@ NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@kind@,
  **                             FLOAT LOOPS                                 **
  *****************************************************************************
  */
+#include "loops_unary_fp_ops.dispatch.h"
+/**begin repeat
+ *  #TYPE = HALF, FLOAT, DOUBLE, CFLOAT, CDOUBLE#
+ */
+ NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_reciprocal,
+    (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data)))
+/**end repeat**/
+
 #include "loops_unary_fp.dispatch.h"
 /**begin repeat
  *  #TYPE = FLOAT, DOUBLE#
  */
 /**begin repeat1
- * #kind = rint, floor, trunc, ceil, sqrt, absolute, square, reciprocal#
+ * #kind = rint, floor, trunc, ceil, sqrt, absolute, square#
  */
 NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@kind@,
    (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data)))
@@ -646,9 +654,6 @@ C@TYPE@_@kind@(char **args, npy_intp const *dimensions, npy_intp const *steps, v
 /**end repeat1**/
 
 NPY_NO_EXPORT void
-C@TYPE@_reciprocal(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data));
-
-NPY_NO_EXPORT void
 C@TYPE@__ones_like(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data));
 
 NPY_NO_EXPORT void
@@ -683,6 +688,9 @@ C@TYPE@_@kind@(char **args, npy_intp const *dimensions, npy_intp const *steps, v
 /**end repeat1**/
 
 /**end repeat**/
+
+NPY_NO_EXPORT void
+CLONGDOUBLE_reciprocal(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data));
 
 #undef CGE
 #undef CLE
