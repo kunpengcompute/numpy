@@ -56,6 +56,11 @@ array_function_dispatch = functools.partial(
 # divisions by zero (or alternatively additional checks) in the case of
 # zero-length axes during its computation.
 def _raw_fft(a, n, axis, is_real, is_forward, norm, out=None):
+    from ._backend import _BACKEND_MANAGER
+    backend = _BACKEND_MANAGER.get_backend_for_type(a.real.dtype)
+    if backend.name != 'pocketfft':
+        return backend._raw_fft(a, n, axis, is_real, is_forward, norm, out)
+    # ── pocketfft path below ──
     if n < 1:
         raise ValueError(f"Invalid number of FFT data points ({n}) specified.")
 
@@ -739,6 +744,11 @@ def _cook_nd_args(a, s=None, axes=None, invreal=0):
 
 
 def _raw_fftnd(a, s=None, axes=None, function=fft, norm=None, out=None):
+    from ._backend import _BACKEND_MANAGER
+    backend = _BACKEND_MANAGER.get_current_backend()
+    if backend.name != 'pocketfft':
+        return backend._raw_fftnd(a, s, axes, function, norm, out)
+    # ── pocketfft path below ──
     a = asarray(a)
     s, axes = _cook_nd_args(a, s, axes)
     itl = list(range(len(axes)))
