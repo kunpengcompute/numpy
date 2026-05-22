@@ -43,8 +43,10 @@
   - `FULL_GCC_COVERAGE_ICE_WORKAROUND`: `1` 表示 GCC 12 以下的 coverage build 使用 Meson `-Doptimization=0` 以规避编译器 ICE。默认值：`1`
 - `incremental_coverage.sh`
   - `COMPARE_BRANCH`: diff 对比基线，默认 `origin/main`
-  - `DIFF_COVER_FAIL_UNDER`: 增量覆盖率最低阈值
-  - `RUN_FULL_JOB_IF_MISSING`: 设为 `1` 时，若缺少 coverage XML 则先运行 `full.sh`
+  - `DIFF_COVER_FAIL_UNDER`: Python 与 C/C++ 增量覆盖率最低阈值
+  - `DIFF_COVER_SHOW_FILES`: `1` 表示输出每个文件的增量覆盖率和缺失行明细，`0` 表示只输出最后汇总。默认值：`0`
+  - `INCREMENTAL_COVERAGE_REPORT_DIR`: 保存 diff-cover 文本和 JSON 中间报告的目录。默认值：`build/incremental_coverage`
+  - `RUN_FULL_JOB_IF_MISSING`: 设为 `1` 时，若缺少 Python 或 C/C++ coverage XML 则先运行 `full.sh`
 
 ## 说明
 
@@ -53,6 +55,7 @@
 
 - `smoke_test.sh` 会针对当前解释器运行；如果平台需要 Python 版本矩阵，可以为不同 Python 环境分别调用一次该脚本。脚本通过 `common.sh` 中的公共 `numpy.distutils` 策略处理兼容性：Python `3.12` 及以上版本会自动追加 `--ignore=numpy/distutils/tests`；更早版本默认使用 `SETUPTOOLS_USE_DISTUTILS=stdlib` 并忽略 setuptools 对该模式发出的已知 `UserWarning`，避免 setuptools vendored distutils 与 `numpy.distutils` 的 legacy compiler API 不兼容。
 - `full.sh` 会同时生成 Python 覆盖率和 C/C++ 覆盖率产物，便于 `incremental_coverage.sh` 复用同一份覆盖率结果。上游 `Linux tests / full` 使用 `PYTHONOPTIMIZE=2 pytest numpy --durations=10 --timeout=600 --cov-report=html:build/coverage`，但 C/C++ 覆盖率仍是 TODO；本脚本在此基础上通过 `spin test --gcov` 和 `pytest-cov` 同时采集 Python 与 C/C++ 覆盖率。
+- `incremental_coverage.sh` 会分别基于 `build/coverage/coverage.xml` 计算 Python 增量覆盖率，并基于 `build/meson-logs/coverage.xml` 计算 C/C++ 增量覆盖率，最后统一输出汇总和阈值检查结果。默认不打印每个文件的缺失行明细；如需排查具体文件，可设置 `DIFF_COVER_SHOW_FILES=1`。若任一 XML 不存在，脚本会提示缺失文件并报错退出；设置 `RUN_FULL_JOB_IF_MISSING=1` 时会先尝试运行 `full.sh` 生成产物，若运行后仍缺失则继续报错退出。
 - `full.sh` 默认不设置 `PYTHONOPTIMIZE`，并会清除调用环境里已有的 `PYTHONOPTIMIZE`。原因是 `PYTHONOPTIMIZE=2` 会移除 docstring 和部分签名元数据，可能导致依赖运行时签名信息的测试（例如 `numpy.ma` 的 signature 测试）失败；默认关闭可让覆盖率任务覆盖普通运行时路径并稳定产出 Python/C 覆盖率。若需要复现上游 full job 的优化模式，可显式执行 `FULL_PYTHONOPTIMIZE=2 .gitcode/pipline/full.sh`，但这可能重新触发这类签名元数据相关失败，且覆盖率结果会反映 `-OO` 下的运行路径。
 - `full.sh` 会为派生的扩展构建追加 `LDFLAGS=--coverage`。这样 `numpy/random/tests/test_extending.py::test_cython` 这类在测试中临时调用 Meson 构建的 Cython/C++ 扩展，可以在链接覆盖率插桩后的 NumPy 静态库时同时链接 gcov runtime，避免导入临时 `.so` 时出现未解析的 coverage 符号。
 - `full.sh` 会在 coverage 运行前强制删除并重新 `meson setup` `build` 目录，确保脚本追加的 `CFLAGS/CXXFLAGS/LDFLAGS`（例如 `-Wno-error=coverage-invalid-line-number`）真正写入 Meson 的编译命令；复用已有 build 目录时，后续追加的环境变量不会自动回灌到已有配置中。
