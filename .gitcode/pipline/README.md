@@ -48,6 +48,41 @@
   - `INCREMENTAL_COVERAGE_REPORT_DIR`: 保存 diff-cover 文本和 JSON 中间报告的目录。默认值：`build/incremental_coverage`
   - `RUN_FULL_JOB_IF_MISSING`: 设为 `1` 时，若缺少 Python 或 C/C++ coverage XML 则先运行 `full.sh`
 
+### 增量覆盖率使用示例
+
+`incremental_coverage.sh` 计算的是 `COMPARE_BRANCH...HEAD` 的增量覆盖率，覆盖率 XML 必须来自当前 `HEAD`。如果需要比较 `base` 到 `HEAD` 的增量覆盖率，先确保当前检出的代码就是目标 `HEAD`。
+
+如果还没有运行过 `full.sh`，可以让脚本在缺少覆盖率产物时自动运行 full job：
+
+```bash
+COMPARE_BRANCH=<base_commit> \
+RUN_FULL_JOB_IF_MISSING=1 \
+.gitcode/pipline/incremental_coverage.sh
+```
+
+如果已经在当前 `HEAD` 运行过 `full.sh`，可以直接复用已有覆盖率产物：
+
+```bash
+COMPARE_BRANCH=<base_commit> \
+.gitcode/pipline/incremental_coverage.sh
+```
+
+默认只输出 Python 与 C/C++ 的最终汇总。需要查看具体文件和缺失行时，可打开明细输出：
+
+```bash
+COMPARE_BRANCH=<base_commit> \
+DIFF_COVER_SHOW_FILES=1 \
+.gitcode/pipline/incremental_coverage.sh
+```
+
+需要设置增量覆盖率阈值时，可配置 `DIFF_COVER_FAIL_UNDER`。该阈值会同时应用于 Python 与 C/C++ 增量覆盖率：
+
+```bash
+COMPARE_BRANCH=<base_commit> \
+DIFF_COVER_FAIL_UNDER=70 \
+.gitcode/pipline/incremental_coverage.sh
+```
+
 ## 说明
 
 - `common.sh` 在未跳过系统依赖时，会自动检测并使用 `apt-get`、`dnf` 或 `yum`。
