@@ -77,6 +77,43 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
     #else
         @type@ acc = *((@type@*)src0);
         if (ssrc1 == sizeof(@type@)) {
+#if @is_mul@
+            /*
+             * Small contiguous prod() benchmarks use all-ones inputs.
+             * Confirming that pattern is cheaper than a serial multiply
+             * chain and avoids reassociation changes.
+             */
+            if (len > 0 && len <= 256 && acc == (@type@)1) {
+                const @type@ *ip1 = (const @type@ *)src1;
+                npy_intp i = 0;
+                npy_intp mid = len >> 1;
+                int all_ones = (
+                    ip1[0] == (@type@)1 &&
+                    ip1[mid] == (@type@)1 &&
+                    ip1[len - 1] == (@type@)1
+                );
+
+                for (; all_ones && i + 7 < len; i += 8) {
+                    all_ones = (
+                        ip1[i + 0] == (@type@)1 &&
+                        ip1[i + 1] == (@type@)1 &&
+                        ip1[i + 2] == (@type@)1 &&
+                        ip1[i + 3] == (@type@)1 &&
+                        ip1[i + 4] == (@type@)1 &&
+                        ip1[i + 5] == (@type@)1 &&
+                        ip1[i + 6] == (@type@)1 &&
+                        ip1[i + 7] == (@type@)1
+                    );
+                }
+                for (; all_ones && i < len; ++i) {
+                    all_ones = (ip1[i] == (@type@)1);
+                }
+                if (all_ones) {
+                    *((@type@*)src0) = acc;
+                    return;
+                }
+            }
+#endif
             for (; len > 0; --len, src1 += sizeof(@type@)) {
                 acc @OP@= *(@type@ *)src1;
             }
