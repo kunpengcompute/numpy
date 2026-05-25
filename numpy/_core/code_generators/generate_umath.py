@@ -876,7 +876,7 @@ defdict = {
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.exp'),
           None,
-          TD('efd', dispatch=[('loops_explog', 'efd')]),
+          TD('efd', dispatch=[('loops_exp', 'efd')]),
           TD('fdg' + cmplx, f='exp'),
           TD(P, f='exp'),
           ),
@@ -884,7 +884,7 @@ defdict = {
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.exp2'),
           None,
-          TD('efd', dispatch=[('loops_umath_fp', 'fd'), ('loops_half', 'e')]),
+          TD('efd', dispatch=[('loops_exp2', 'efd')]),
           TD(inexact, f='exp2', astype={'e': 'f'}),
           TD(P, f='exp2'),
           ),
@@ -900,7 +900,7 @@ defdict = {
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.log'),
           None,
-          TD('efd', dispatch=[('loops_explog', 'efd')]),
+          TD('efd', dispatch=[('loops_log', 'efd')]),
           TD('fdg' + cmplx, f='log'),
           TD(P, f='log'),
           ),
@@ -908,7 +908,7 @@ defdict = {
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.log2'),
           None,
-          TD('efd', dispatch=[('loops_umath_fp', 'fd'), ('loops_half', 'e')]),
+          TD('efd', dispatch=[('loops_log2', 'efd')]),
           TD(inexact, f='log2', astype={'e': 'f'}),
           TD(P, f='log2'),
           ),
@@ -941,7 +941,7 @@ defdict = {
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.cbrt'),
           None,
-          TD('efd', dispatch=[('loops_umath_fp', 'fd'), ('loops_half', 'e')]),
+          TD('efd', dispatch=[('loops_umath_unary', 'efd')]),
           TD(flts, f='cbrt', astype={'e': 'f'}),
           TD(P, f='cbrt'),
           ),
@@ -1593,6 +1593,7 @@ def make_code(funcdict, filename):
     #include "matmul.h"
     #include "clip.h"
     #include "loops_complex_maxmin.h"
+    #include "loops_explog.h"
     #include "dtypemeta.h"
     #include "dispatching.h"
     #include "_umath_doc_generated.h"
