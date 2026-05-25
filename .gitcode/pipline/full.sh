@@ -76,6 +76,41 @@ ci_append_coverage_link_flags() {
     ci_log "Added coverage link flag for subprocess extension builds: ${link_flag}"
 }
 
+ci_configure_gcov_tool() {
+    local cc_path
+    local gcov_path
+    local cc_major
+    local candidate
+    local -a compiler_args
+    local -a gcov_candidates=()
+
+    [[ -z "${GCOV:-}" ]] || return 0
+
+    read -r -a compiler_args <<< "${CC:-cc}"
+    cc_path="$(command -v "${compiler_args[0]}" || true)"
+    if [[ -n "${cc_path}" ]]; then
+        gcov_candidates+=("$(dirname "${cc_path}")/gcov")
+    fi
+
+    cc_major="$(ci_compiler_gcc_major "${CC:-cc}" || true)"
+    if [[ -n "${cc_major}" ]]; then
+        gcov_candidates+=("/opt/rh/gcc-toolset-${cc_major}/root/usr/bin/gcov")
+    fi
+
+    for candidate in "${gcov_candidates[@]}"; do
+        [[ -x "${candidate}" ]] || continue
+        if [[ -n "${cc_major}" ]] && ! "${candidate}" --version 2>/dev/null | head -n 1 | grep -q " ${cc_major}\\."; then
+            continue
+        fi
+
+        export GCOV="${candidate}"
+        ci_log "Using gcov from compiler toolchain: ${GCOV}"
+        return 0
+    done
+
+    ci_log "Using default gcov from PATH."
+}
+
 ci_compiler_gcc_major() {
     local compiler="$1"
     local macro
@@ -201,12 +236,22 @@ cat > gcovr.cfg <<'EOF'
 # Ignore third-party code under subprojects to reduce noise in C/C++ coverage.
 exclude = subprojects/.*
 
+# Ignore generated build outputs and vendored SIMD/sort implementation details
+# that are architecture-dependent and make cross-arch coverage thresholds noisy.
+exclude = build/.*
+exclude = numpy/_core/src/highway/.*
+exclude = numpy/_core/src/npysort/.*
+
 # Tolerate GCC coverage parse issues: warn once per file instead of failing.
 gcov-ignore-parse-errors = negative_hits.warn_once_per_file
 EOF
 
 ci_append_supported_coverage_warning_flags
 ci_append_coverage_link_flags
+ci_configure_gcov_tool
+if [[ -n "${GCOV:-}" ]]; then
+    printf 'gcov-executable = %s\n' "${GCOV}" >> gcovr.cfg
+fi
 
 ci_log "Running spin test with Python and C/C++ coverage."
 find "${build_dir}" -name '*.gcda' -delete 2>/dev/null || true
