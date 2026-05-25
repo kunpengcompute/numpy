@@ -458,7 +458,7 @@ defdict = {
           docstrings.get('numpy._core.umath.reciprocal'),
           None,
           TD(ints + inexact, dispatch=[
-              ('loops_unary_fp', 'fd'),
+              ('loops_unary_fp_ops', 'efdFD'),
               ('loops_autovec', ints),
           ]),
           TD(O, f='Py_reciprocal'),

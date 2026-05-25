@@ -976,6 +976,12 @@ copy_small_indexed_subspace(char *dst, char *src, npy_intp total_bytes)
     return 0;
 }
 
+static inline int
+is_legacy_indexed_subspace_dtype(PyArray_Descr *descr)
+{
+    return PyDataType_ISLEGACY(descr);
+}
+
 /*
  * Fast path for arr[ind] when ind is a simple 1-D integer array indexing the
  * first axis and each selected trailing subspace is C-contiguous.
@@ -995,8 +1001,7 @@ mapiter_trivial_get_c_subspace(
     char *ind_ptr = PyArray_BYTES(ind);
     char *result_ptr;
     npy_intp fancy_dim = PyArray_DIM(self, 0);
-    int needs_api = PyDataType_FLAGCHK(PyArray_DESCR(self), NPY_NEEDS_PYAPI);
-    npy_uint64 dtype_flags = PyDataType_FLAGS(PyArray_DESCR(self));
+    int needs_api = PyDataType_REFCHK(PyArray_DESCR(self));
 
     NPY_BEGIN_THREADS_DEF;
 
@@ -1007,7 +1012,7 @@ mapiter_trivial_get_c_subspace(
             !IsUintAligned(ind) ||
             !PyDataType_ISNOTSWAPPED(PyArray_DESCR(ind)) ||
             !PyArray_IS_C_CONTIGUOUS(self) ||
-            (dtype_flags & (NPY_ITEM_REFCOUNT | NPY_NEEDS_INIT)) != 0) {
+            !is_legacy_indexed_subspace_dtype(PyArray_DESCR(self))) {
         return NULL;
     }
 
@@ -1090,7 +1095,6 @@ mapiter_trivial_get_axis1_c_subspace(
     char *ind_base = PyArray_BYTES(ind);
     char *result_base;
     npy_intp fancy_dim = PyArray_DIM(self, 1);
-    npy_uint64 dtype_flags = PyDataType_FLAGS(PyArray_DESCR(self));
 
     NPY_BEGIN_THREADS_DEF;
 
@@ -1102,8 +1106,8 @@ mapiter_trivial_get_axis1_c_subspace(
             !IsUintAligned(ind) ||
             !PyDataType_ISNOTSWAPPED(PyArray_DESCR(ind)) ||
             !PyArray_IS_C_CONTIGUOUS(self) ||
-            (dtype_flags & (NPY_ITEM_REFCOUNT | NPY_NEEDS_INIT |
-                            NPY_NEEDS_PYAPI)) != 0) {
+            !is_legacy_indexed_subspace_dtype(PyArray_DESCR(self)) ||
+            PyDataType_REFCHK(PyArray_DESCR(self))) {
         return NULL;
     }
 
