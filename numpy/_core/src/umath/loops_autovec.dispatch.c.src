@@ -824,6 +824,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
         return;
     }
 #endif
+#if @or_only@
     if (sizeof(@type@) == sizeof(npy_ubyte) &&
             IS_BINARY_CONT_S1(@type@, npy_bool) &&
             abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) {
@@ -839,6 +840,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
         }
         return;
     }
+#endif
     if (sizeof(@type@) > sizeof(npy_ubyte) &&
             IS_BINARY_CONT_S1(@type@, npy_bool)) {
         const npy_bool scalar = !!*(const @type@ *)args[0];
@@ -875,6 +877,11 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_logical_xor)
     if (sizeof(@type@) == sizeof(npy_ubyte) &&
             IS_BINARY_CONT_S1(@type@, npy_bool) &&
             abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) {
+        if ((@type@)-1 > 0 && !!*(const @type@ *)args[0]) {
+            BINARY_LOOP_FAST(@type@, npy_bool,
+                    *out = @TYPE@_logical_xor_(in1, in2));
+            return;
+        }
         if (!!*(const @type@ *)args[0]) {
             UBYTE_logical_not_aarch64_contig(args + 1, dimensions[0]);
         }
