@@ -773,13 +773,15 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
             @TYPE@_@kind@_aarch64_contig(args, dimensions[0]);
             return;
         }
-        if (IS_BINARY_CONT_S1(@type@, @type@) &&
+        if (sizeof(@type@) != 1 &&
+                IS_BINARY_CONT_S1(@type@, @type@) &&
                 (abs_ptrdiff(args[2], args[1]) == 0 ||
                  abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE)) {
             @TYPE@_@kind@_aarch64_contig_scalar(args, dimensions[0], 0);
             return;
         }
-        if (IS_BINARY_CONT_S2(@type@, @type@) &&
+        if (sizeof(@type@) != 1 &&
+                IS_BINARY_CONT_S2(@type@, @type@) &&
                 (abs_ptrdiff(args[2], args[0]) == 0 ||
                  abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE)) {
             @TYPE@_@kind@_aarch64_contig_scalar(args, dimensions[0], 1);
