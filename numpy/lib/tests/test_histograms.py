@@ -717,6 +717,22 @@ class TestHistogramdd:
         w_hist, edges = histogramdd(v, weights=np.ones(100, int) * 2)
         assert_array_equal(w_hist, 2 * hist)
 
+    def test_uniform_2d_explicit_range(self):
+        v = np.array([
+            [0.1, 0.1],
+            [0.1, 0.1],
+            [0.6, 0.6],
+            [0.6, 0.6],
+            [0.6, 0.6],
+            [1.0, 1.0],
+            [-0.1, 0.5],
+        ])
+        hist, edges = histogramdd(v, bins=(2, 2), range=((0, 1), (0, 1)))
+
+        assert_array_equal(hist, np.array([[2., 0.], [0., 4.]]))
+        assert_array_equal(edges[0], np.array([0., 0.5, 1.]))
+        assert_array_equal(edges[1], np.array([0., 0.5, 1.]))
+
     def test_identical_samples(self):
         x = np.zeros((10, 2), int)
         hist, edges = histogramdd(x, bins=2)
