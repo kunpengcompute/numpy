@@ -983,6 +983,18 @@ foreach gen_mtargets : [
     ] : []
   ],
   [
+    'loops_autovec_abs_hwy.dispatch.h',
+    'src/umath/loops_autovec_abs_hwy.dispatch.cpp',
+    use_highway ? [
+      ASIMD, NEON, SVE,
+      X86_V4, X86_V3, X86_V2,
+      VSX2,
+      VX,
+      LSX,
+      RVV,
+    ] : []
+  ],
+  [
     'loops_comparison.dispatch.h',
     src_file.process('src/umath/loops_comparison.dispatch.c.src'),
     [
@@ -1357,6 +1369,10 @@ src_umath = umath_gen_headers + [
   # Highway SIMD floor division
   'src/umath/loops_arithmetic_floor_hwy.h',
   'src/umath/loops_arithmetic_floor_hwy_avail.c',
+  # Highway SIMD half-float absolute
+  'src/umath/loops_autovec_abs_hwy.dispatch.cpp',
+  'src/umath/loops_autovec_abs_hwy.h',
+  'src/umath/loops_autovec_abs_hwy_avail.c',
   # Highway SIMD pairwise sum
   'src/umath/loops_arithm_sum_hwy.h',
   'src/umath/loops_arithm_sum_hwy_avail.c',
