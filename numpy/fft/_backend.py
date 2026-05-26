@@ -312,3 +312,9 @@ def reset_backend():
     take effect again after the reset.
     """
     _BACKEND_MANAGER.reset_backend()
+
+
+get_backend.__module__ = "numpy.fft"
+set_backend.__module__ = "numpy.fft"
+set_global_backend.__module__ = "numpy.fft"
+reset_backend.__module__ = "numpy.fft"
