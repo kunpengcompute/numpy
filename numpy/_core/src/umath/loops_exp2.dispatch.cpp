@@ -92,9 +92,11 @@ simd_exp2_neon_FLOAT(const npy_float *src, npy_intp ssrc,
       for (int i = 0; i < UNROLL; i++)
         vst1q_f32(outp + i * VEC_SIZE, result[i]);
     } else {
-      for (int i = 0; i < VEC_SIZE; i++) {
-        for (int j = 0; j < UNROLL; j++)
-          outp[(i + j * VEC_SIZE) * sdst] = vgetq_lane_f32(result[j], i);
+      for (int j = 0; j < UNROLL; j++) {
+        float tmp[VEC_SIZE];
+        vst1q_f32(tmp, result[j]);
+        for (int i = 0; i < VEC_SIZE; i++)
+          outp[(i + j * VEC_SIZE) * sdst] = tmp[i];
       }
     }
 
@@ -140,7 +142,9 @@ simd_exp2_neon_FLOAT(const npy_float *src, npy_intp ssrc,
         vst1q_lane_f32(outp + 2, result, 2);
       } else vst1q_f32(outp, result);
     } else {
-      for (int i = 0; i < current_len; i++) outp[i * sdst] = vgetq_lane_f32(result, i);
+      float tmp[4];
+      vst1q_f32(tmp, result);
+      for (int i = 0; i < current_len; i++) outp[i * sdst] = tmp[i];
     }
 
     infp += ssrc * current_len;
@@ -228,9 +232,11 @@ simd_exp2_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
       for (int i = 0; i < UNROLL; i++)
         vst1q_f64(outp + i * VEC_SIZE, result[i]);
     } else {
-      for (int i = 0; i < VEC_SIZE; i++) {
-        for (int j = 0; j < UNROLL; j++)
-          outp[(i + j * VEC_SIZE) * sdst] = vgetq_lane_f64(result[j], i);
+      for (int j = 0; j < UNROLL; j++) {
+        double tmp[VEC_SIZE];
+        vst1q_f64(tmp, result[j]);
+        for (int i = 0; i < VEC_SIZE; i++)
+          outp[(i + j * VEC_SIZE) * sdst] = tmp[i];
       }
     }
 
@@ -265,7 +271,9 @@ simd_exp2_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
       if (current_len == 1) vst1q_lane_f64(outp, result, 0);
       else vst1q_f64(outp, result);
     } else {
-      for (int i = 0; i < current_len; i++) outp[i * sdst] = vgetq_lane_f64(result, i);
+      double tmp[2];
+      vst1q_f64(tmp, result);
+      for (int i = 0; i < current_len; i++) outp[i * sdst] = tmp[i];
     }
 
     infp += ssrc * current_len;
