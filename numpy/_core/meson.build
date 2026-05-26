@@ -1010,7 +1010,7 @@ foreach gen_mtargets : [
     'loops_logical.dispatch.h',
     'src/umath/loops_logical.dispatch.cpp',
     [
-      ASIMD, NEON,
+      ASIMD, NEON, SVE,
       X86_V4, X86_V3, X86_V2,
       VSX2,
       VX,
