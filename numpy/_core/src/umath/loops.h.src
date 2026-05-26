@@ -87,7 +87,7 @@ BOOL_@kind@(char **args, npy_intp const *dimensions, npy_intp const *steps, void
 
 #include "loops_autovec.dispatch.h"
 /**begin repeat
- * #kind = isnan, isinf, isfinite, floor, ceil, trunc#
+ * #kind = isnan, isinf, isfinite, floor, ceil, trunc, rint#
  */
 NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void BOOL_@kind@,
     (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func)))
@@ -180,7 +180,7 @@ NPY_NO_EXPORT void
 @S@@TYPE@_positive(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func));
 
 /**begin repeat2
- * #kind = floor, ceil, trunc#
+ * #kind = floor, ceil, trunc, rint#
  */
 #define @S@@TYPE@_@kind@ @S@@TYPE@_positive
 /**end repeat2**/
@@ -264,7 +264,7 @@ NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@kind@,
  *  #TYPE = HALF, FLOAT, DOUBLE#
  */
 /**begin repeat1
- * #kind = ceil, floor, trunc#
+ * #kind = ceil, floor, trunc, rint#
  */
  NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@kind@,
     (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data)))
@@ -276,7 +276,7 @@ NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@kind@,
  *  #TYPE = FLOAT, DOUBLE#
  */
 /**begin repeat1
- * #kind = rint, sqrt, absolute, square#
+ * #kind = sqrt, absolute, square#
  */
 NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@kind@,
    (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data)))

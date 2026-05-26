@@ -984,9 +984,9 @@ defdict = {
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.rint'),
           None,
-          TD('e', f='rint', astype={'e': 'f'}),
-          TD(inexactvec, dispatch=[('loops_unary_fp', 'fd')]),
-          TD('fdg' + cmplx, f='rint'),
+          TD(bints),
+          TD('efd', dispatch=[('loops_unary_fp_ops', 'efd')]),
+          TD('g' + cmplx, f='rint'),
           TD(P, f='rint'),
           ),
 'arctan2':

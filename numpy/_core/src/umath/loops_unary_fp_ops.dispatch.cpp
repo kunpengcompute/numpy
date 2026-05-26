@@ -56,6 +56,7 @@ struct UnaryOpTraits<reciprocal_t> {
 struct ceil_t {};
 struct floor_t {};
 struct trunc_t {};
+struct rint_t {};
 
 template<>
 struct UnaryOpTraits<ceil_t> {
@@ -120,6 +121,28 @@ struct UnaryOpTraits<trunc_t> {
         }
 #endif
         return static_cast<T>(std::trunc(a));
+    }
+};
+
+template<>
+struct UnaryOpTraits<rint_t> {
+#if NPY_HWY
+    template<typename T>
+    static HWY_ATTR HWY_INLINE Vec<T> simd_op(Vec<T> a)
+    {
+        return Round(a);
+    }
+#endif
+
+    template<typename T>
+    static inline T scalar_op(T a)
+    {
+#if NPY_HWY_F16
+        if constexpr (std::is_same_v<T, hwy::float16_t>) {
+            return hwy::F16FromF32(std::rint(hwy::F32FromF16(a)));
+        }
+#endif
+        return static_cast<T>(std::rint(a));
     }
 };
 
@@ -526,6 +549,35 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_trunc)
     UNARY_LOOP {
         const float in1 = npy_half_to_float(*(npy_half *)ip1);
         *((npy_half *)op1) = npy_float_to_half(npy_truncf(in1));
+    }
+#endif
+}
+
+/*******************************************************************************
+ ** Exported ufunc inner functions for rint
+ ******************************************************************************/
+
+NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_rint)
+(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
+{
+    unary_wrapper<rint_t, npy_float>(args, dimensions, steps);
+}
+
+NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_rint)
+(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
+{
+    unary_wrapper<rint_t, npy_double>(args, dimensions, steps);
+}
+
+NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_rint)
+(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
+{
+#if NPY_HWY_F16
+    unary_wrapper<rint_t, hwy::float16_t>(args, dimensions, steps);
+#else
+    UNARY_LOOP {
+        const float in1 = npy_half_to_float(*(npy_half *)ip1);
+        *((npy_half *)op1) = npy_float_to_half(npy_rintf(in1));
     }
 #endif
 }
