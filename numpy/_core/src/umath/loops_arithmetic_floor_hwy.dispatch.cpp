@@ -208,6 +208,18 @@ simd_floor_divide_by_scalar(const T *HWY_RESTRICT src1, T scalar,
         return;
     }
 
+    if (scalar == 1) {
+        for (; len >= vstep;
+             len -= vstep, src1 += vstep, dst += vstep) {
+            hn::StoreU(hn::LoadU(hn::ScalableTag<T>(), src1),
+                       hn::ScalableTag<T>(), dst);
+        }
+        for (; len > 0; --len, ++src1, ++dst) {
+            *dst = *src1;
+        }
+        return;
+    }
+
     if (scalar == -1) {
         bool warn_overflow = false;
 

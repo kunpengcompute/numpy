@@ -9,6 +9,7 @@
 // Provides the various *_LOOP macros
 #include "fast_loop_macros.h"
 #include "loops_arithmetic_floor_hwy.h"
+#include "numpy/libdivide/libdivide.h"
 
 //###############################################################################
 //## Division
@@ -436,11 +437,52 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_divide)
         return;
     }
 #endif
-#if NPY_SIMD && NPY_BITSOF_@TYPE@ == 64 && defined(NPY_HAVE_NEON)
-    /* Highway scalar floor divide for int64 on ARM (npyv 64-bit div is disabled) */
+#if NPY_SIMD && NPY_BITSOF_@TYPE@ == 64 && defined(SIMD_DISABLE_DIV64_OPT)
+    /*
+     * libdivide-based scalar divisor path for int64 on platforms where
+     * npyv 64-bit div is disabled (ARM NEON, VSX3, LSX).
+     * Uses multiply+shift instead of hardware division; no float64
+     * precision loss, no FE_INVALID.
+     */
     if (IS_BLOCKABLE_BINARY_SCALAR2(sizeof(@type@), NPY_SIMD_WIDTH) &&
         (*(@type@ *)args[1]) != 0) {
-        npy_highway_floor_divide_s64_scalar_contig(args, dimensions[0]);
+        const @type@ divisor = *(@type@ *)args[1];
+        if (divisor == -1) {
+            const npy_intp n = dimensions[0];
+            @type@ *src = (@type@ *)args[0];
+            @type@ *dst = (@type@ *)args[2];
+            bool warn_overflow = false;
+            for (npy_intp i = 0; i < n; ++i) {
+                if (src[i] == NPY_MIN_@TYPE@) {
+                    dst[i] = NPY_MIN_@TYPE@;
+                    warn_overflow = true;
+                } else {
+                    dst[i] = -src[i];
+                }
+            }
+            if (warn_overflow) {
+                npy_set_floatstatus_overflow();
+            }
+        } else if (divisor == 1) {
+            const npy_intp n = dimensions[0];
+            @type@ *src = (@type@ *)args[0];
+            @type@ *dst = (@type@ *)args[2];
+            for (npy_intp i = 0; i < n; ++i) {
+                dst[i] = src[i];
+            }
+        } else {
+            struct libdivide_s64_t fast_d = libdivide_s64_gen(divisor);
+            const npy_intp n = dimensions[0];
+            @type@ *src = (@type@ *)args[0];
+            @type@ *dst = (@type@ *)args[2];
+            for (npy_intp i = 0; i < n; ++i) {
+                @type@ r = (@type@)libdivide_s64_do(src[i], &fast_d);
+                if (((src[i] > 0) != (divisor > 0)) && (r * divisor != src[i])) {
+                    r--;
+                }
+                dst[i] = r;
+            }
+        }
         return;
     }
 #endif
