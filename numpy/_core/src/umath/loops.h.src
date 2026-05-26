@@ -342,25 +342,24 @@ NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@func@,
 /**end repeat1**/
 /**end repeat**/
 
-#include "loops_explog.dispatch.h"
-/**begin repeat
- *  #TYPE = FLOAT, DOUBLE, HALF#
- */
-/**begin repeat1
- * # kind = exp, log#
- */
-NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@kind@, 
-  (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func)))
-
-/**end repeat1**/
-/**end repeat**/
-
 #include "loops_umath_unary.dispatch.h"
 /**begin repeat
  *  #TYPE = HALF#
  */
 /**begin repeat1
- *  #func = sqrt#
+ *  #func = sqrt, cbrt#
+ */
+NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@func@,
+    (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func)))
+
+/**end repeat1**/
+/**end repeat**/
+
+/**begin repeat
+ *  #TYPE = FLOAT, DOUBLE#
+ */
+/**begin repeat1
+ *  #func = cbrt#
  */
 NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@func@,
     (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func)))
@@ -375,7 +374,7 @@ NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@func@,
  *  #TYPE = FLOAT, DOUBLE#
  */
 /**begin repeat1
- * #func = tanh, exp2, log2, log10, expm1, log1p, cbrt, arcsin, arccos, arctan, sinh, cosh, arcsinh, arccosh, arctanh#
+ * #func = tanh, log10, expm1, log1p, arcsin, arccos, arctan, sinh, cosh, arcsinh, arccosh, arctanh#
  */
 
 NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@func@,
@@ -388,7 +387,7 @@ NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@func@,
     #include "loops_half.dispatch.h"
 #endif
 /**begin repeat
- * #func = exp2, log2, log10, expm1, log1p, cbrt, arcsin, arccos, arctan, sinh, cosh, tanh, arcsinh, arccosh, arctanh#
+ * #func = log10, expm1, log1p, arcsin, arccos, arctan, sinh, cosh, tanh, arcsinh, arccosh, arctanh#
  */
 
 NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void HALF_@func@,
