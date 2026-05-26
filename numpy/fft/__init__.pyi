@@ -1,3 +1,9 @@
+from ._backend import (
+    get_backend,
+    reset_backend,
+    set_backend,
+    set_global_backend,
+)
 from ._helper import fftfreq, fftshift, ifftshift, rfftfreq
 from ._pocketfft import (
     fft,
@@ -35,4 +41,8 @@ __all__ = [
     "ifftshift",
     "fftfreq",
     "rfftfreq",
+    "get_backend",
+    "set_backend",
+    "set_global_backend",
+    "reset_backend",
 ]
