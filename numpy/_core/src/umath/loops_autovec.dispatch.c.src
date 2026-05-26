@@ -8,6 +8,602 @@
 // Provides the various *_LOOP macros
 #include "fast_loop_macros.h"
 #include "loops_autovec_abs_hwy.h"
+#include <string.h>
+#if defined(__aarch64__)
+    #include <arm_neon.h>
+#endif
+
+#if defined(__aarch64__)
+static inline void
+bool_const_aarch64_contig(char **args, npy_intp len, npy_bool value)
+{
+    memset(args[1], value, (size_t)len * sizeof(npy_bool));
+}
+
+/**begin repeat
+ * #type = npy_ubyte, npy_ushort, npy_uint, npy_ulong, npy_ulonglong#
+ * #TYPE = UBYTE, USHORT, UINT, ULONG, ULONGLONG#
+ */
+/**begin repeat1
+ * #kind = bitwise_and, bitwise_or, bitwise_xor#
+ * #intrin = vandq_u8, vorrq_u8, veorq_u8#
+ * #OP = &, |, ^#
+ */
+static inline void
+@TYPE@_@kind@_aarch64_contig(char **args, npy_intp len)
+{
+    const npy_ubyte *ip1 = (const npy_ubyte *)args[0];
+    const npy_ubyte *ip2 = (const npy_ubyte *)args[1];
+    npy_ubyte *op1 = (npy_ubyte *)args[2];
+    npy_intp nbytes = len * (npy_intp)sizeof(@type@);
+
+    for (; nbytes >= 64; nbytes -= 64, ip1 += 64, ip2 += 64, op1 += 64) {
+        uint8x16_t a0 = vld1q_u8(ip1);
+        uint8x16_t b0 = vld1q_u8(ip2);
+        uint8x16_t a1 = vld1q_u8(ip1 + 16);
+        uint8x16_t b1 = vld1q_u8(ip2 + 16);
+        uint8x16_t a2 = vld1q_u8(ip1 + 32);
+        uint8x16_t b2 = vld1q_u8(ip2 + 32);
+        uint8x16_t a3 = vld1q_u8(ip1 + 48);
+        uint8x16_t b3 = vld1q_u8(ip2 + 48);
+
+        vst1q_u8(op1, @intrin@(a0, b0));
+        vst1q_u8(op1 + 16, @intrin@(a1, b1));
+        vst1q_u8(op1 + 32, @intrin@(a2, b2));
+        vst1q_u8(op1 + 48, @intrin@(a3, b3));
+    }
+
+    for (; nbytes >= 16; nbytes -= 16, ip1 += 16, ip2 += 16, op1 += 16) {
+        uint8x16_t a = vld1q_u8(ip1);
+        uint8x16_t b = vld1q_u8(ip2);
+        vst1q_u8(op1, @intrin@(a, b));
+    }
+
+    for (; nbytes > 0; --nbytes, ++ip1, ++ip2, ++op1) {
+        *op1 = *ip1 @OP@ *ip2;
+    }
+}
+
+static inline void
+@TYPE@_@kind@_aarch64_contig_scalar(char **args, npy_intp len, int scalar_arg)
+{
+    const @type@ scalar = *(@type@ *)args[scalar_arg];
+    const npy_ubyte *ip1 = (const npy_ubyte *)args[scalar_arg == 0 ? 1 : 0];
+    npy_ubyte *op1 = (npy_ubyte *)args[2];
+    const npy_ubyte *scalar_bytes = (const npy_ubyte *)&scalar;
+    const npy_intp elsize = (npy_intp)sizeof(@type@);
+    npy_intp nbytes = len * elsize;
+    uint8x16_t sv;
+
+    if (elsize == 1) {
+        sv = vdupq_n_u8((npy_ubyte)scalar);
+    }
+    else if (elsize == 2) {
+        sv = vreinterpretq_u8_u16(vdupq_n_u16((npy_uint16)scalar));
+    }
+    else if (elsize == 4) {
+        sv = vreinterpretq_u8_u32(vdupq_n_u32((npy_uint32)scalar));
+    }
+    else {
+        sv = vreinterpretq_u8_u64(vdupq_n_u64((npy_uint64)scalar));
+    }
+
+    for (; nbytes >= 64; nbytes -= 64, ip1 += 64, op1 += 64) {
+        uint8x16_t a0 = vld1q_u8(ip1);
+        uint8x16_t a1 = vld1q_u8(ip1 + 16);
+        uint8x16_t a2 = vld1q_u8(ip1 + 32);
+        uint8x16_t a3 = vld1q_u8(ip1 + 48);
+
+        vst1q_u8(op1, @intrin@(a0, sv));
+        vst1q_u8(op1 + 16, @intrin@(a1, sv));
+        vst1q_u8(op1 + 32, @intrin@(a2, sv));
+        vst1q_u8(op1 + 48, @intrin@(a3, sv));
+    }
+
+    for (; nbytes >= 16; nbytes -= 16, ip1 += 16, op1 += 16) {
+        uint8x16_t a = vld1q_u8(ip1);
+        vst1q_u8(op1, @intrin@(a, sv));
+    }
+
+    for (npy_intp i = 0; i < nbytes; ++i) {
+        op1[i] = ip1[i] @OP@ scalar_bytes[i & (elsize - 1)];
+    }
+}
+/**end repeat1**/
+/**end repeat**/
+
+/**begin repeat
+ * #kind = logical_and, logical_or, logical_xor#
+ * #intrin = vandq_u8, vorrq_u8, veorq_u8#
+ * #OP = &, |, ^#
+ */
+static inline void
+UBYTE_@kind@_aarch64_logical_contig(char **args, npy_intp len)
+{
+    const npy_ubyte *ip1 = (const npy_ubyte *)args[0];
+    const npy_ubyte *ip2 = (const npy_ubyte *)args[1];
+    npy_bool *op1 = (npy_bool *)args[2];
+    const uint8x16_t zero = vdupq_n_u8(0);
+    const uint8x16_t one = vdupq_n_u8(1);
+
+    for (; len >= 64; len -= 64, ip1 += 64, ip2 += 64, op1 += 64) {
+        uint8x16_t a0 = vmvnq_u8(vceqq_u8(vld1q_u8(ip1), zero));
+        uint8x16_t b0 = vmvnq_u8(vceqq_u8(vld1q_u8(ip2), zero));
+        uint8x16_t a1 = vmvnq_u8(vceqq_u8(vld1q_u8(ip1 + 16), zero));
+        uint8x16_t b1 = vmvnq_u8(vceqq_u8(vld1q_u8(ip2 + 16), zero));
+        uint8x16_t a2 = vmvnq_u8(vceqq_u8(vld1q_u8(ip1 + 32), zero));
+        uint8x16_t b2 = vmvnq_u8(vceqq_u8(vld1q_u8(ip2 + 32), zero));
+        uint8x16_t a3 = vmvnq_u8(vceqq_u8(vld1q_u8(ip1 + 48), zero));
+        uint8x16_t b3 = vmvnq_u8(vceqq_u8(vld1q_u8(ip2 + 48), zero));
+
+        vst1q_u8(op1, vandq_u8(@intrin@(a0, b0), one));
+        vst1q_u8(op1 + 16, vandq_u8(@intrin@(a1, b1), one));
+        vst1q_u8(op1 + 32, vandq_u8(@intrin@(a2, b2), one));
+        vst1q_u8(op1 + 48, vandq_u8(@intrin@(a3, b3), one));
+    }
+
+    for (; len >= 16; len -= 16, ip1 += 16, ip2 += 16, op1 += 16) {
+        uint8x16_t a = vmvnq_u8(vceqq_u8(vld1q_u8(ip1), zero));
+        uint8x16_t b = vmvnq_u8(vceqq_u8(vld1q_u8(ip2), zero));
+        vst1q_u8(op1, vandq_u8(@intrin@(a, b), one));
+    }
+
+    for (; len > 0; --len, ++ip1, ++ip2, ++op1) {
+        *op1 = (npy_bool)((!!*ip1) @OP@ (!!*ip2));
+    }
+}
+/**end repeat**/
+
+static inline void
+UBYTE_logical_not_aarch64_contig(char **args, npy_intp len)
+{
+    const npy_ubyte *ip1 = (const npy_ubyte *)args[0];
+    npy_bool *op1 = (npy_bool *)args[1];
+    const uint8x16_t zero = vdupq_n_u8(0);
+    const uint8x16_t one = vdupq_n_u8(1);
+
+    for (; len >= 64; len -= 64, ip1 += 64, op1 += 64) {
+        uint8x16_t a0 = vceqq_u8(vld1q_u8(ip1), zero);
+        uint8x16_t a1 = vceqq_u8(vld1q_u8(ip1 + 16), zero);
+        uint8x16_t a2 = vceqq_u8(vld1q_u8(ip1 + 32), zero);
+        uint8x16_t a3 = vceqq_u8(vld1q_u8(ip1 + 48), zero);
+
+        vst1q_u8(op1, vandq_u8(a0, one));
+        vst1q_u8(op1 + 16, vandq_u8(a1, one));
+        vst1q_u8(op1 + 32, vandq_u8(a2, one));
+        vst1q_u8(op1 + 48, vandq_u8(a3, one));
+    }
+
+    for (; len >= 16; len -= 16, ip1 += 16, op1 += 16) {
+        uint8x16_t a = vceqq_u8(vld1q_u8(ip1), zero);
+        vst1q_u8(op1, vandq_u8(a, one));
+    }
+
+    for (; len > 0; --len, ++ip1, ++op1) {
+        *op1 = !*ip1;
+    }
+}
+
+static inline void
+UBYTE_logical_to_bool_aarch64_contig(
+        const npy_ubyte *ip1, npy_bool *op1, npy_intp len, npy_bool invert)
+{
+    const uint8x16_t zero = vdupq_n_u8(0);
+    const uint8x16_t one = vdupq_n_u8(1);
+
+    for (; len >= 64; len -= 64, ip1 += 64, op1 += 64) {
+        uint8x16_t a0 = vceqq_u8(vld1q_u8(ip1), zero);
+        uint8x16_t a1 = vceqq_u8(vld1q_u8(ip1 + 16), zero);
+        uint8x16_t a2 = vceqq_u8(vld1q_u8(ip1 + 32), zero);
+        uint8x16_t a3 = vceqq_u8(vld1q_u8(ip1 + 48), zero);
+        if (!invert) {
+            a0 = vmvnq_u8(a0);
+            a1 = vmvnq_u8(a1);
+            a2 = vmvnq_u8(a2);
+            a3 = vmvnq_u8(a3);
+        }
+
+        vst1q_u8(op1, vandq_u8(a0, one));
+        vst1q_u8(op1 + 16, vandq_u8(a1, one));
+        vst1q_u8(op1 + 32, vandq_u8(a2, one));
+        vst1q_u8(op1 + 48, vandq_u8(a3, one));
+    }
+
+    for (; len >= 16; len -= 16, ip1 += 16, op1 += 16) {
+        uint8x16_t a = vceqq_u8(vld1q_u8(ip1), zero);
+        if (!invert) {
+            a = vmvnq_u8(a);
+        }
+        vst1q_u8(op1, vandq_u8(a, one));
+    }
+
+    for (; len > 0; --len, ++ip1, ++op1) {
+        *op1 = invert ? !*ip1 : !!*ip1;
+    }
+}
+
+static inline void
+USHORT_logical_to_bool_aarch64_contig(
+        const npy_ushort *ip1, npy_bool *op1, npy_intp len, npy_bool invert)
+{
+    const uint16x8_t zero = vdupq_n_u16(0);
+    const uint8x8_t one = vdup_n_u8(1);
+
+    for (; len >= 8; len -= 8, ip1 += 8, op1 += 8) {
+        uint16x8_t cmp = vceqq_u16(vld1q_u16((const uint16_t *)ip1), zero);
+        if (!invert) {
+            cmp = vmvnq_u16(cmp);
+        }
+        vst1_u8(op1, vand_u8(vmovn_u16(cmp), one));
+    }
+
+    for (; len > 0; --len, ++ip1, ++op1) {
+        *op1 = invert ? !*ip1 : !!*ip1;
+    }
+}
+
+static inline void
+UINT_logical_to_bool_aarch64_contig(
+        const npy_uint *ip1, npy_bool *op1, npy_intp len, npy_bool invert)
+{
+    const uint32x4_t zero = vdupq_n_u32(0);
+    const uint8x8_t one = vdup_n_u8(1);
+
+    for (; len >= 8; len -= 8, ip1 += 8, op1 += 8) {
+        uint32x4_t cmp0 = vceqq_u32(vld1q_u32((const uint32_t *)ip1), zero);
+        uint32x4_t cmp1 = vceqq_u32(vld1q_u32((const uint32_t *)(ip1 + 4)), zero);
+        if (!invert) {
+            cmp0 = vmvnq_u32(cmp0);
+            cmp1 = vmvnq_u32(cmp1);
+        }
+        uint16x4_t lo = vmovn_u32(cmp0);
+        uint16x4_t hi = vmovn_u32(cmp1);
+        vst1_u8(op1, vand_u8(vmovn_u16(vcombine_u16(lo, hi)), one));
+    }
+
+    for (; len > 0; --len, ++ip1, ++op1) {
+        *op1 = invert ? !*ip1 : !!*ip1;
+    }
+}
+
+static inline void
+ULONGLONG_logical_to_bool_aarch64_contig(
+        const npy_ulonglong *ip1, npy_bool *op1, npy_intp len, npy_bool invert)
+{
+    const uint64x2_t zero = vdupq_n_u64(0);
+    const uint64x2_t all_ones = vdupq_n_u64((uint64_t)-1);
+    const uint8x8_t one = vdup_n_u8(1);
+
+    for (; len >= 8; len -= 8, ip1 += 8, op1 += 8) {
+        uint64x2_t cmp0 = vceqq_u64(vld1q_u64((const uint64_t *)ip1), zero);
+        uint64x2_t cmp1 = vceqq_u64(vld1q_u64((const uint64_t *)(ip1 + 2)), zero);
+        uint64x2_t cmp2 = vceqq_u64(vld1q_u64((const uint64_t *)(ip1 + 4)), zero);
+        uint64x2_t cmp3 = vceqq_u64(vld1q_u64((const uint64_t *)(ip1 + 6)), zero);
+        if (!invert) {
+            cmp0 = veorq_u64(cmp0, all_ones);
+            cmp1 = veorq_u64(cmp1, all_ones);
+            cmp2 = veorq_u64(cmp2, all_ones);
+            cmp3 = veorq_u64(cmp3, all_ones);
+        }
+        uint32x2_t p0 = vmovn_u64(cmp0);
+        uint32x2_t p1 = vmovn_u64(cmp1);
+        uint32x2_t p2 = vmovn_u64(cmp2);
+        uint32x2_t p3 = vmovn_u64(cmp3);
+        uint16x4_t lo = vmovn_u32(vcombine_u32(p0, p1));
+        uint16x4_t hi = vmovn_u32(vcombine_u32(p2, p3));
+        vst1_u8(op1, vand_u8(vmovn_u16(vcombine_u16(lo, hi)), one));
+    }
+
+    for (; len > 0; --len, ++ip1, ++op1) {
+        *op1 = invert ? !*ip1 : !!*ip1;
+    }
+}
+
+static inline void
+ULONG_logical_to_bool_aarch64_contig(
+        const npy_ulong *ip1, npy_bool *op1, npy_intp len, npy_bool invert)
+{
+    ULONGLONG_logical_to_bool_aarch64_contig(
+            (const npy_ulonglong *)ip1, op1, len, invert);
+}
+
+static inline void
+USHORT_logical_or_aarch64_contig(char **args, npy_intp len)
+{
+    const npy_ushort *ip1 = (const npy_ushort *)args[0];
+    const npy_ushort *ip2 = (const npy_ushort *)args[1];
+    npy_bool *op1 = (npy_bool *)args[2];
+    const uint16x8_t zero = vdupq_n_u16(0);
+    const uint8x8_t one = vdup_n_u8(1);
+
+    for (; len >= 8; len -= 8, ip1 += 8, ip2 += 8, op1 += 8) {
+        uint16x8_t a = vceqq_u16(vld1q_u16((const uint16_t *)ip1), zero);
+        uint16x8_t b = vceqq_u16(vld1q_u16((const uint16_t *)ip2), zero);
+        vst1_u8(op1, vand_u8(vmovn_u16(vmvnq_u16(vandq_u16(a, b))), one));
+    }
+
+    for (; len > 0; --len, ++ip1, ++ip2, ++op1) {
+        *op1 = !!(*ip1 || *ip2);
+    }
+}
+
+static inline void
+UINT_logical_or_aarch64_contig(char **args, npy_intp len)
+{
+    const npy_uint *ip1 = (const npy_uint *)args[0];
+    const npy_uint *ip2 = (const npy_uint *)args[1];
+    npy_bool *op1 = (npy_bool *)args[2];
+    const uint32x4_t zero = vdupq_n_u32(0);
+    const uint8x8_t one = vdup_n_u8(1);
+
+    for (; len >= 8; len -= 8, ip1 += 8, ip2 += 8, op1 += 8) {
+        uint32x4_t a0 = vceqq_u32(vld1q_u32((const uint32_t *)ip1), zero);
+        uint32x4_t b0 = vceqq_u32(vld1q_u32((const uint32_t *)ip2), zero);
+        uint32x4_t a1 = vceqq_u32(vld1q_u32((const uint32_t *)(ip1 + 4)), zero);
+        uint32x4_t b1 = vceqq_u32(vld1q_u32((const uint32_t *)(ip2 + 4)), zero);
+        uint16x4_t lo = vmovn_u32(vmvnq_u32(vandq_u32(a0, b0)));
+        uint16x4_t hi = vmovn_u32(vmvnq_u32(vandq_u32(a1, b1)));
+        vst1_u8(op1, vand_u8(vmovn_u16(vcombine_u16(lo, hi)), one));
+    }
+
+    for (; len > 0; --len, ++ip1, ++ip2, ++op1) {
+        *op1 = !!(*ip1 || *ip2);
+    }
+}
+
+static inline void
+ULONGLONG_logical_or_aarch64_contig(char **args, npy_intp len)
+{
+    const npy_ulonglong *ip1 = (const npy_ulonglong *)args[0];
+    const npy_ulonglong *ip2 = (const npy_ulonglong *)args[1];
+    npy_bool *op1 = (npy_bool *)args[2];
+    const uint64x2_t zero = vdupq_n_u64(0);
+    const uint64x2_t all_ones = vdupq_n_u64((uint64_t)-1);
+    const uint8x8_t one = vdup_n_u8(1);
+
+    for (; len >= 8; len -= 8, ip1 += 8, ip2 += 8, op1 += 8) {
+        uint64x2_t a0 = vceqq_u64(vld1q_u64((const uint64_t *)ip1), zero);
+        uint64x2_t b0 = vceqq_u64(vld1q_u64((const uint64_t *)ip2), zero);
+        uint64x2_t a1 = vceqq_u64(vld1q_u64((const uint64_t *)(ip1 + 2)), zero);
+        uint64x2_t b1 = vceqq_u64(vld1q_u64((const uint64_t *)(ip2 + 2)), zero);
+        uint64x2_t a2 = vceqq_u64(vld1q_u64((const uint64_t *)(ip1 + 4)), zero);
+        uint64x2_t b2 = vceqq_u64(vld1q_u64((const uint64_t *)(ip2 + 4)), zero);
+        uint64x2_t a3 = vceqq_u64(vld1q_u64((const uint64_t *)(ip1 + 6)), zero);
+        uint64x2_t b3 = vceqq_u64(vld1q_u64((const uint64_t *)(ip2 + 6)), zero);
+        uint32x2_t p0 = vmovn_u64(veorq_u64(vandq_u64(a0, b0), all_ones));
+        uint32x2_t p1 = vmovn_u64(veorq_u64(vandq_u64(a1, b1), all_ones));
+        uint32x2_t p2 = vmovn_u64(veorq_u64(vandq_u64(a2, b2), all_ones));
+        uint32x2_t p3 = vmovn_u64(veorq_u64(vandq_u64(a3, b3), all_ones));
+        uint16x4_t lo = vmovn_u32(vcombine_u32(p0, p1));
+        uint16x4_t hi = vmovn_u32(vcombine_u32(p2, p3));
+        vst1_u8(op1, vand_u8(vmovn_u16(vcombine_u16(lo, hi)), one));
+    }
+
+    for (; len > 0; --len, ++ip1, ++ip2, ++op1) {
+        *op1 = !!(*ip1 || *ip2);
+    }
+}
+
+static inline void
+ULONG_logical_or_aarch64_contig(char **args, npy_intp len)
+{
+    ULONGLONG_logical_or_aarch64_contig(args, len);
+}
+
+static inline void
+UBYTE_logical_or_aarch64_contig(char **args, npy_intp len)
+{
+    UBYTE_logical_or_aarch64_logical_contig(args, len);
+}
+
+static inline void
+BYTE_logical_or_aarch64_contig(char **args, npy_intp len)
+{
+    UBYTE_logical_or_aarch64_logical_contig(args, len);
+}
+
+static inline void
+SHORT_logical_or_aarch64_contig(char **args, npy_intp len)
+{
+    USHORT_logical_or_aarch64_contig(args, len);
+}
+
+static inline void
+INT_logical_or_aarch64_contig(char **args, npy_intp len)
+{
+    UINT_logical_or_aarch64_contig(args, len);
+}
+
+static inline void
+LONG_logical_or_aarch64_contig(char **args, npy_intp len)
+{
+    ULONG_logical_or_aarch64_contig(args, len);
+}
+
+static inline void
+LONGLONG_logical_or_aarch64_contig(char **args, npy_intp len)
+{
+    ULONGLONG_logical_or_aarch64_contig(args, len);
+}
+
+/**begin repeat
+ * #type = npy_ubyte, npy_ushort, npy_uint, npy_ulong, npy_ulonglong#
+ * #TYPE = UBYTE, USHORT, UINT, ULONG, ULONGLONG#
+ */
+static inline void
+@TYPE@_invert_aarch64_contig(char **args, npy_intp len)
+{
+    const npy_ubyte *ip1 = (const npy_ubyte *)args[0];
+    npy_ubyte *op1 = (npy_ubyte *)args[1];
+    npy_intp nbytes = len * (npy_intp)sizeof(@type@);
+
+    for (; nbytes >= 64; nbytes -= 64, ip1 += 64, op1 += 64) {
+        uint8x16_t a0 = vld1q_u8(ip1);
+        uint8x16_t a1 = vld1q_u8(ip1 + 16);
+        uint8x16_t a2 = vld1q_u8(ip1 + 32);
+        uint8x16_t a3 = vld1q_u8(ip1 + 48);
+
+        vst1q_u8(op1, vmvnq_u8(a0));
+        vst1q_u8(op1 + 16, vmvnq_u8(a1));
+        vst1q_u8(op1 + 32, vmvnq_u8(a2));
+        vst1q_u8(op1 + 48, vmvnq_u8(a3));
+    }
+
+    for (; nbytes >= 16; nbytes -= 16, ip1 += 16, op1 += 16) {
+        uint8x16_t a = vld1q_u8(ip1);
+        vst1q_u8(op1, vmvnq_u8(a));
+    }
+
+    for (; nbytes > 0; --nbytes, ++ip1, ++op1) {
+        *op1 = (npy_ubyte)~*ip1;
+    }
+}
+/**end repeat**/
+
+static inline void
+bitwise_count_unsigned_aarch64_contig(char **args, npy_intp len, size_t elsize)
+{
+    const npy_ubyte *ip1 = (const npy_ubyte *)args[0];
+    npy_ubyte *op1 = (npy_ubyte *)args[1];
+    npy_intp n = len;
+
+    if (elsize == 1) {
+        for (; n >= 64; n -= 64, ip1 += 64, op1 += 64) {
+            uint8x16_t a0 = vld1q_u8(ip1);
+            uint8x16_t a1 = vld1q_u8(ip1 + 16);
+            uint8x16_t a2 = vld1q_u8(ip1 + 32);
+            uint8x16_t a3 = vld1q_u8(ip1 + 48);
+
+            vst1q_u8(op1, vcntq_u8(a0));
+            vst1q_u8(op1 + 16, vcntq_u8(a1));
+            vst1q_u8(op1 + 32, vcntq_u8(a2));
+            vst1q_u8(op1 + 48, vcntq_u8(a3));
+        }
+        for (; n >= 16; n -= 16, ip1 += 16, op1 += 16) {
+            uint8x16_t a = vld1q_u8(ip1);
+            vst1q_u8(op1, vcntq_u8(a));
+        }
+    }
+    else if (elsize == 2) {
+        for (; n >= 8; n -= 8, ip1 += 16, op1 += 8) {
+            uint8x16_t bytes = vcntq_u8(vld1q_u8(ip1));
+            vst1_u8(op1, vmovn_u16(vpaddlq_u8(bytes)));
+        }
+    }
+    else if (elsize == 4) {
+        for (; n >= 8; n -= 8, ip1 += 32, op1 += 8) {
+            uint16x8_t pair0 = vpaddlq_u8(vcntq_u8(vld1q_u8(ip1)));
+            uint16x8_t pair1 = vpaddlq_u8(vcntq_u8(vld1q_u8(ip1 + 16)));
+            uint16x4_t lo = vmovn_u32(vpaddlq_u16(pair0));
+            uint16x4_t hi = vmovn_u32(vpaddlq_u16(pair1));
+            vst1_u8(op1, vmovn_u16(vcombine_u16(lo, hi)));
+        }
+    }
+    else if (elsize == 8) {
+        for (; n >= 8; n -= 8, ip1 += 64, op1 += 8) {
+            uint32x4_t quad0 = vpaddlq_u16(vpaddlq_u8(vcntq_u8(vld1q_u8(ip1))));
+            uint32x4_t quad1 = vpaddlq_u16(vpaddlq_u8(vcntq_u8(vld1q_u8(ip1 + 16))));
+            uint32x4_t quad2 = vpaddlq_u16(vpaddlq_u8(vcntq_u8(vld1q_u8(ip1 + 32))));
+            uint32x4_t quad3 = vpaddlq_u16(vpaddlq_u8(vcntq_u8(vld1q_u8(ip1 + 48))));
+            uint16x4_t lo = vmovn_u32(vcombine_u32(
+                    vmovn_u64(vpaddlq_u32(quad0)),
+                    vmovn_u64(vpaddlq_u32(quad1))));
+            uint16x4_t hi = vmovn_u32(vcombine_u32(
+                    vmovn_u64(vpaddlq_u32(quad2)),
+                    vmovn_u64(vpaddlq_u32(quad3))));
+            vst1_u8(op1, vmovn_u16(vcombine_u16(lo, hi)));
+        }
+    }
+
+    for (; n > 0; --n, ip1 += elsize, ++op1) {
+        npy_ubyte count = 0;
+        for (size_t i = 0; i < elsize; ++i) {
+            count += npy_popcountuhh(ip1[i]);
+        }
+        *op1 = count;
+    }
+}
+
+static inline void
+bitwise_count_signed_aarch64_contig(char **args, npy_intp len, size_t elsize)
+{
+    const npy_ubyte *ip1 = (const npy_ubyte *)args[0];
+    npy_ubyte *op1 = (npy_ubyte *)args[1];
+    npy_intp n = len;
+
+    if (elsize == 1) {
+        for (; n >= 64; n -= 64, ip1 += 64, op1 += 64) {
+            int8x16_t a0 = vabsq_s8(vld1q_s8((const int8_t *)ip1));
+            int8x16_t a1 = vabsq_s8(vld1q_s8((const int8_t *)(ip1 + 16)));
+            int8x16_t a2 = vabsq_s8(vld1q_s8((const int8_t *)(ip1 + 32)));
+            int8x16_t a3 = vabsq_s8(vld1q_s8((const int8_t *)(ip1 + 48)));
+
+            vst1q_u8(op1, vcntq_u8(vreinterpretq_u8_s8(a0)));
+            vst1q_u8(op1 + 16, vcntq_u8(vreinterpretq_u8_s8(a1)));
+            vst1q_u8(op1 + 32, vcntq_u8(vreinterpretq_u8_s8(a2)));
+            vst1q_u8(op1 + 48, vcntq_u8(vreinterpretq_u8_s8(a3)));
+        }
+        for (; n >= 16; n -= 16, ip1 += 16, op1 += 16) {
+            int8x16_t a = vabsq_s8(vld1q_s8((const int8_t *)ip1));
+            vst1q_u8(op1, vcntq_u8(vreinterpretq_u8_s8(a)));
+        }
+    }
+    else if (elsize == 2) {
+        for (; n >= 8; n -= 8, ip1 += 16, op1 += 8) {
+            int16x8_t a = vabsq_s16(vld1q_s16((const int16_t *)ip1));
+            uint8x16_t bytes = vcntq_u8(vreinterpretq_u8_s16(a));
+            vst1_u8(op1, vmovn_u16(vpaddlq_u8(bytes)));
+        }
+    }
+    else if (elsize == 4) {
+        for (; n >= 8; n -= 8, ip1 += 32, op1 += 8) {
+            int32x4_t a0 = vabsq_s32(vld1q_s32((const int32_t *)ip1));
+            int32x4_t a1 = vabsq_s32(vld1q_s32((const int32_t *)(ip1 + 16)));
+            uint16x8_t pair0 = vpaddlq_u8(vcntq_u8(vreinterpretq_u8_s32(a0)));
+            uint16x8_t pair1 = vpaddlq_u8(vcntq_u8(vreinterpretq_u8_s32(a1)));
+            uint16x4_t lo = vmovn_u32(vpaddlq_u16(pair0));
+            uint16x4_t hi = vmovn_u32(vpaddlq_u16(pair1));
+            vst1_u8(op1, vmovn_u16(vcombine_u16(lo, hi)));
+        }
+    }
+    else if (elsize == 8) {
+        for (; n >= 8; n -= 8, ip1 += 64, op1 += 8) {
+            int64x2_t a0 = vabsq_s64(vld1q_s64((const int64_t *)ip1));
+            int64x2_t a1 = vabsq_s64(vld1q_s64((const int64_t *)(ip1 + 16)));
+            int64x2_t a2 = vabsq_s64(vld1q_s64((const int64_t *)(ip1 + 32)));
+            int64x2_t a3 = vabsq_s64(vld1q_s64((const int64_t *)(ip1 + 48)));
+            uint32x4_t quad0 = vpaddlq_u16(vpaddlq_u8(vcntq_u8(vreinterpretq_u8_s64(a0))));
+            uint32x4_t quad1 = vpaddlq_u16(vpaddlq_u8(vcntq_u8(vreinterpretq_u8_s64(a1))));
+            uint32x4_t quad2 = vpaddlq_u16(vpaddlq_u8(vcntq_u8(vreinterpretq_u8_s64(a2))));
+            uint32x4_t quad3 = vpaddlq_u16(vpaddlq_u8(vcntq_u8(vreinterpretq_u8_s64(a3))));
+            uint16x4_t lo = vmovn_u32(vcombine_u32(
+                    vmovn_u64(vpaddlq_u32(quad0)),
+                    vmovn_u64(vpaddlq_u32(quad1))));
+            uint16x4_t hi = vmovn_u32(vcombine_u32(
+                    vmovn_u64(vpaddlq_u32(quad2)),
+                    vmovn_u64(vpaddlq_u32(quad3))));
+            vst1_u8(op1, vmovn_u16(vcombine_u16(lo, hi)));
+        }
+    }
+
+    for (; n > 0; --n, ip1 += elsize, ++op1) {
+        switch (elsize) {
+        case 1:
+            *op1 = npy_popcounthh(*(const npy_byte *)ip1);
+            break;
+        case 2:
+            *op1 = npy_popcounth(*(const npy_short *)ip1);
+            break;
+        case 4:
+            *op1 = npy_popcount(*(const npy_int *)ip1);
+            break;
+        default:
+            *op1 = npy_popcountll(*(const npy_longlong *)ip1);
+            break;
+        }
+    }
+}
+#endif
 
 /*
  *****************************************************************************
@@ -205,6 +801,20 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_right_shift)
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_bitwise_count)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
+#if defined(__aarch64__)
+    if (IS_UNARY_CONT(@type@, npy_ubyte) &&
+            abs_ptrdiff(args[1], args[0]) >= AUTOVEC_OVERLAP_SIZE) {
+        if (@SIGNED@) {
+            bitwise_count_signed_aarch64_contig(
+                    args, dimensions[0], sizeof(@type@));
+        }
+        else {
+            bitwise_count_unsigned_aarch64_contig(
+                    args, dimensions[0], sizeof(@type@));
+        }
+        return;
+    }
+#endif
     UNARY_LOOP_FAST(@type@, npy_ubyte, *out = npy_popcount@c@(in));
 }
 
@@ -245,6 +855,28 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
         BINARY_REDUCE_LOOP_FAST(@type@, io1 @OP@= in2);
     }
     else {
+#if defined(__aarch64__)
+        if (IS_BINARY_CONT(@type@, @type@) &&
+                abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE &&
+                abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) {
+            @TYPE@_@kind@_aarch64_contig(args, dimensions[0]);
+            return;
+        }
+        if (sizeof(@type@) != 1 &&
+                IS_BINARY_CONT_S1(@type@, @type@) &&
+                (abs_ptrdiff(args[2], args[1]) == 0 ||
+                 abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE)) {
+            @TYPE@_@kind@_aarch64_contig_scalar(args, dimensions[0], 0);
+            return;
+        }
+        if (sizeof(@type@) != 1 &&
+                IS_BINARY_CONT_S2(@type@, @type@) &&
+                (abs_ptrdiff(args[2], args[0]) == 0 ||
+                 abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE)) {
+            @TYPE@_@kind@_aarch64_contig_scalar(args, dimensions[0], 1);
+            return;
+        }
+#endif
         BINARY_LOOP_FAST(@type@, @type@, *out = in1 @OP@ in2);
     }
 }
@@ -253,6 +885,9 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
 /**begin repeat1
  * #kind = logical_and, logical_or#
  * #OP = &&, ||#
+ * #array_if = scalar, !scalar#
+ * #const_if_not_array = NPY_FALSE, NPY_TRUE#
+ * #or_only = 0, 1#
  */
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
@@ -261,6 +896,56 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
      * gcc vectorization of this is not good (PR60575) but manual integer
      * vectorization is too tedious to be worthwhile
      */
+#if defined(__aarch64__)
+    if (sizeof(@type@) == sizeof(npy_ubyte) &&
+            IS_BINARY_CONT(@type@, npy_bool) &&
+            abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE &&
+            abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) {
+        UBYTE_@kind@_aarch64_logical_contig(args, dimensions[0]);
+        return;
+    }
+#if @or_only@
+    if (sizeof(@type@) > sizeof(npy_ubyte) &&
+            IS_BINARY_CONT(@type@, npy_bool) &&
+            abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE &&
+            abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) {
+        @TYPE@_logical_or_aarch64_contig(args, dimensions[0]);
+        return;
+    }
+#endif
+#if @or_only@
+    if (sizeof(@type@) == sizeof(npy_ubyte) &&
+            IS_BINARY_CONT_S1(@type@, npy_bool) &&
+            abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) {
+        const npy_bool scalar = !!*(const @type@ *)args[0];
+        if (@array_if@) {
+            UBYTE_logical_to_bool_aarch64_contig(
+                    (const npy_ubyte *)args[1], (npy_bool *)args[2],
+                    dimensions[0], NPY_FALSE);
+        }
+        else {
+            bool_const_aarch64_contig(
+                    args + 1, dimensions[0], @const_if_not_array@);
+        }
+        return;
+    }
+#endif
+    if (sizeof(@type@) > sizeof(npy_ubyte) &&
+            IS_BINARY_CONT_S1(@type@, npy_bool) &&
+            abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) {
+        const npy_bool scalar = !!*(const @type@ *)args[0];
+        if (@array_if@) {
+            @TYPE@_logical_to_bool_aarch64_contig(
+                    (const @type@ *)args[1], (npy_bool *)args[2],
+                    dimensions[0], NPY_FALSE);
+        }
+        else {
+            bool_const_aarch64_contig(
+                    args + 1, dimensions[0], @const_if_not_array@);
+        }
+        return;
+    }
+#endif
     BINARY_LOOP_FAST(@type@, npy_bool, *out = in1 @OP@ in2);
 }
 /**end repeat1**/
@@ -271,6 +956,41 @@ NPY_FINLINE npy_bool @TYPE@_logical_xor_(@type@ in1, @type@ in2)
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_logical_xor)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
+#if defined(__aarch64__)
+    if (sizeof(@type@) == sizeof(npy_ubyte) &&
+            IS_BINARY_CONT(@type@, npy_bool) &&
+            abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE &&
+            abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) {
+        UBYTE_logical_xor_aarch64_logical_contig(args, dimensions[0]);
+        return;
+    }
+    if (sizeof(@type@) == sizeof(npy_ubyte) &&
+            IS_BINARY_CONT_S1(@type@, npy_bool) &&
+            abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) {
+        if ((@type@)-1 > 0 && !!*(const @type@ *)args[0]) {
+            BINARY_LOOP_FAST(@type@, npy_bool,
+                    *out = @TYPE@_logical_xor_(in1, in2));
+            return;
+        }
+        if (!!*(const @type@ *)args[0]) {
+            UBYTE_logical_not_aarch64_contig(args + 1, dimensions[0]);
+        }
+        else {
+            UBYTE_logical_to_bool_aarch64_contig(
+                    (const npy_ubyte *)args[1], (npy_bool *)args[2],
+                    dimensions[0], NPY_FALSE);
+        }
+        return;
+    }
+    if (sizeof(@type@) > sizeof(npy_ubyte) &&
+            IS_BINARY_CONT_S1(@type@, npy_bool) &&
+            abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) {
+        @TYPE@_logical_to_bool_aarch64_contig(
+                (const @type@ *)args[1], (npy_bool *)args[2],
+                dimensions[0], !!*(const @type@ *)args[0]);
+        return;
+    }
+#endif
     BINARY_LOOP_FAST(@type@, npy_bool, *out = @TYPE@_logical_xor_(in1, in2));
 }
 
@@ -282,6 +1002,12 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_logical_xor)
 NPY_NO_EXPORT void  NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
+#if defined(__aarch64__)
+    if (IS_OUTPUT_CONT(npy_bool)) {
+        bool_const_aarch64_contig(args, dimensions[0], @val@);
+        return;
+    }
+#endif
     /*
      * The (void)in; suppresses an unused variable warning raised by gcc and allows
      * us to reuse this macro even though we do not depend on in
@@ -299,12 +1025,28 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_conjugate)
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_logical_not)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
+#if defined(__aarch64__)
+    if (sizeof(@type@) == sizeof(npy_ubyte) &&
+            IS_UNARY_CONT(@type@, npy_bool) &&
+            abs_ptrdiff(args[1], args[0]) >= AUTOVEC_OVERLAP_SIZE) {
+        UBYTE_logical_not_aarch64_contig(args, dimensions[0]);
+        return;
+    }
+#endif
     UNARY_LOOP_FAST(@type@, npy_bool, *out = !in);
 }
 
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_invert)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
+#if defined(__aarch64__)
+    if (sizeof(@type@) < 8 &&
+            IS_UNARY_CONT(@type@, @type@) &&
+            abs_ptrdiff(args[1], args[0]) >= AUTOVEC_OVERLAP_SIZE) {
+        @TYPE@_invert_aarch64_contig(args, dimensions[0]);
+        return;
+    }
+#endif
     UNARY_LOOP_FAST(@type@, @type@, *out = ~in);
 }
 /**end repeat**/
@@ -384,14 +1126,14 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_absolute)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
     if (IS_UNARY_CONT(npy_half, npy_half) && npy_highway_absolute_half_available()) {
- 	         npy_highway_HALF_absolute_contig(args, dimensions[0]);
- 	         return;
- 	     }
- 	 
- 	     if (steps[0] % sizeof(npy_half) == 0 && steps[1] % sizeof(npy_half) == 0 &&
- 	         npy_highway_absolute_half_strided_available()) {
- 	         npy_highway_HALF_absolute_strided(args, steps[0], steps[1], dimensions[0]);
- 	         return;
+        npy_highway_HALF_absolute_contig(args, dimensions[0]);
+        return;
+    }
+
+    if (steps[0] % sizeof(npy_half) == 0 && steps[1] % sizeof(npy_half) == 0 &&
+            npy_highway_absolute_half_strided_available()) {
+        npy_highway_HALF_absolute_strided(args, steps[0], steps[1], dimensions[0]);
+        return;
     }
     UNARY_LOOP_FAST(npy_half, npy_half, *out = in&0x7fffu);
 }
