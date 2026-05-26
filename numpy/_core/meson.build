@@ -951,6 +951,17 @@ foreach gen_mtargets : [
       VXE, VX,
       LSX,
     ]
+  ], 
+  [
+    'loops_deg_rad_hwy.dispatch.h',
+    'src/umath/loops_deg_rad_hwy.dispatch.cpp',
+    [
+      X86_V4, X86_V3, X86_V2,
+      NEON,
+      VSX4, VSX2,
+      VX,
+      LSX,
+    ]
   ],
   [
     'loops_arithmetic.dispatch.h',
