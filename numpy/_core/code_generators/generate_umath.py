@@ -761,7 +761,8 @@ defdict = {
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.rad2deg'),
           None,
-          TD(fltsP, f='rad2deg', astype={'e': 'f'}),
+          TD(flts, dispatch=[('loops_deg_rad_hwy', 'flts')]),
+          TD(P, f='rad2deg'),
           ),
 'radians':
     Ufunc(1, 1, None,
@@ -774,7 +775,8 @@ defdict = {
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.deg2rad'),
           None,
-          TD(fltsP, f='deg2rad', astype={'e': 'f'}),
+          TD(flts, dispatch=[('loops_deg_rad_hwy', 'flts')]),
+          TD(P, f='deg2rad'),
           ),
 'arccos':
     Ufunc(1, 1, None,
