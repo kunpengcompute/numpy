@@ -592,8 +592,11 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_divide)
         return;
     }
 #if NPY_BITSOF_@STYPE@ == 32 && defined(NPY_HAVE_NEON)
-    /* Highway scalar floor divide for uint32 on ARM NEON */
-    if (IS_BLOCKABLE_BINARY_SCALAR2(sizeof(@type@), NPY_SIMD_WIDTH)) {
+    /* Highway scalar floor divide for uint32 on ARM NEON
+     * Exclude scalar==0 so it falls through to BINARY_LOOP,
+     * consistent with the signed path's defensive approach. */
+    if (IS_BLOCKABLE_BINARY_SCALAR2(sizeof(@type@), NPY_SIMD_WIDTH) &&
+        (*(@type@ *)args[1]) != 0) {
         npy_highway_floor_divide_u32_scalar_contig(args, dimensions[0]);
         return;
     }
