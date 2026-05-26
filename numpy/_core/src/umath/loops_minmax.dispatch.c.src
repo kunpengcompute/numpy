@@ -242,9 +242,9 @@ simd_binary_@intrin@_@sfx@(const npyv_lanetype_@sfx@ *ip1, npy_intp sip1,
                                  npy_intp len)
 {
     const int vstep = npyv_nlanes_@sfx@;
+#if @is_fp@
     const int unroll = 4;
     const int unroll_vstep = vstep * unroll;
-#if @is_fp@
     // Scalar broadcast fast path: when one operand has stride 0,
     // broadcast once and reuse throughout the loop
     if (sip1 == 0 || sip2 == 0) {

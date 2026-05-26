@@ -340,60 +340,57 @@ unguarded_partition_(type *v, npy_intp *tosort, const type pivot, npy_intp *ll,
     constexpr npy_intp partition_highway_min_items = 1024;
     constexpr npy_intp partition_highway_max_bytes = 32768;
     if constexpr (!arg && std::is_same_v<type, npy_int64>) {
-        if (partition_scratch == nullptr ||
-                span < partition_highway_min_items ||
-                span * static_cast<npy_intp>(sizeof(type)) >
+        if (partition_scratch != nullptr &&
+                span >= partition_highway_min_items &&
+                span * static_cast<npy_intp>(sizeof(type)) <=
                         partition_highway_max_bytes) {
-            goto scalar_partition;
-        }
-        npy_intp vec_ll = *ll;
-        npy_intp vec_hh = *hh;
-        int ok = 0;
-        /*
-         * `highway_qsort.dispatch.h` is included in earlier dispatch helpers
-         * and defines `NPY_CPU_DISPATCH_CALL_XB` with a broader target set
-         * including SVE.  The partition SIMD implementation only provides the
-         * targets declared by `partition_highway.dispatch.h`, so re-include the
-         * matching dispatch header here before expanding the macro.
-         */
-        #include "partition_highway.dispatch.h"
-        NPY_CPU_DISPATCH_CALL_XB(
-                ok = np::highway::partition_simd::PartitionInt64,
-                (reinterpret_cast<npy_int64 *>(v), *ll, *hh,
-                 static_cast<npy_int64>(pivot),
-                 reinterpret_cast<npy_int64 *>(partition_scratch),
-                 &vec_ll, &vec_hh));
-        if (ok) {
-            *ll = vec_ll;
-            *hh = vec_hh;
-            return;
+            npy_intp vec_ll = *ll;
+            npy_intp vec_hh = *hh;
+            int ok = 0;
+            /*
+             * `highway_qsort.dispatch.h` is included in earlier dispatch helpers
+             * and defines `NPY_CPU_DISPATCH_CALL_XB` with a broader target set
+             * including SVE.  The partition SIMD implementation only provides the
+             * targets declared by `partition_highway.dispatch.h`, so re-include the
+             * matching dispatch header here before expanding the macro.
+             */
+            #include "partition_highway.dispatch.h"
+            NPY_CPU_DISPATCH_CALL_XB(
+                    ok = np::highway::partition_simd::PartitionInt64,
+                    (reinterpret_cast<npy_int64 *>(v), *ll, *hh,
+                     static_cast<npy_int64>(pivot),
+                     reinterpret_cast<npy_int64 *>(partition_scratch),
+                     &vec_ll, &vec_hh));
+            if (ok) {
+                *ll = vec_ll;
+                *hh = vec_hh;
+                return;
+            }
         }
     }
     else if constexpr (!arg && std::is_same_v<type, npy_double>) {
-        if (partition_scratch == nullptr ||
-                span < partition_highway_min_items ||
-                span * static_cast<npy_intp>(sizeof(type)) >
+        if (partition_scratch != nullptr &&
+                span >= partition_highway_min_items &&
+                span * static_cast<npy_intp>(sizeof(type)) <=
                         partition_highway_max_bytes) {
-            goto scalar_partition;
-        }
-        npy_intp vec_ll = *ll;
-        npy_intp vec_hh = *hh;
-        int ok = 0;
-        #include "partition_highway.dispatch.h"
-        NPY_CPU_DISPATCH_CALL_XB(
-                ok = np::highway::partition_simd::PartitionDouble,
-                (reinterpret_cast<npy_double *>(v), *ll, *hh,
-                 static_cast<npy_double>(pivot),
-                 reinterpret_cast<npy_double *>(partition_scratch),
-                 &vec_ll, &vec_hh));
-        if (ok) {
-            *ll = vec_ll;
-            *hh = vec_hh;
-            return;
+            npy_intp vec_ll = *ll;
+            npy_intp vec_hh = *hh;
+            int ok = 0;
+            #include "partition_highway.dispatch.h"
+            NPY_CPU_DISPATCH_CALL_XB(
+                    ok = np::highway::partition_simd::PartitionDouble,
+                    (reinterpret_cast<npy_double *>(v), *ll, *hh,
+                     static_cast<npy_double>(pivot),
+                     reinterpret_cast<npy_double *>(partition_scratch),
+                     &vec_ll, &vec_hh));
+            if (ok) {
+                *ll = vec_ll;
+                *hh = vec_hh;
+                return;
+            }
         }
     }
 #endif
-scalar_partition:
     Idx<arg> idx(tosort);
     Sortee<type, arg> sortee(v, tosort);
 
