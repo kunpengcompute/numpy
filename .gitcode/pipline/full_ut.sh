@@ -49,6 +49,15 @@ spin build --clean -- "${full_ut_build_args[@]}"
 
 ci_log "Running full UT suite without coverage."
 export PATH="${PWD}/build-install/usr/bin:${PATH}"
+if [[ ! -x "${PWD}/build-install/usr/bin/numpy-config" ]]; then
+    mkdir -p -- "${PWD}/build-install/usr/bin"
+    python_bin="$(command -v python)"
+    cat > "${PWD}/build-install/usr/bin/numpy-config" <<EOF
+#!/usr/bin/env sh
+exec "${python_bin}" -c 'from numpy._configtool import main; raise SystemExit(main())' "\$@"
+EOF
+    chmod +x "${PWD}/build-install/usr/bin/numpy-config"
+fi
 case " ${FULL_UT_ARGS} " in
     *" --cov "*|*" --cov="*|*" --cov-report "*|*" --cov-report="*|*" --gcov "*|*" --gcov-format "*)
         printf 'FULL_UT_ARGS must not include coverage options; full_ut.sh runs UT only.\n' >&2
