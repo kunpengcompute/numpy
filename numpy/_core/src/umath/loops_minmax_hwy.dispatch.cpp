@@ -17,7 +17,7 @@
  * 2. Highway's hn::Min/hn::Max propagate NaN from second operand (opposite)
  *    - Inline mask operations correct this behavior
  * 3. SVE: Use svorr_b directly instead of Highway's svsel_b-based Or for speed
- * 4. 4x unrolled loop for throughput, scalar tail for remaining elements
+ * 4. 6x unrolled loop for throughput, scalar tail for remaining elements
  */
 
 #define _UMATHMODULE
@@ -34,10 +34,7 @@
 #include "loops_minmax_hwy.dispatch.h"
 
 #include <hwy/highway.h>
-
-#ifdef __ARM_FEATURE_SVE
-#include <arm_sve.h>
-#endif
+#include <hwy/cache_control.h>
 
 #include "loops_minmax_hwy.h"
 
@@ -54,8 +51,9 @@ namespace hn = hwy::HWY_NAMESPACE;
  * Unroll strategy based on element size:
  * - 8-bit:  8x unroll (SVE 256-bit = 32 elements, need more throughput)
  * - 16-bit: 8x unroll (SVE 256-bit = 16 elements)
- * - 32-bit: 4x unroll (SVE 256-bit = 8 elements, balanced)
+ * - 32-bit: 8x unroll (SVE 256-bit = 8 lanes, maximize throughput)
  * - 64-bit: 2x unroll (SVE 256-bit = 4 elements, avoid overhead)
+ * Prefetch: L1 streaming hints for src1/src2 at next iteration boundary
  */
 template <typename T, bool IsMax, int UnrollFactor>
 HWY_ATTR static void
@@ -66,9 +64,10 @@ simd_minmax_int_unrolled(const T *HWY_RESTRICT src1, const T *HWY_RESTRICT src2,
     HWY_LANES_CONSTEXPR npy_intp vstep = static_cast<npy_intp>(hn::Lanes(d));
     const npy_intp vstep_unroll = vstep * UnrollFactor;
 
-    // Main unrolled loop
     for (; len >= vstep_unroll;
          len -= vstep_unroll, src1 += vstep_unroll, src2 += vstep_unroll, dst += vstep_unroll) {
+        hwy::Prefetch(src1 + vstep_unroll);
+        hwy::Prefetch(src2 + vstep_unroll);
         for (int i = 0; i < UnrollFactor; ++i) {
             auto a = hn::LoadU(d, src1 + i * vstep);
             auto b = hn::LoadU(d, src2 + i * vstep);
@@ -77,15 +76,15 @@ simd_minmax_int_unrolled(const T *HWY_RESTRICT src1, const T *HWY_RESTRICT src2,
         }
     }
 
-    // Single vector loop
     for (; len >= vstep; len -= vstep, src1 += vstep, src2 += vstep, dst += vstep) {
+        hwy::Prefetch(src1 + vstep);
+        hwy::Prefetch(src2 + vstep);
         auto a = hn::LoadU(d, src1);
         auto b = hn::LoadU(d, src2);
         auto r = IsMax ? hn::Max(a, b) : hn::Min(a, b);
         hn::StoreU(r, d, dst);
     }
 
-    // Scalar tail
     for (; len > 0; --len, ++src1, ++src2, ++dst) {
         const T a = *src1;
         const T b = *src2;
@@ -140,22 +139,22 @@ HWY_ATTR static void simd_minimum_u16(const uint16_t *src1, const uint16_t *src2
     simd_minmax_int_unrolled<uint16_t, false, 8>(src1, src2, dst, len);
 }
 
-// 32-bit: 4x unroll (balanced)
+// 32-bit: 8x unroll (SVE 8 lanes, maximize throughput)
 HWY_ATTR static void simd_maximum_s32(const int32_t *src1, const int32_t *src2,
-                                      int32_t *dst, npy_intp len) {
-    simd_minmax_int_unrolled<int32_t, true, 4>(src1, src2, dst, len);
+                                       int32_t *dst, npy_intp len) {
+    simd_minmax_int_unrolled<int32_t, true, 8>(src1, src2, dst, len);
 }
 HWY_ATTR static void simd_minimum_s32(const int32_t *src1, const int32_t *src2,
-                                      int32_t *dst, npy_intp len) {
-    simd_minmax_int_unrolled<int32_t, false, 4>(src1, src2, dst, len);
+                                       int32_t *dst, npy_intp len) {
+    simd_minmax_int_unrolled<int32_t, false, 8>(src1, src2, dst, len);
 }
 HWY_ATTR static void simd_maximum_u32(const uint32_t *src1, const uint32_t *src2,
-                                      uint32_t *dst, npy_intp len) {
-    simd_minmax_int_unrolled<uint32_t, true, 4>(src1, src2, dst, len);
+                                       uint32_t *dst, npy_intp len) {
+    simd_minmax_int_unrolled<uint32_t, true, 8>(src1, src2, dst, len);
 }
 HWY_ATTR static void simd_minimum_u32(const uint32_t *src1, const uint32_t *src2,
-                                      uint32_t *dst, npy_intp len) {
-    simd_minmax_int_unrolled<uint32_t, false, 4>(src1, src2, dst, len);
+                                       uint32_t *dst, npy_intp len) {
+    simd_minmax_int_unrolled<uint32_t, false, 8>(src1, src2, dst, len);
 }
 
 // 64-bit: 2x unroll (reduce overhead for smaller vector width)
@@ -176,6 +175,139 @@ HWY_ATTR static void simd_minimum_u64(const uint64_t *src1, const uint64_t *src2
     simd_minmax_int_unrolled<uint64_t, false, 2>(src1, src2, dst, len);
 }
 
+/*
+ * SIMD binary maximum/minimum for float/double with NaN propagation.
+ * NumPy semantics: maximum(A,B) = (A >= B || isnan(A)) ? A : B
+ *                  minimum(A,B) = (A <= B || isnan(A)) ? A : B
+ * Highway's Max/Min uses vmaxnm/vminnm which ignore NaN.
+ * Mask correction: Ge(a,b) | IsNaN(a) selects a, otherwise b.
+ * On SVE, svorr_b is used for mask OR (faster than Highway's svsel_b-based Or).
+ */
+template <typename T, bool IsMax, int UnrollFactor>
+HWY_ATTR static void
+simd_minmax_fp_unrolled(const T *HWY_RESTRICT src1, const T *HWY_RESTRICT src2,
+                        T *HWY_RESTRICT dst, npy_intp len)
+{
+    const hn::ScalableTag<T> d;
+    HWY_LANES_CONSTEXPR npy_intp vstep = static_cast<npy_intp>(hn::Lanes(d));
+    const npy_intp vstep_unroll = vstep * UnrollFactor;
+
+    for (; len >= vstep_unroll;
+         len -= vstep_unroll, src1 += vstep_unroll, src2 += vstep_unroll, dst += vstep_unroll) {
+        hwy::Prefetch(src1 + vstep_unroll);
+        hwy::Prefetch(src2 + vstep_unroll);
+        for (int i = 0; i < UnrollFactor; ++i) {
+            auto a = hn::LoadU(d, src1 + i * vstep);
+            auto b = hn::LoadU(d, src2 + i * vstep);
+            auto mask_cmp = IsMax ? hn::Ge(a, b) : hn::Le(a, b);
+            auto mask_nan = hn::IsNaN(a);
+            auto mask_choose_a = hn::Or(mask_cmp, mask_nan);
+            auto r = hn::IfThenElse(mask_choose_a, a, b);
+            hn::StoreU(r, d, dst + i * vstep);
+        }
+    }
+
+    for (; len >= vstep; len -= vstep, src1 += vstep, src2 += vstep, dst += vstep) {
+        hwy::Prefetch(src1 + vstep);
+        hwy::Prefetch(src2 + vstep);
+        auto a = hn::LoadU(d, src1);
+        auto b = hn::LoadU(d, src2);
+        auto mask_cmp = IsMax ? hn::Ge(a, b) : hn::Le(a, b);
+        auto mask_nan = hn::IsNaN(a);
+        auto mask_choose_a = hn::Or(mask_cmp, mask_nan);
+        auto r = hn::IfThenElse(mask_choose_a, a, b);
+        hn::StoreU(r, d, dst);
+    }
+
+    for (; len > 0; --len, ++src1, ++src2, ++dst) {
+        const T a = *src1;
+        const T b = *src2;
+        *dst = IsMax ? ((a >= b || npy_isnan(a)) ? a : b)
+                      : ((a <= b || npy_isnan(a)) ? a : b);
+    }
+}
+
+HWY_ATTR static void simd_maximum_f32(const float *src1, const float *src2,
+                                      float *dst, npy_intp len) {
+    simd_minmax_fp_unrolled<float, true, 6>(src1, src2, dst, len);
+}
+HWY_ATTR static void simd_minimum_f32(const float *src1, const float *src2,
+                                      float *dst, npy_intp len) {
+    simd_minmax_fp_unrolled<float, false, 6>(src1, src2, dst, len);
+}
+HWY_ATTR static void simd_maximum_f64(const double *src1, const double *src2,
+                                       double *dst, npy_intp len) {
+    simd_minmax_fp_unrolled<double, true, 6>(src1, src2, dst, len);
+}
+HWY_ATTR static void simd_minimum_f64(const double *src1, const double *src2,
+                                       double *dst, npy_intp len) {
+    simd_minmax_fp_unrolled<double, false, 6>(src1, src2, dst, len);
+}
+
+/*
+ * SIMD binary fmax/fmin for float/double (C99 NaN-ignoring semantics).
+ * C99 fmax/fmin: if one operand is NaN, return the non-NaN operand.
+ * Highway's Max/Min uses vmaxnm/vminnm which already implement this behavior.
+ * No mask correction needed — direct Max/Min operations.
+ */
+template <typename T, bool IsMax, int UnrollFactor>
+HWY_ATTR static void
+simd_fmax_fmin_fp_unrolled(const T *HWY_RESTRICT src1, const T *HWY_RESTRICT src2,
+                           T *HWY_RESTRICT dst, npy_intp len)
+{
+    const hn::ScalableTag<T> d;
+    HWY_LANES_CONSTEXPR npy_intp vstep = static_cast<npy_intp>(hn::Lanes(d));
+    const npy_intp vstep_unroll = vstep * UnrollFactor;
+
+    for (; len >= vstep_unroll;
+         len -= vstep_unroll, src1 += vstep_unroll, src2 += vstep_unroll, dst += vstep_unroll) {
+        hwy::Prefetch(src1 + vstep_unroll);
+        hwy::Prefetch(src2 + vstep_unroll);
+        for (int i = 0; i < UnrollFactor; ++i) {
+            auto a = hn::LoadU(d, src1 + i * vstep);
+            auto b = hn::LoadU(d, src2 + i * vstep);
+            auto r = IsMax ? hn::Max(a, b) : hn::Min(a, b);
+            hn::StoreU(r, d, dst + i * vstep);
+        }
+    }
+
+    for (; len >= vstep; len -= vstep, src1 += vstep, src2 += vstep, dst += vstep) {
+        hwy::Prefetch(src1 + vstep);
+        hwy::Prefetch(src2 + vstep);
+        auto a = hn::LoadU(d, src1);
+        auto b = hn::LoadU(d, src2);
+        auto r = IsMax ? hn::Max(a, b) : hn::Min(a, b);
+        hn::StoreU(r, d, dst);
+    }
+
+    for (; len > 0; --len, ++src1, ++src2, ++dst) {
+        const T a = *src1;
+        const T b = *src2;
+        if (IsMax) {
+            *dst = npy_isnan(a) ? (npy_isnan(b) ? a : b) : (npy_isnan(b) ? a : (a > b ? a : b));
+        } else {
+            *dst = npy_isnan(a) ? (npy_isnan(b) ? a : b) : (npy_isnan(b) ? a : (a < b ? a : b));
+        }
+    }
+}
+
+HWY_ATTR static void simd_fmax_f32(const float *src1, const float *src2,
+                                    float *dst, npy_intp len) {
+    simd_fmax_fmin_fp_unrolled<float, true, 6>(src1, src2, dst, len);
+}
+HWY_ATTR static void simd_fmin_f32(const float *src1, const float *src2,
+                                    float *dst, npy_intp len) {
+    simd_fmax_fmin_fp_unrolled<float, false, 6>(src1, src2, dst, len);
+}
+HWY_ATTR static void simd_fmax_f64(const double *src1, const double *src2,
+                                    double *dst, npy_intp len) {
+    simd_fmax_fmin_fp_unrolled<double, true, 6>(src1, src2, dst, len);
+}
+HWY_ATTR static void simd_fmin_f64(const double *src1, const double *src2,
+                                    double *dst, npy_intp len) {
+    simd_fmax_fmin_fp_unrolled<double, false, 6>(src1, src2, dst, len);
+}
+
 } // namespace HWY_NAMESPACE
 
 HWY_AFTER_NAMESPACE();
@@ -194,7 +326,23 @@ extern "C" {
 typedef void (*minmax_func)(char **args, npy_intp len);
 
 /* Forward-declare target-specific variants so NPY_CPU_DISPATCH_CALL_XB can
- * reference them. FP types are NOT declared - baseline-only, bypass SVE. */
+ * reference them. Integer types use SVE dispatch; FP types also dispatch. */
+NPY_CPU_DISPATCH_DECLARE_XB(void npy_highway_maximum_f32_contig,
+                              (char **args, npy_intp len));
+NPY_CPU_DISPATCH_DECLARE_XB(void npy_highway_minimum_f32_contig,
+                              (char **args, npy_intp len));
+NPY_CPU_DISPATCH_DECLARE_XB(void npy_highway_maximum_f64_contig,
+                              (char **args, npy_intp len));
+NPY_CPU_DISPATCH_DECLARE_XB(void npy_highway_minimum_f64_contig,
+                              (char **args, npy_intp len));
+NPY_CPU_DISPATCH_DECLARE_XB(void npy_highway_fmax_f32_contig,
+                              (char **args, npy_intp len));
+NPY_CPU_DISPATCH_DECLARE_XB(void npy_highway_fmin_f32_contig,
+                              (char **args, npy_intp len));
+NPY_CPU_DISPATCH_DECLARE_XB(void npy_highway_fmax_f64_contig,
+                              (char **args, npy_intp len));
+NPY_CPU_DISPATCH_DECLARE_XB(void npy_highway_fmin_f64_contig,
+                              (char **args, npy_intp len));
 NPY_CPU_DISPATCH_DECLARE_XB(void npy_highway_maximum_s8_contig,
                             (char **args, npy_intp len));
 NPY_CPU_DISPATCH_DECLARE_XB(void npy_highway_minimum_s8_contig,
@@ -270,6 +418,18 @@ NPY_CPU_DISPATCH_CURFX(func_name)(char **args, npy_intp len) \
 }
 #endif
 
+/* Float maximum/minimum wrappers - SVE dispatched */
+MINMAX_DISPATCH(npy_highway_maximum_f32_contig, simd_maximum_f32, float)
+MINMAX_DISPATCH(npy_highway_minimum_f32_contig, simd_minimum_f32, float)
+MINMAX_DISPATCH(npy_highway_maximum_f64_contig, simd_maximum_f64, double)
+MINMAX_DISPATCH(npy_highway_minimum_f64_contig, simd_minimum_f64, double)
+
+/* Float fmax/fmin wrappers - SVE dispatched (NaN-ignoring, C99 semantics) */
+MINMAX_DISPATCH(npy_highway_fmax_f32_contig, simd_fmax_f32, float)
+MINMAX_DISPATCH(npy_highway_fmin_f32_contig, simd_fmin_f32, float)
+MINMAX_DISPATCH(npy_highway_fmax_f64_contig, simd_fmax_f64, double)
+MINMAX_DISPATCH(npy_highway_fmin_f64_contig, simd_fmin_f64, double)
+
 /* 8-bit to 64-bit integer maximum/minimum wrappers - SVE dispatched */
 MINMAX_DISPATCH(npy_highway_maximum_s8_contig, simd_maximum_s8, std::int8_t)
 MINMAX_DISPATCH(npy_highway_minimum_s8_contig, simd_minimum_s8, std::int8_t)
@@ -292,6 +452,5 @@ MINMAX_DISPATCH(npy_highway_maximum_u64_contig, simd_maximum_u64, std::uint64_t)
 MINMAX_DISPATCH(npy_highway_minimum_u64_contig, simd_minimum_u64, std::uint64_t)
 
 #undef MINMAX_DISPATCH
-#undef MINMAX_DISPATCH_FP
 
 } // extern "C"

@@ -124,6 +124,8 @@ else
   highway_lib = []
 endif
 
+cdata.set10('NPY_HAVE_HIGHWAY', use_highway)
+
 use_intel_sort = not get_option('disable-intel-sort') and cpu_family in ['x86', 'x86_64']
 if use_intel_sort and not fs.exists('src/npysort/x86-simd-sort/README.md')
   error('Missing the `x86-simd-sort` git submodule! Run `git submodule update --init` to fix this.')
