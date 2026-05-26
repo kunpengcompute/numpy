@@ -842,7 +842,8 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
     }
 #endif
     if (sizeof(@type@) > sizeof(npy_ubyte) &&
-            IS_BINARY_CONT_S1(@type@, npy_bool)) {
+            IS_BINARY_CONT_S1(@type@, npy_bool) &&
+            abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) {
         const npy_bool scalar = !!*(const @type@ *)args[0];
         if (@array_if@) {
             @TYPE@_logical_to_bool_aarch64_contig(
@@ -893,7 +894,8 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_logical_xor)
         return;
     }
     if (sizeof(@type@) > sizeof(npy_ubyte) &&
-            IS_BINARY_CONT_S1(@type@, npy_bool)) {
+            IS_BINARY_CONT_S1(@type@, npy_bool) &&
+            abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) {
         @TYPE@_logical_to_bool_aarch64_contig(
                 (const @type@ *)args[1], (npy_bool *)args[2],
                 dimensions[0], !!*(const @type@ *)args[0]);
