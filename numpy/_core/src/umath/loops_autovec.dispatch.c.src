@@ -7,6 +7,7 @@
 #include "loops.h"
 // Provides the various *_LOOP macros
 #include "fast_loop_macros.h"
+#include "loops_autovec_abs_hwy.h"
 
 /*
  *****************************************************************************
