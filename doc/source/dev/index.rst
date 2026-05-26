@@ -264,6 +264,7 @@ The rest of the story
    releasing
    governance/index
    howto-docs
+   fft-backend
 
 NumPy-specific workflow is in :ref:`numpy-development-workflow
 <development-workflow>`.

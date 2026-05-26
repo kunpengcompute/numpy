@@ -63,12 +63,14 @@ HWY_INLINE HWY_ATTR Vec<uint8_t> simd_logical_or_u8(Vec<uint8_t> a, Vec<uint8_t>
 
 HWY_INLINE HWY_ATTR bool simd_any_u8(Vec<uint8_t> v)
 {
-    return hn::ReduceMax(_Tag<uint8_t>(), v) != 0;
+    const auto d = _Tag<uint8_t>();
+    return !hn::AllTrue(d, hn::Eq(v, Zero<uint8_t>()));
 }
 
 HWY_INLINE HWY_ATTR bool simd_all_u8(Vec<uint8_t> v)
 {
-    return hn::ReduceMin(_Tag<uint8_t>(), v) != 0;
+    const auto d = _Tag<uint8_t>();
+    return hn::AllFalse(d, hn::Eq(v, Zero<uint8_t>()));
 }
 #endif
 
@@ -86,6 +88,10 @@ struct BinaryLogicalTraits<logical_or_t> {
     static HWY_INLINE HWY_ATTR Vec<uint8_t> simd_op(Vec<uint8_t> a, Vec<uint8_t> b) {
         return simd_logical_or_u8(a, b);
     }
+
+    static HWY_INLINE HWY_ATTR Vec<uint8_t> reduce(Vec<uint8_t> a, Vec<uint8_t> b) {
+        return hn::Or(a, b);
+    }
 #endif
 };
 
@@ -99,6 +105,10 @@ struct BinaryLogicalTraits<logical_and_t> {
 
     static HWY_INLINE HWY_ATTR Vec<uint8_t> simd_op(Vec<uint8_t> a, Vec<uint8_t> b) {
         return simd_logical_and_u8(a, b);
+    }
+
+    static HWY_INLINE HWY_ATTR Vec<uint8_t> reduce(Vec<uint8_t> a, Vec<uint8_t> b) {
+        return hn::Min(a, b);
     }
 #endif
 };
@@ -184,17 +194,19 @@ static void simd_reduce_logical_BOOL(npy_bool* op, npy_bool* ip, npy_intp len) {
         auto v6 = LoadU(ip + vstep * 6);
         auto v7 = LoadU(ip + vstep * 7);
 
-        auto m01 = Traits::simd_op(v0, v1);
-        auto m23 = Traits::simd_op(v2, v3);
-        auto m45 = Traits::simd_op(v4, v5);
-        auto m67 = Traits::simd_op(v6, v7);
+        auto m01 = Traits::reduce(v0, v1);
+        auto m23 = Traits::reduce(v2, v3);
+        auto m45 = Traits::reduce(v4, v5);
+        auto m67 = Traits::reduce(v6, v7);
 
-        auto m0123 = Traits::simd_op(m01, m23);
-        auto m4567 = Traits::simd_op(m45, m67);
+        auto m0123 = Traits::reduce(m01, m23);
+        if (Traits::anyall(m0123) == !Traits::is_and) {
+            *op = !Traits::is_and;
+            return;
+        }
 
-        auto mv = Traits::simd_op(m0123, m4567);
-
-        if(Traits::anyall(mv) == !Traits::is_and) {
+        auto m4567 = Traits::reduce(m45, m67);
+        if (Traits::anyall(m4567) == !Traits::is_and) {
             *op = !Traits::is_and;
             return;
         }

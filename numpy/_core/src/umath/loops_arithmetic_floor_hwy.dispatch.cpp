@@ -10,6 +10,10 @@
  * trampoline: it uses NPY_CPU_DISPATCH_CALL_XB to dispatch to the best
  * available target-specific variant at runtime.
  *
+ * Two categories of operations:
+ * 1. Contig (vector-vector): both inputs are contiguous arrays
+ * 2. Scalar divisor: first input is contiguous array, second is a scalar
+ *
  * Signed:   2x unrolled to hide load-to-use latency on ARM pipelines.
  * Unsigned: 4x unrolled (simpler path — no overflow/floor adjustment).
  */
@@ -186,6 +190,94 @@ simd_floor_divide(const T *HWY_RESTRICT src1, const T *HWY_RESTRICT src2,
 
 template <typename T>
 HWY_ATTR static void
+simd_floor_divide_by_scalar(const T *HWY_RESTRICT src1, T scalar,
+                             T *HWY_RESTRICT dst, npy_intp len)
+{
+    constexpr T min_val = std::numeric_limits<T>::min();
+    HWY_LANES_CONSTEXPR int vstep = static_cast<int>(hn::Lanes(hn::ScalableTag<T>()));
+
+    const auto vneg_one = hn::Set(hn::ScalableTag<T>(), T(-1));
+    [[maybe_unused]] const auto vzero = hn::Zero(hn::ScalableTag<T>());
+    const auto vmin = hn::Set(hn::ScalableTag<T>(), min_val);
+
+    if (scalar == 0) {
+        npy_set_floatstatus_divbyzero();
+        for (npy_intp i = 0; i < len; ++i) {
+            dst[i] = 0;
+        }
+        return;
+    }
+
+    if (scalar == 1) {
+        for (; len >= vstep;
+             len -= vstep, src1 += vstep, dst += vstep) {
+            hn::StoreU(hn::LoadU(hn::ScalableTag<T>(), src1),
+                       hn::ScalableTag<T>(), dst);
+        }
+        for (; len > 0; --len, ++src1, ++dst) {
+            *dst = *src1;
+        }
+        return;
+    }
+
+    if (scalar == -1) {
+        bool warn_overflow = false;
+
+        for (; len >= vstep;
+             len -= vstep, src1 += vstep, dst += vstep) {
+            auto n = hn::LoadU(hn::ScalableTag<T>(), src1);
+            auto is_min = hn::Eq(n, vmin);
+            auto neg = hn::Neg(n);
+            auto result = hn::IfThenElse(is_min, vmin, neg);
+            hn::StoreU(result, hn::ScalableTag<T>(), dst);
+            if (!hn::AllFalse(hn::ScalableTag<T>(), is_min)) {
+                warn_overflow = true;
+            }
+        }
+
+        for (; len > 0; --len, ++src1, ++dst) {
+            const T n = *src1;
+            if (n == min_val) {
+                *dst = min_val;
+                warn_overflow = true;
+            } else {
+                *dst = -n;
+            }
+        }
+
+        if (warn_overflow) {
+            npy_set_floatstatus_overflow();
+        }
+        return;
+    }
+
+    const auto v_scalar = hn::Set(hn::ScalableTag<T>(), scalar);
+    for (; len >= vstep;
+         len -= vstep, src1 += vstep, dst += vstep) {
+        auto n = hn::LoadU(hn::ScalableTag<T>(), src1);
+        auto quo = hn::Div(n, v_scalar);
+        auto rem = hn::Sub(n, hn::Mul(quo, v_scalar));
+        auto n_pos = hn::Gt(n, vzero);
+        auto s_pos = hn::Gt(v_scalar, vzero);
+        auto same_sign = hn::Not(hn::Xor(n_pos, s_pos));
+        auto rem_zero = hn::Eq(rem, vzero);
+        auto needs_adj = hn::And(hn::Not(same_sign), hn::Not(rem_zero));
+        quo = hn::Add(quo, hn::IfThenElse(needs_adj, vneg_one, vzero));
+        hn::StoreU(quo, hn::ScalableTag<T>(), dst);
+    }
+
+    for (; len > 0; --len, ++src1, ++dst) {
+        const T n = *src1;
+        T r = n / scalar;
+        if (((n > 0) != (scalar > 0)) && ((r * scalar) != n)) {
+            r--;
+        }
+        *dst = r;
+    }
+}
+
+template <typename T>
+HWY_ATTR static void
 simd_floor_divide_unsigned(const T *HWY_RESTRICT src1,
                            const T *HWY_RESTRICT src2,
                            T *HWY_RESTRICT dst, npy_intp len)
@@ -279,6 +371,61 @@ simd_floor_divide_unsigned(const T *HWY_RESTRICT src1,
     }
 }
 
+template <typename T>
+HWY_ATTR static void
+simd_floor_divide_by_scalar_unsigned(const T *HWY_RESTRICT src1, T scalar,
+                                      T *HWY_RESTRICT dst, npy_intp len)
+{
+    HWY_LANES_CONSTEXPR int vstep = static_cast<int>(hn::Lanes(hn::ScalableTag<T>()));
+    [[maybe_unused]] const auto vzero = hn::Zero(hn::ScalableTag<T>());
+
+    if (scalar == 0) {
+        npy_set_floatstatus_divbyzero();
+        for (npy_intp i = 0; i < len; ++i) {
+            dst[i] = 0;
+        }
+        return;
+    }
+
+    const auto v_scalar = hn::Set(hn::ScalableTag<T>(), scalar);
+
+    const npy_intp vstep4 = vstep * 4;
+    for (; len >= vstep4;
+         len -= vstep4, src1 += vstep4, dst += vstep4) {
+        auto q0 = hn::Div(hn::LoadU(hn::ScalableTag<T>(), src1), v_scalar);
+        hn::StoreU(q0, hn::ScalableTag<T>(), dst);
+
+        auto q1 = hn::Div(hn::LoadU(hn::ScalableTag<T>(), src1 + vstep), v_scalar);
+        hn::StoreU(q1, hn::ScalableTag<T>(), dst + vstep);
+
+        auto q2 = hn::Div(hn::LoadU(hn::ScalableTag<T>(), src1 + vstep * 2), v_scalar);
+        hn::StoreU(q2, hn::ScalableTag<T>(), dst + vstep * 2);
+
+        auto q3 = hn::Div(hn::LoadU(hn::ScalableTag<T>(), src1 + vstep * 3), v_scalar);
+        hn::StoreU(q3, hn::ScalableTag<T>(), dst + vstep * 3);
+    }
+
+    const npy_intp vstep2 = vstep * 2;
+    for (; len >= vstep2;
+         len -= vstep2, src1 += vstep2, dst += vstep2) {
+        auto q0 = hn::Div(hn::LoadU(hn::ScalableTag<T>(), src1), v_scalar);
+        hn::StoreU(q0, hn::ScalableTag<T>(), dst);
+
+        auto q1 = hn::Div(hn::LoadU(hn::ScalableTag<T>(), src1 + vstep), v_scalar);
+        hn::StoreU(q1, hn::ScalableTag<T>(), dst + vstep);
+    }
+
+    for (; len >= vstep;
+         len -= vstep, src1 += vstep, dst += vstep) {
+        auto q = hn::Div(hn::LoadU(hn::ScalableTag<T>(), src1), v_scalar);
+        hn::StoreU(q, hn::ScalableTag<T>(), dst);
+    }
+
+    for (; len > 0; --len, ++src1, ++dst) {
+        *dst = *src1 / scalar;
+    }
+}
+
 } // namespace HWY_NAMESPACE
 
 HWY_AFTER_NAMESPACE();
@@ -287,20 +434,87 @@ extern "C" {
 
 #ifdef NPY_MTARGETS_CURRENT
 /*
- * Target-specific compilation (e.g. SVE).
- * NPY_CPU_DISPATCH_CURFX(func_name) produces e.g. func_name_SVE.
- * Uses HWY_STATIC_DISPATCH for Highway's own sub-target selection
- * (e.g. SVE vs SVE2).
+ * Target-specific compilation: NPY_CPU_DISPATCH_CURFX(func_name)
+ * produces e.g. func_name_SVE. Uses HWY_STATIC_DISPATCH for Highway's
+ * own sub-target selection (e.g. SVE vs SVE2).
  */
-#define FLOOR_DIVIDE_DISPATCH(func_name, simd_func, scalar_type) \
-NPY_VISIBILITY_HIDDEN void \
-NPY_CPU_DISPATCH_CURFX(func_name)(char **args, npy_intp len) \
-{ \
-    HWY_STATIC_DISPATCH(simd_func)( \
-        reinterpret_cast<const scalar_type *>(args[0]), \
-        reinterpret_cast<const scalar_type *>(args[1]), \
-        reinterpret_cast<scalar_type *>(args[2]), len); \
+
+/* Signed integer contig (vector-vector) wrappers */
+NPY_VISIBILITY_HIDDEN void
+NPY_CPU_DISPATCH_CURFX(npy_highway_floor_divide_s16_contig)(char **args, npy_intp len)
+{
+    HWY_STATIC_DISPATCH(simd_floor_divide<int16_t>)(
+        reinterpret_cast<const int16_t *>(args[0]),
+        reinterpret_cast<const int16_t *>(args[1]),
+        reinterpret_cast<int16_t *>(args[2]), len);
 }
+
+NPY_VISIBILITY_HIDDEN void
+NPY_CPU_DISPATCH_CURFX(npy_highway_floor_divide_s32_contig)(char **args, npy_intp len)
+{
+    HWY_STATIC_DISPATCH(simd_floor_divide<int32_t>)(
+        reinterpret_cast<const int32_t *>(args[0]),
+        reinterpret_cast<const int32_t *>(args[1]),
+        reinterpret_cast<int32_t *>(args[2]), len);
+}
+
+/* Signed integer scalar divisor wrappers */
+NPY_VISIBILITY_HIDDEN void
+NPY_CPU_DISPATCH_CURFX(npy_highway_floor_divide_s16_scalar_contig)(char **args, npy_intp len)
+{
+    HWY_STATIC_DISPATCH(simd_floor_divide_by_scalar<int16_t>)(
+        reinterpret_cast<const int16_t *>(args[0]),
+        *reinterpret_cast<const int16_t *>(args[1]),
+        reinterpret_cast<int16_t *>(args[2]), len);
+}
+
+NPY_VISIBILITY_HIDDEN void
+NPY_CPU_DISPATCH_CURFX(npy_highway_floor_divide_s32_scalar_contig)(char **args, npy_intp len)
+{
+    HWY_STATIC_DISPATCH(simd_floor_divide_by_scalar<int32_t>)(
+        reinterpret_cast<const int32_t *>(args[0]),
+        *reinterpret_cast<const int32_t *>(args[1]),
+        reinterpret_cast<int32_t *>(args[2]), len);
+}
+
+NPY_VISIBILITY_HIDDEN void
+NPY_CPU_DISPATCH_CURFX(npy_highway_floor_divide_s64_scalar_contig)(char **args, npy_intp len)
+{
+    HWY_STATIC_DISPATCH(simd_floor_divide_by_scalar<int64_t>)(
+        reinterpret_cast<const int64_t *>(args[0]),
+        *reinterpret_cast<const int64_t *>(args[1]),
+        reinterpret_cast<int64_t *>(args[2]), len);
+}
+
+/* Unsigned integer contig (vector-vector) wrappers */
+NPY_VISIBILITY_HIDDEN void
+NPY_CPU_DISPATCH_CURFX(npy_highway_floor_divide_u16_contig)(char **args, npy_intp len)
+{
+    HWY_STATIC_DISPATCH(simd_floor_divide_unsigned<uint16_t>)(
+        reinterpret_cast<const uint16_t *>(args[0]),
+        reinterpret_cast<const uint16_t *>(args[1]),
+        reinterpret_cast<uint16_t *>(args[2]), len);
+}
+
+NPY_VISIBILITY_HIDDEN void
+NPY_CPU_DISPATCH_CURFX(npy_highway_floor_divide_u32_contig)(char **args, npy_intp len)
+{
+    HWY_STATIC_DISPATCH(simd_floor_divide_unsigned<uint32_t>)(
+        reinterpret_cast<const uint32_t *>(args[0]),
+        reinterpret_cast<const uint32_t *>(args[1]),
+        reinterpret_cast<uint32_t *>(args[2]), len);
+}
+
+/* Unsigned integer scalar divisor wrappers */
+NPY_VISIBILITY_HIDDEN void
+NPY_CPU_DISPATCH_CURFX(npy_highway_floor_divide_u32_scalar_contig)(char **args, npy_intp len)
+{
+    HWY_STATIC_DISPATCH(simd_floor_divide_by_scalar_unsigned<uint32_t>)(
+        reinterpret_cast<const uint32_t *>(args[0]),
+        *reinterpret_cast<const uint32_t *>(args[1]),
+        reinterpret_cast<uint32_t *>(args[2]), len);
+}
+
 #else
 /*
  * Baseline compilation: plain func_name is the caller-facing entry point.
@@ -309,6 +523,7 @@ NPY_CPU_DISPATCH_CURFX(func_name)(char **args, npy_intp len) \
  * to HWY_STATIC_DISPATCH (typically NEON on ARM64).
  */
 typedef void (*floor_divide_func)(char **args, npy_intp len);
+typedef void (*floor_divide_by_scalar_func)(char **args, npy_intp len);
 
 /* Forward-declare target-specific variants so NPY_CPU_DISPATCH_CALL_XB can
  * reference them. Each expands to e.g. void func_name_SVE(char**, npy_intp);
@@ -322,59 +537,172 @@ NPY_CPU_DISPATCH_DECLARE_XB(void npy_highway_floor_divide_u16_contig,
 NPY_CPU_DISPATCH_DECLARE_XB(void npy_highway_floor_divide_u32_contig,
                             (char **args, npy_intp len));
 
-/* Dispatch macro for 8-bit: bypass NPY dispatch, use HWY_STATIC_DISPATCH
- * directly. On ARM64 (no SVE flags in baseline) this selects NEON/ASIMD. */
-#define FLOOR_DIVIDE_DISPATCH_8BIT(func_name, simd_func, scalar_type) \
-NPY_VISIBILITY_HIDDEN void \
-NPY_CPU_DISPATCH_CURFX(func_name)(char **args, npy_intp len) \
-{ \
-    HWY_STATIC_DISPATCH(simd_func)( \
-        reinterpret_cast<const scalar_type *>(args[0]), \
-        reinterpret_cast<const scalar_type *>(args[1]), \
-        reinterpret_cast<scalar_type *>(args[2]), len); \
-}
+NPY_CPU_DISPATCH_DECLARE_XB(void npy_highway_floor_divide_s16_scalar_contig,
+                            (char **args, npy_intp len));
+NPY_CPU_DISPATCH_DECLARE_XB(void npy_highway_floor_divide_s32_scalar_contig,
+                            (char **args, npy_intp len));
+NPY_CPU_DISPATCH_DECLARE_XB(void npy_highway_floor_divide_s64_scalar_contig,
+                            (char **args, npy_intp len));
+NPY_CPU_DISPATCH_DECLARE_XB(void npy_highway_floor_divide_u32_scalar_contig,
+                            (char **args, npy_intp len));
 
-#define FLOOR_DIVIDE_DISPATCH(func_name, simd_func, scalar_type) \
-NPY_VISIBILITY_HIDDEN void \
-NPY_CPU_DISPATCH_CURFX(func_name)(char **args, npy_intp len) \
-{ \
-    floor_divide_func _f = NULL; \
-    NPY_CPU_DISPATCH_CALL_XB(_f = func_name); \
-    if (_f != NULL) { \
-        _f(args, len); \
-        return; \
-    } \
-    HWY_STATIC_DISPATCH(simd_func)( \
-        reinterpret_cast<const scalar_type *>(args[0]), \
-        reinterpret_cast<const scalar_type *>(args[1]), \
-        reinterpret_cast<scalar_type *>(args[2]), len); \
-}
-#endif
-
-/* Signed integer wrappers */
 /* 8-bit: baseline-only, bypasses SVE (too slow for narrow 8-bit types).
  * On ARM64, HWY_STATIC_DISPATCH in the baseline selects NEON/ASIMD. */
-#ifndef NPY_MTARGETS_CURRENT
-FLOOR_DIVIDE_DISPATCH_8BIT(npy_highway_floor_divide_s8_contig,
-                           simd_floor_divide<int8_t>, int8_t)
+
+/* Signed 8-bit contig (vector-vector) wrapper */
+NPY_VISIBILITY_HIDDEN void
+NPY_CPU_DISPATCH_CURFX(npy_highway_floor_divide_s8_contig)(char **args, npy_intp len)
+{
+    HWY_STATIC_DISPATCH(simd_floor_divide<int8_t>)(
+        reinterpret_cast<const int8_t *>(args[0]),
+        reinterpret_cast<const int8_t *>(args[1]),
+        reinterpret_cast<int8_t *>(args[2]), len);
+}
+
+/* Signed 8-bit scalar divisor wrapper */
+NPY_VISIBILITY_HIDDEN void
+NPY_CPU_DISPATCH_CURFX(npy_highway_floor_divide_s8_scalar_contig)(char **args, npy_intp len)
+{
+    HWY_STATIC_DISPATCH(simd_floor_divide_by_scalar<int8_t>)(
+        reinterpret_cast<const int8_t *>(args[0]),
+        *reinterpret_cast<const int8_t *>(args[1]),
+        reinterpret_cast<int8_t *>(args[2]), len);
+}
+
+/* Unsigned 8-bit contig (vector-vector) wrapper */
+NPY_VISIBILITY_HIDDEN void
+NPY_CPU_DISPATCH_CURFX(npy_highway_floor_divide_u8_contig)(char **args, npy_intp len)
+{
+    HWY_STATIC_DISPATCH(simd_floor_divide_unsigned<uint8_t>)(
+        reinterpret_cast<const uint8_t *>(args[0]),
+        reinterpret_cast<const uint8_t *>(args[1]),
+        reinterpret_cast<uint8_t *>(args[2]), len);
+}
+
+/* Signed integer contig (vector-vector) wrappers */
+NPY_VISIBILITY_HIDDEN void
+NPY_CPU_DISPATCH_CURFX(npy_highway_floor_divide_s16_contig)(char **args, npy_intp len)
+{
+    floor_divide_func _f = NULL;
+    NPY_CPU_DISPATCH_CALL_XB(_f = npy_highway_floor_divide_s16_contig);
+    if (_f != NULL) {
+        _f(args, len);
+        return;
+    }
+    HWY_STATIC_DISPATCH(simd_floor_divide<int16_t>)(
+        reinterpret_cast<const int16_t *>(args[0]),
+        reinterpret_cast<const int16_t *>(args[1]),
+        reinterpret_cast<int16_t *>(args[2]), len);
+}
+
+NPY_VISIBILITY_HIDDEN void
+NPY_CPU_DISPATCH_CURFX(npy_highway_floor_divide_s32_contig)(char **args, npy_intp len)
+{
+    floor_divide_func _f = NULL;
+    NPY_CPU_DISPATCH_CALL_XB(_f = npy_highway_floor_divide_s32_contig);
+    if (_f != NULL) {
+        _f(args, len);
+        return;
+    }
+    HWY_STATIC_DISPATCH(simd_floor_divide<int32_t>)(
+        reinterpret_cast<const int32_t *>(args[0]),
+        reinterpret_cast<const int32_t *>(args[1]),
+        reinterpret_cast<int32_t *>(args[2]), len);
+}
+
+/* Signed integer scalar divisor wrappers */
+NPY_VISIBILITY_HIDDEN void
+NPY_CPU_DISPATCH_CURFX(npy_highway_floor_divide_s16_scalar_contig)(char **args, npy_intp len)
+{
+    floor_divide_by_scalar_func _f = NULL;
+    NPY_CPU_DISPATCH_CALL_XB(_f = npy_highway_floor_divide_s16_scalar_contig);
+    if (_f != NULL) {
+        _f(args, len);
+        return;
+    }
+    HWY_STATIC_DISPATCH(simd_floor_divide_by_scalar<int16_t>)(
+        reinterpret_cast<const int16_t *>(args[0]),
+        *reinterpret_cast<const int16_t *>(args[1]),
+        reinterpret_cast<int16_t *>(args[2]), len);
+}
+
+NPY_VISIBILITY_HIDDEN void
+NPY_CPU_DISPATCH_CURFX(npy_highway_floor_divide_s32_scalar_contig)(char **args, npy_intp len)
+{
+    floor_divide_by_scalar_func _f = NULL;
+    NPY_CPU_DISPATCH_CALL_XB(_f = npy_highway_floor_divide_s32_scalar_contig);
+    if (_f != NULL) {
+        _f(args, len);
+        return;
+    }
+    HWY_STATIC_DISPATCH(simd_floor_divide_by_scalar<int32_t>)(
+        reinterpret_cast<const int32_t *>(args[0]),
+        *reinterpret_cast<const int32_t *>(args[1]),
+        reinterpret_cast<int32_t *>(args[2]), len);
+}
+
+/* int64 scalar divisor: LONG and LONGLONG both use the same i64 implementation */
+NPY_VISIBILITY_HIDDEN void
+NPY_CPU_DISPATCH_CURFX(npy_highway_floor_divide_s64_scalar_contig)(char **args, npy_intp len)
+{
+    floor_divide_by_scalar_func _f = NULL;
+    NPY_CPU_DISPATCH_CALL_XB(_f = npy_highway_floor_divide_s64_scalar_contig);
+    if (_f != NULL) {
+        _f(args, len);
+        return;
+    }
+    HWY_STATIC_DISPATCH(simd_floor_divide_by_scalar<int64_t>)(
+        reinterpret_cast<const int64_t *>(args[0]),
+        *reinterpret_cast<const int64_t *>(args[1]),
+        reinterpret_cast<int64_t *>(args[2]), len);
+}
+
+/* Unsigned integer contig (vector-vector) wrappers */
+NPY_VISIBILITY_HIDDEN void
+NPY_CPU_DISPATCH_CURFX(npy_highway_floor_divide_u16_contig)(char **args, npy_intp len)
+{
+    floor_divide_func _f = NULL;
+    NPY_CPU_DISPATCH_CALL_XB(_f = npy_highway_floor_divide_u16_contig);
+    if (_f != NULL) {
+        _f(args, len);
+        return;
+    }
+    HWY_STATIC_DISPATCH(simd_floor_divide_unsigned<uint16_t>)(
+        reinterpret_cast<const uint16_t *>(args[0]),
+        reinterpret_cast<const uint16_t *>(args[1]),
+        reinterpret_cast<uint16_t *>(args[2]), len);
+}
+
+NPY_VISIBILITY_HIDDEN void
+NPY_CPU_DISPATCH_CURFX(npy_highway_floor_divide_u32_contig)(char **args, npy_intp len)
+{
+    floor_divide_func _f = NULL;
+    NPY_CPU_DISPATCH_CALL_XB(_f = npy_highway_floor_divide_u32_contig);
+    if (_f != NULL) {
+        _f(args, len);
+        return;
+    }
+    HWY_STATIC_DISPATCH(simd_floor_divide_unsigned<uint32_t>)(
+        reinterpret_cast<const uint32_t *>(args[0]),
+        reinterpret_cast<const uint32_t *>(args[1]),
+        reinterpret_cast<uint32_t *>(args[2]), len);
+}
+
+/* Unsigned integer scalar divisor wrappers */
+NPY_VISIBILITY_HIDDEN void
+NPY_CPU_DISPATCH_CURFX(npy_highway_floor_divide_u32_scalar_contig)(char **args, npy_intp len)
+{
+    floor_divide_by_scalar_func _f = NULL;
+    NPY_CPU_DISPATCH_CALL_XB(_f = npy_highway_floor_divide_u32_scalar_contig);
+    if (_f != NULL) {
+        _f(args, len);
+        return;
+    }
+    HWY_STATIC_DISPATCH(simd_floor_divide_by_scalar_unsigned<uint32_t>)(
+        reinterpret_cast<const uint32_t *>(args[0]),
+        *reinterpret_cast<const uint32_t *>(args[1]),
+        reinterpret_cast<uint32_t *>(args[2]), len);
+}
+
 #endif
-FLOOR_DIVIDE_DISPATCH(npy_highway_floor_divide_s16_contig,
-                      simd_floor_divide<int16_t>, int16_t)
-FLOOR_DIVIDE_DISPATCH(npy_highway_floor_divide_s32_contig,
-                      simd_floor_divide<int32_t>, int32_t)
-
-/* Unsigned integer wrappers */
-/* 8-bit unsigned: baseline-only, bypasses SVE (too slow for narrow types). */
-#ifndef NPY_MTARGETS_CURRENT
-FLOOR_DIVIDE_DISPATCH_8BIT(npy_highway_floor_divide_u8_contig,
-                           simd_floor_divide_unsigned<uint8_t>, uint8_t)
-#endif
-
-FLOOR_DIVIDE_DISPATCH(npy_highway_floor_divide_u16_contig,
-                      simd_floor_divide_unsigned<uint16_t>, uint16_t)
-FLOOR_DIVIDE_DISPATCH(npy_highway_floor_divide_u32_contig,
-                      simd_floor_divide_unsigned<uint32_t>, uint32_t)
-
-#undef FLOOR_DIVIDE_DISPATCH
-
 }

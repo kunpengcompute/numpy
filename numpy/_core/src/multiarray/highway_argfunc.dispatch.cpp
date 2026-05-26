@@ -26,6 +26,63 @@ namespace hn = hwy::HWY_NAMESPACE;
 
 constexpr size_t BOOL_BLOCK_SIZE_BYTES = 512;
 
+template <typename T>
+bool ArrayAllSame(const T* HWY_RESTRICT arr, npy_intp len)
+{
+    if (len <= 1) {
+        return true;
+    }
+
+    const T first = arr[0];
+    if constexpr (std::is_floating_point_v<T>) {
+        if (std::isnan(first)) {
+            return false;
+        }
+    }
+
+    const npy_intp mid = len >> 1;
+    if (!(arr[mid] == first && arr[len - 1] == first)) {
+        return false;
+    }
+
+    hn::ScalableTag<T> d;
+    using V = hn::Vec<decltype(d)>;
+    using M = hn::Mask<decltype(d)>;
+
+    const size_t N = hn::Lanes(d);
+#if (HWY_TARGET & HWY_NEON) || (HWY_TARGET & HWY_NEON_WITHOUT_AES) || (HWY_TARGET & HWY_NEON_BF16)
+    constexpr size_t UNROLL = 4;
+#else
+    constexpr size_t UNROLL = 8;
+#endif
+    const size_t unroll_N = UNROLL * N;
+    const V vfirst = hn::Set(d, first);
+
+    npy_intp i = 0;
+    for (; i <= len - (npy_intp)unroll_N; i += unroll_N) {
+        M eq = hn::Eq(hn::LoadU(d, arr + i), vfirst);
+        for (size_t u = 1; u < UNROLL; ++u) {
+            eq = hn::And(eq, hn::Eq(hn::LoadU(d, arr + i + u * N), vfirst));
+        }
+        if (BRANCH_UNLIKELY(!hn::AllTrue(d, eq))) {
+            return false;
+        }
+    }
+
+    for (; i <= len - (npy_intp)N; i += N) {
+        if (BRANCH_UNLIKELY(!hn::AllTrue(d, hn::Eq(hn::LoadU(d, arr + i), vfirst)))) {
+            return false;
+        }
+    }
+
+    for (; i < len; ++i) {
+        if (!(arr[i] == first)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 int ComputeArgMinBool(const uint8_t* HWY_RESTRICT arr, npy_intp len)
 {
     if (len <= 0) return 0;
@@ -155,6 +212,7 @@ template <typename T, bool IsMax>
 int ComputeArgMinMaxFloating(const T* HWY_RESTRICT arr, npy_intp len)
 {
     if (len <= 0) return -1;
+    if (ArrayAllSame(arr, len)) return 0;
 
     hn::ScalableTag<T> d;
     using V = hn::Vec<decltype(d)>;

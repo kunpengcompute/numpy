@@ -124,6 +124,8 @@ else
   highway_lib = []
 endif
 
+cdata.set10('NPY_HAVE_HIGHWAY', use_highway)
+
 use_intel_sort = not get_option('disable-intel-sort') and cpu_family in ['x86', 'x86_64']
 if use_intel_sort and not fs.exists('src/npysort/x86-simd-sort/README.md')
   error('Missing the `x86-simd-sort` git submodule! Run `git submodule update --init` to fix this.')
@@ -949,6 +951,17 @@ foreach gen_mtargets : [
       VXE, VX,
       LSX,
     ]
+  ], 
+  [
+    'loops_deg_rad_hwy.dispatch.h',
+    'src/umath/loops_deg_rad_hwy.dispatch.cpp',
+    [
+      X86_V4, X86_V3, X86_V2,
+      NEON,
+      VSX4, VSX2,
+      VX,
+      LSX,
+    ]
   ],
   [
     'loops_arithmetic.dispatch.h',
@@ -970,6 +983,18 @@ foreach gen_mtargets : [
     ] : []
   ],
   [
+    'loops_autovec_abs_hwy.dispatch.h',
+    'src/umath/loops_autovec_abs_hwy.dispatch.cpp',
+    use_highway ? [
+      ASIMD, NEON, SVE,
+      X86_V4, X86_V3, X86_V2,
+      VSX2,
+      VX,
+      LSX,
+      RVV,
+    ] : []
+  ],
+  [
     'loops_comparison.dispatch.h',
     src_file.process('src/umath/loops_comparison.dispatch.c.src'),
     [
@@ -980,9 +1005,33 @@ foreach gen_mtargets : [
       LSX,
     ]
   ],
+[
+    'loops_exp.dispatch.h',
+    'src/umath/loops_exp.dispatch.cpp',
+    [
+      ASIMD, NEON,
+      X86_V4, X86_V3,
+    ]
+  ],
   [
-    'loops_explog.dispatch.h',
-    'src/umath/loops_explog.dispatch.cpp',
+    'loops_log.dispatch.h',
+    'src/umath/loops_log.dispatch.cpp',
+    [
+      ASIMD, NEON,
+      X86_V4, X86_V3,
+    ]
+  ],
+  [
+    'loops_exp2.dispatch.h',
+    'src/umath/loops_exp2.dispatch.cpp',
+    [
+      ASIMD, NEON,
+      X86_V4, X86_V3,
+    ]
+  ],
+  [
+    'loops_log2.dispatch.h',
+    'src/umath/loops_log2.dispatch.cpp',
     [
       ASIMD, NEON,
       X86_V4, X86_V3,
@@ -1010,7 +1059,7 @@ foreach gen_mtargets : [
     'loops_logical.dispatch.h',
     'src/umath/loops_logical.dispatch.cpp',
     [
-      ASIMD, NEON,
+      ASIMD, NEON, SVE,
       X86_V4, X86_V3, X86_V2,
       VSX2,
       VX,
@@ -1320,6 +1369,10 @@ src_umath = umath_gen_headers + [
   # Highway SIMD floor division
   'src/umath/loops_arithmetic_floor_hwy.h',
   'src/umath/loops_arithmetic_floor_hwy_avail.c',
+  # Highway SIMD half-float absolute
+  'src/umath/loops_autovec_abs_hwy.dispatch.cpp',
+  'src/umath/loops_autovec_abs_hwy.h',
+  'src/umath/loops_autovec_abs_hwy_avail.c',
   # Highway SIMD pairwise sum
   'src/umath/loops_arithm_sum_hwy.h',
   'src/umath/loops_arithm_sum_hwy_avail.c',

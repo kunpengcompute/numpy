@@ -80,6 +80,34 @@ PyUFunc_@c@@c@_@c@(char **args, npy_intp const *dimensions, npy_intp const *step
 
 /**end repeat**/
 
+/*
+ * Dedicated radians loops: keep the scalar math helper, but expose a
+ * contiguous-friendly fast loop so GCC/Clang can unroll/vectorize it more
+ * aggressively on ARM.
+ */
+NPY_NO_EXPORT NPY_GCC_UNROLL_LOOPS void
+HALF_radians_unrolled(char **args, npy_intp const *dimensions,
+        npy_intp const *steps, void *NPY_UNUSED(func))
+{
+    UNARY_LOOP_FAST(npy_half, npy_half, {
+        const float radians = npy_radiansf(npy_half_to_float(in));
+        *out = npy_float_to_half(radians);
+    });
+}
+
+/**begin repeat
+ * #TYPE = FLOAT, DOUBLE, LONGDOUBLE#
+ * #type = npy_float, npy_double, npy_longdouble#
+ * #c = f, , l#
+ */
+NPY_NO_EXPORT NPY_GCC_UNROLL_LOOPS void
+@TYPE@_radians_unrolled(char **args, npy_intp const *dimensions,
+        npy_intp const *steps, void *NPY_UNUSED(func))
+{
+    UNARY_LOOP_FAST(@type@, @type@, *out = npy_radians@c@(in));
+}
+/**end repeat**/
+
 /* indirect loops with casting */
 /**begin repeat
  * #c1    = e,         e,          f#
