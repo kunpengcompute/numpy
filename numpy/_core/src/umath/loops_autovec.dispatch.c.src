@@ -219,6 +219,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_bitwise_count)
  * #type = npy_ubyte, npy_ushort, npy_uint, npy_ulong, npy_ulonglong#
  * #c    = u,u,u,ul,ull#
  */
+NPY_GCC_UNROLL_LOOPS
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_absolute)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
@@ -381,6 +382,16 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(BOOL_@kind@)
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_absolute)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
+    if (IS_UNARY_CONT(npy_half, npy_half) && npy_highway_absolute_half_available()) {
+ 	         npy_highway_HALF_absolute_contig(args, dimensions[0]);
+ 	         return;
+ 	     }
+ 	 
+ 	     if (steps[0] % sizeof(npy_half) == 0 && steps[1] % sizeof(npy_half) == 0 &&
+ 	         npy_highway_absolute_half_strided_available()) {
+ 	         npy_highway_HALF_absolute_strided(args, steps[0], steps[1], dimensions[0]);
+ 	         return;
+    }
     UNARY_LOOP_FAST(npy_half, npy_half, *out = in&0x7fffu);
 }
 
