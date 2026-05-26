@@ -48,6 +48,7 @@ read -r -a full_ut_build_args <<< "${FULL_UT_BUILD_ARGS}"
 spin build --clean -- "${full_ut_build_args[@]}"
 
 ci_log "Running full UT suite without coverage."
+export PATH="${PWD}/build-install/usr/bin:${PATH}"
 case " ${FULL_UT_ARGS} " in
     *" --cov "*|*" --cov="*|*" --cov-report "*|*" --cov-report="*|*" --gcov "*|*" --gcov-format "*)
         printf 'FULL_UT_ARGS must not include coverage options; full_ut.sh runs UT only.\n' >&2
