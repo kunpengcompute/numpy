@@ -128,26 +128,28 @@ extern "C" {
  * Uses HWY_STATIC_DISPATCH for Highway's own sub-target selection
  * (e.g. SVE vs SVE2).
  */
-#define ABSOLUTE_DISPATCH_CONTIG(func_name, simd_func) \
-NPY_VISIBILITY_HIDDEN void \
-NPY_CPU_DISPATCH_CURFX(func_name)(char **args, npy_intp count) \
-{ \
-    const uint16_t *in = reinterpret_cast<const uint16_t *>(args[0]); \
-    uint16_t *out = reinterpret_cast<uint16_t *>(args[1]); \
-    HWY_STATIC_DISPATCH(simd_func)(in, out, (size_t)count); \
+NPY_VISIBILITY_HIDDEN void
+NPY_CPU_DISPATCH_CURFX(npy_highway_HALF_absolute_contig)(char **args,
+                                                         npy_intp count)
+{
+    const uint16_t *in = reinterpret_cast<const uint16_t *>(args[0]);
+    uint16_t *out = reinterpret_cast<uint16_t *>(args[1]);
+    HWY_STATIC_DISPATCH(HalfAbsolute_u16)(in, out, (size_t)count);
 }
 
-#define ABSOLUTE_DISPATCH_STRIDED(func_name, simd_func) \
-NPY_VISIBILITY_HIDDEN void \
-NPY_CPU_DISPATCH_CURFX(func_name)(char **args, npy_intp src_step, \
-                                  npy_intp dst_step, npy_intp count) \
-{ \
-    const uint16_t *in = reinterpret_cast<const uint16_t *>(args[0]); \
-    uint16_t *out = reinterpret_cast<uint16_t *>(args[1]); \
-    npy_intp in_stride_elm = src_step / (npy_intp)sizeof(uint16_t); \
-    npy_intp out_stride_elm = dst_step / (npy_intp)sizeof(uint16_t); \
-    HWY_STATIC_DISPATCH(simd_func)(in, out, in_stride_elm, out_stride_elm, \
-                                   (size_t)count); \
+NPY_VISIBILITY_HIDDEN void
+NPY_CPU_DISPATCH_CURFX(npy_highway_HALF_absolute_strided)(char **args,
+                                                          npy_intp src_step,
+                                                          npy_intp dst_step,
+                                                          npy_intp count)
+{
+    const uint16_t *in = reinterpret_cast<const uint16_t *>(args[0]);
+    uint16_t *out = reinterpret_cast<uint16_t *>(args[1]);
+    npy_intp in_stride_elm = src_step / (npy_intp)sizeof(uint16_t);
+    npy_intp out_stride_elm = dst_step / (npy_intp)sizeof(uint16_t);
+    HWY_STATIC_DISPATCH(HalfAbsoluteStrided_u16)(in, out, in_stride_elm,
+                                                 out_stride_elm,
+                                                 (size_t)count);
 }
 #else
 /*
@@ -166,45 +168,41 @@ NPY_CPU_DISPATCH_DECLARE_XB(void npy_highway_HALF_absolute_strided,
                             (char **args, npy_intp src_step,
                              npy_intp dst_step, npy_intp count));
 
-#define ABSOLUTE_DISPATCH_CONTIG(func_name, simd_func) \
-NPY_VISIBILITY_HIDDEN void \
-NPY_CPU_DISPATCH_CURFX(func_name)(char **args, npy_intp count) \
-{ \
-    absolute_contig_func _f = NULL; \
-    NPY_CPU_DISPATCH_CALL_XB(_f = func_name); \
-    if (_f != NULL) { \
-        _f(args, count); \
-        return; \
-    } \
-    const uint16_t *in = reinterpret_cast<const uint16_t *>(args[0]); \
-    uint16_t *out = reinterpret_cast<uint16_t *>(args[1]); \
-    HWY_STATIC_DISPATCH(simd_func)(in, out, (size_t)count); \
+NPY_VISIBILITY_HIDDEN void
+NPY_CPU_DISPATCH_CURFX(npy_highway_HALF_absolute_contig)(char **args,
+                                                         npy_intp count)
+{
+    absolute_contig_func _f = NULL;
+    NPY_CPU_DISPATCH_CALL_XB(_f = npy_highway_HALF_absolute_contig);
+    if (_f != NULL) {
+        _f(args, count);
+    } else {
+        const uint16_t *in = reinterpret_cast<const uint16_t *>(args[0]);
+        uint16_t *out = reinterpret_cast<uint16_t *>(args[1]);
+        HWY_STATIC_DISPATCH(HalfAbsolute_u16)(in, out, (size_t)count);
+    }
 }
 
-#define ABSOLUTE_DISPATCH_STRIDED(func_name, simd_func) \
-NPY_VISIBILITY_HIDDEN void \
-NPY_CPU_DISPATCH_CURFX(func_name)(char **args, npy_intp src_step, \
-                                  npy_intp dst_step, npy_intp count) \
-{ \
-    absolute_strided_func _f = NULL; \
-    NPY_CPU_DISPATCH_CALL_XB(_f = func_name); \
-    if (_f != NULL) { \
-        _f(args, src_step, dst_step, count); \
-        return; \
-    } \
-    const uint16_t *in = reinterpret_cast<const uint16_t *>(args[0]); \
-    uint16_t *out = reinterpret_cast<uint16_t *>(args[1]); \
-    npy_intp in_stride_elm = src_step / (npy_intp)sizeof(uint16_t); \
-    npy_intp out_stride_elm = dst_step / (npy_intp)sizeof(uint16_t); \
-    HWY_STATIC_DISPATCH(simd_func)(in, out, in_stride_elm, out_stride_elm, \
-                                   (size_t)count); \
+NPY_VISIBILITY_HIDDEN void
+NPY_CPU_DISPATCH_CURFX(npy_highway_HALF_absolute_strided)(char **args,
+                                                          npy_intp src_step,
+                                                          npy_intp dst_step,
+                                                          npy_intp count)
+{
+    absolute_strided_func _f = NULL;
+    NPY_CPU_DISPATCH_CALL_XB(_f = npy_highway_HALF_absolute_strided);
+    if (_f != NULL) {
+        _f(args, src_step, dst_step, count);
+    } else {
+        const uint16_t *in = reinterpret_cast<const uint16_t *>(args[0]);
+        uint16_t *out = reinterpret_cast<uint16_t *>(args[1]);
+        npy_intp in_stride_elm = src_step / (npy_intp)sizeof(uint16_t);
+        npy_intp out_stride_elm = dst_step / (npy_intp)sizeof(uint16_t);
+        HWY_STATIC_DISPATCH(HalfAbsoluteStrided_u16)(in, out, in_stride_elm,
+                                                     out_stride_elm,
+                                                     (size_t)count);
+    }
 }
 #endif
-
-ABSOLUTE_DISPATCH_CONTIG(npy_highway_HALF_absolute_contig, HalfAbsolute_u16)
-ABSOLUTE_DISPATCH_STRIDED(npy_highway_HALF_absolute_strided, HalfAbsoluteStrided_u16)
-
-#undef ABSOLUTE_DISPATCH_CONTIG
-#undef ABSOLUTE_DISPATCH_STRIDED
 
 }
