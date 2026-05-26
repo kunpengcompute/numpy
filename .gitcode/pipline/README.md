@@ -11,6 +11,7 @@
 - `benchmark.sh` -> 上游 `Linux tests / benchmark`
 - `full.sh` -> 上游 `Linux tests / full`
 - `incremental_coverage.sh` -> 新增 `incremental_coverage`
+- `wheel.sh` -> 新增使用 conda OpenBLAS 的自包含 wheel 构建
 
 ## 使用方式
 
@@ -22,9 +23,10 @@
 .gitcode/pipline/benchmark.sh
 .gitcode/pipline/full.sh
 .gitcode/pipline/incremental_coverage.sh
+.gitcode/pipline/wheel.sh
 ```
 
-所有脚本都支持以下环境变量：
+除下文说明的 `wheel.sh` 限制外，脚本支持以下公共环境变量：
 
 - `USE_VENV`: `0` 表示直接使用当前 Python 解释器，`1` 表示创建或使用 venv。默认值：`0`
 - `SKIP_SYSTEM_DEPS`: `1` 表示跳过系统包管理器安装，适合 runner 已预装依赖的场景。默认值：`1`
@@ -37,6 +39,9 @@
   - `SMOKE_TEST_ARGS`: 传给 `spin test --` 的参数
 - `benchmark.sh`
   - `BENCHMARK_ARGS`: 传给 `spin bench` 的 benchmark 参数
+- `wheel.sh`
+  - `WHEEL_OUTPUT_DIR`: 保存最终 repaired wheel 的目录，默认 `wheelhouse`
+  - `WHEEL_BUILD_DIR`: 保存原始未修复 wheel 的临时目录，默认 `build/wheel-raw`
 - `full.sh`
   - `FULL_PYTEST_ARGS`: 仅传给 `pytest` 的参数；不要包含 `--cov` 或 `--cov-report`
   - `FULL_PYTHONOPTIMIZE`: 设为 `2` 时使用 `PYTHONOPTIMIZE=2` 运行 full suite；默认不设置 `PYTHONOPTIMIZE`
@@ -83,10 +88,30 @@ DIFF_COVER_FAIL_UNDER=70 \
 .gitcode/pipline/incremental_coverage.sh
 ```
 
+### Wheel 构建使用示例
+
+`wheel.sh` 必须在目标 conda 环境已经激活后运行。该环境中的 Python 决定 wheel ABI，例如 Python 3.11 生成 `cp311` wheel，Python 3.14 生成 `cp314` wheel：
+
+```bash
+conda activate numpy-ci-py314
+.gitcode/pipline/wheel.sh
+```
+
+脚本使用当前 conda 环境中的 LP64 OpenBLAS 构建 NumPy，并通过 `auditwheel repair` 将需要的动态库封装进最终 wheel：
+
+```bash
+ls wheelhouse/numpy-*.whl
+auditwheel show wheelhouse/numpy-*.whl
+```
+
+ARM64 与 X86_64 的 wheel 必须在各自原生 runner 上分别构建，不能将同一个 wheel 跨架构安装使用。
+
 ## 说明
 
 - `common.sh` 在未跳过系统依赖时，会自动检测并使用 `apt-get`、`dnf` 或 `yum`。
 - `PY_DEPS_MODE=check` 是预构建 CI 镜像的推荐模式；如果是临时环境，需要脚本自己安装 Python 依赖时，可使用 `PY_DEPS_MODE=install`。
+- `wheel.sh` 消费当前已激活的 conda 环境，不支持 `USE_VENV=1`。它显式选择 conda LP64 OpenBLAS 并封装其动态库；这与上游 `cibuildwheel` 发布配置使用 OpenBLAS ILP64 的 wheel 不同。
+- `wheel.sh` 仅生成可安装 wheel，不自动运行 benchmark 或判断性能一致性。使用该 wheel 评测性能时，应固定 CPU 机型、Python 环境和运行镜像。
 
 - `smoke_test.sh` 会针对当前解释器运行；如果平台需要 Python 版本矩阵，可以为不同 Python 环境分别调用一次该脚本。脚本通过 `common.sh` 中的公共 `numpy.distutils` 策略处理兼容性：Python `3.12` 及以上版本会自动追加 `--ignore=numpy/distutils/tests`；更早版本默认使用 `SETUPTOOLS_USE_DISTUTILS=stdlib` 并忽略 setuptools 对该模式发出的已知 `UserWarning`，避免 setuptools vendored distutils 与 `numpy.distutils` 的 legacy compiler API 不兼容。
 - `full.sh` 会同时生成 Python 覆盖率和 C/C++ 覆盖率产物，便于 `incremental_coverage.sh` 复用同一份覆盖率结果。上游 `Linux tests / full` 使用 `PYTHONOPTIMIZE=2 pytest numpy --durations=10 --timeout=600 --cov-report=html:build/coverage`，但 C/C++ 覆盖率仍是 TODO；本脚本在此基础上通过 `spin test --gcov` 和 `pytest-cov` 同时采集 Python 与 C/C++ 覆盖率。
