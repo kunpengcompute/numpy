@@ -27,11 +27,13 @@ export PY_DEPS_MODE=check
 - `pkg-config`
 - `make`
 - `util-linux`
+- `patchelf`
 
 说明：
 
 - `util-linux` 提供了 `benchmark.sh` 在可用时会使用的 `script` 命令；没有它脚本仍然可以运行。
 - `git` 不仅用于仓库操作，也用于执行 `git submodule update --init --recursive`。
+- `patchelf` 供 `wheel.sh` 中的 `auditwheel repair` 修复 Linux wheel 动态库依赖使用。
 
 ## Conda 环境
 
@@ -45,6 +47,14 @@ conda activate numpy-ci
 推荐默认使用 Python `3.11.15`，因为它与当前 `full.sh` 的验证路径最匹配。
 
 请确认环境中可用 `pip`，因为脚本会调用 `python -m pip`。
+
+`wheel.sh` 不固定 Python 版本：需要生成 `cp311` 时激活 Python 3.11 的环境，需要生成 `cp314` 时激活 Python 3.14 的环境。X86_64 与 ARM64 runner 均需准备各自原生的目标 Python conda 环境。
+
+用于 `wheel.sh` 的 conda 环境还必须安装 LP64 `openblas` 与 `pkg-config`，并建议固定 `openblas`、编译器和构建工具版本，以便后续基准结果具有可比基础：
+
+```bash
+conda install -y -c conda-forge openblas pkg-config compilers patchelf
+```
 
 ## Python 依赖
 
@@ -61,6 +71,7 @@ conda activate numpy-ci
 - `virtualenv`
 - `packaging`
 - `diff-cover`
+- `auditwheel`
 
 示例：
 
@@ -73,7 +84,8 @@ python -m pip install \
   "asv<0.6.5" \
   virtualenv \
   packaging \
-  diff-cover
+  diff-cover \
+  auditwheel
 ```
 
 ## 仓库准备
@@ -95,6 +107,7 @@ git submodule update --init --recursive
 - `.gitcode/pipline/benchmark.sh`
 - `.gitcode/pipline/full.sh`
 - `.gitcode/pipline/incremental_coverage.sh`
+- `.gitcode/pipline/wheel.sh`
 
 ## 可选的安装模式
 
@@ -105,3 +118,9 @@ export PY_DEPS_MODE=install
 ```
 
 在这种模式下，镜像仍然需要提供系统层依赖和 conda 环境，但 Python 包的 `pip install` 将由脚本自己完成。
+
+## Wheel 构建说明
+
+`wheel.sh` 必须在已激活的 conda 环境中运行，并使用该环境的 Python 与 LP64 OpenBLAS 生成 wheel。脚本随后调用 `auditwheel repair` 将 OpenBLAS 等所需共享库封装进最终产物，输出到 `wheelhouse/`。
+
+不同 Python ABI 和硬件架构需要分别构建，例如 Python 3.11 与 Python 3.14 会分别产生 `cp311` 与 `cp314` wheel，X86_64 与 ARM64 也各自需要原生 runner 构建。脚本不运行 benchmark；性能评测应在固定 runner 和固定运行环境中另行执行。
