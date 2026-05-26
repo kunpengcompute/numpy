@@ -35,6 +35,7 @@ def _simulate_env_var(name):
             f"backend. Available: {available}. "
             f"Falling back to default (pocketfft).",
             RuntimeWarning,
+            stacklevel=2,
         )
 
 

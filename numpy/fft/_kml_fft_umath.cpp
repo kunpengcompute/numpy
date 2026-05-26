@@ -308,10 +308,9 @@ rfft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
             complex_t *pout = (complex_t *)(op + i * so);
             plan_t p = traits::plan_dft_r2c_1d((int)npts,
                 pin, pout, FFT_ESTIMATE);
-            if (p) {
-                traits::execute_dft_r2c(p, pin, pout);
-                traits::destroy_plan(p);
-            }
+            if (!p) continue;
+            traits::execute_dft_r2c(p, pin, pout);
+            traits::destroy_plan(p);
             apply_fct_complex((std::complex<T> *)pout, nout, fct);
         } else {
             std::vector<real_t> rbuf(npts);
@@ -321,11 +320,10 @@ rfft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
             plan_t p = traits::plan_dft_r2c_1d((int)npts,
                 rbuf.data(), (complex_t *)cbuf.data(),
                 FFT_ESTIMATE);
-            if (p) {
-                traits::execute_dft_r2c(p, rbuf.data(),
-                    (complex_t *)cbuf.data());
-                traits::destroy_plan(p);
-            }
+            if (!p) continue;
+            traits::execute_dft_r2c(p, rbuf.data(),
+                (complex_t *)cbuf.data());
+            traits::destroy_plan(p);
             apply_fct_complex(cbuf.data(), nout, fct);
             copy_output(cbuf.data(), op + i * so, step_out, nout);
         }
@@ -375,10 +373,9 @@ irfft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
             real_t *pout = (real_t *)(op + i * so);
             plan_t p = traits::plan_dft_c2r_1d((int)nout,
                 pin, pout, FFT_ESTIMATE);
-            if (p) {
-                traits::execute_dft_c2r(p, pin, pout);
-                traits::destroy_plan(p);
-            }
+            if (!p) continue;
+            traits::execute_dft_c2r(p, pin, pout);
+            traits::destroy_plan(p);
             apply_fct(pout, nout, fct);
         } else {
             size_t nin_expected = (size_t)(nout / 2 + 1);
@@ -389,11 +386,10 @@ irfft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
             plan_t p = traits::plan_dft_c2r_1d((int)nout,
                 (complex_t *)cbuf.data(), rbuf.data(),
                 FFT_ESTIMATE);
-            if (p) {
-                traits::execute_dft_c2r(p,
-                    (complex_t *)cbuf.data(), rbuf.data());
-                traits::destroy_plan(p);
-            }
+            if (!p) continue;
+            traits::execute_dft_c2r(p,
+                (complex_t *)cbuf.data(), rbuf.data());
+            traits::destroy_plan(p);
             apply_fct(rbuf.data(), nout, fct);
             copy_output(rbuf.data(), op + i * so, step_out, nout);
         }
@@ -513,7 +509,6 @@ _kml_fft_umath_exec(PyObject *m)
 
     PyObject *d = PyModule_GetDict(m);
     if (add_gufuncs(d) < 0) {
-        Py_DECREF(d);
         return -1;
     }
     return 0;

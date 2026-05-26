@@ -65,7 +65,7 @@ class KMLFFTBackend(FFTBackend):
     """KML FFT backend -- Kunpeng Math Library optimized FFT."""
 
     def __init__(self):
-        from . import _kml_fft_umath  # noqa: F401  # verify C module available
+        from . import _kml_fft  # noqa: F401  # verify wrapper + C module available
 
     @property
     def name(self):
