@@ -24,24 +24,24 @@
 
 #include "_fft_backend.h"
 
-/* ── C++ exception to Python conversion wrapper ── */
-template<PyUFuncGenericFunction cpp_ufunc>
+/* ── C++ exception → Python error adapter ── */
+template<PyUFuncGenericFunction loop_fn>
 static void
-wrap_legacy_cpp_ufunc(char **args, npy_intp const *dimensions,
-                      npy_intp const *steps, void *func)
+kml_ufunc_adapter(char **args, npy_intp const *dimensions,
+                  npy_intp const *steps, void *func)
 {
     NPY_ALLOW_C_API_DEF
     try {
-        cpp_ufunc(args, dimensions, steps, func);
+        loop_fn(args, dimensions, steps, func);
     }
-    catch (std::bad_alloc& e) {
+    catch (std::bad_alloc &) {
         NPY_ALLOW_C_API;
         PyErr_NoMemory();
         NPY_DISABLE_C_API;
     }
-    catch (const std::exception& e) {
+    catch (const std::exception &ex) {
         NPY_ALLOW_C_API;
-        PyErr_SetString(PyExc_RuntimeError, e.what());
+        PyErr_SetString(PyExc_RuntimeError, ex.what());
         NPY_DISABLE_C_API;
     }
 }
@@ -404,8 +404,8 @@ static int kml_backward_d = FFT_BACKWARD;
 
 /* C2C fft / ifft — 2 types: double, float */
 static PyUFuncGenericFunction fft_functions[] = {
-    wrap_legacy_cpp_ufunc<fft_loop<double>>,
-    wrap_legacy_cpp_ufunc<fft_loop<float>>,
+    kml_ufunc_adapter<fft_loop<double>>,
+    kml_ufunc_adapter<fft_loop<float>>,
 };
 static const char fft_types[] = {
     NPY_CDOUBLE, NPY_DOUBLE, NPY_CDOUBLE,
@@ -422,12 +422,12 @@ static void *const ifft_data[] = {
 
 /* R2C rfft — 2 types: double, float */
 static PyUFuncGenericFunction rfft_n_even_functions[] = {
-    wrap_legacy_cpp_ufunc<rfft_n_even_loop<double>>,
-    wrap_legacy_cpp_ufunc<rfft_n_even_loop<float>>,
+    kml_ufunc_adapter<rfft_n_even_loop<double>>,
+    kml_ufunc_adapter<rfft_n_even_loop<float>>,
 };
 static PyUFuncGenericFunction rfft_n_odd_functions[] = {
-    wrap_legacy_cpp_ufunc<rfft_n_odd_loop<double>>,
-    wrap_legacy_cpp_ufunc<rfft_n_odd_loop<float>>,
+    kml_ufunc_adapter<rfft_n_odd_loop<double>>,
+    kml_ufunc_adapter<rfft_n_odd_loop<float>>,
 };
 static const char rfft_types[] = {
     NPY_DOUBLE, NPY_DOUBLE, NPY_CDOUBLE,
@@ -436,8 +436,8 @@ static const char rfft_types[] = {
 
 /* C2R irfft — 2 types: double, float */
 static PyUFuncGenericFunction irfft_functions[] = {
-    wrap_legacy_cpp_ufunc<irfft_loop<double>>,
-    wrap_legacy_cpp_ufunc<irfft_loop<float>>,
+    kml_ufunc_adapter<irfft_loop<double>>,
+    kml_ufunc_adapter<irfft_loop<float>>,
 };
 static const char irfft_types[] = {
     NPY_CDOUBLE, NPY_DOUBLE, NPY_DOUBLE,

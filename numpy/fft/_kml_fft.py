@@ -56,14 +56,13 @@ def _raw_fft(a, n, axis, is_real, is_forward, norm, out=None):
     axis = normalize_axis_index(axis, a.ndim)
 
     if out is None:
-        if is_real and not is_forward:  # irfft, complex in, real output
-            out_dtype = real_dtype
-        else:  # Others, complex output
-            out_dtype = result_type(a.dtype, 1j)
-        out = empty_like(a, shape=a.shape[:axis] + (n_out,) +
-                         a.shape[axis + 1:], dtype=out_dtype)
-    elif ((shape := getattr(out, "shape", None)) is not None
-          and (len(shape) != a.ndim or shape[axis] != n_out)):
+        # Determine output dtype: irfft produces real; all others produce complex.
+        out_dtype = (real_dtype if is_real and not is_forward
+                     else result_type(a.dtype, 1j))
+        new_shape = list(a.shape)
+        new_shape[axis] = n_out
+        out = empty_like(a, shape=new_shape, dtype=out_dtype)
+    elif getattr(out, "ndim", 0) != a.ndim or out.shape[axis] != n_out:
         raise ValueError("output array has wrong shape.")
 
     return ufunc(a, fct, axes=[(axis,), (), (axis,)], out=out)
