@@ -295,8 +295,11 @@ arr_histogramdd_uniform2d(PyObject *NPY_UNUSED(self), PyObject *const *args,
     PyArrayObject *sample = NULL, *hist = NULL;
     npy_intp nx, ny, dims[2];
     npy_intp i, n;
+    npy_intp last_index = -1;
+    npy_bool monotonic_index = NPY_TRUE;
     double xmin, xmax, ymin, ymax;
     double xscale, yscale;
+    double run_count = 0.0;
     double *sample_data, *hist_data;
 
     NPY_PREPARE_ARGPARSER;
@@ -382,7 +385,7 @@ arr_histogramdd_uniform2d(PyObject *NPY_UNUSED(self), PyObject *const *args,
     for (i = 0; i < n; i++) {
         double x = sample_data[2 * i];
         double y = sample_data[2 * i + 1];
-        npy_intp ix, iy;
+        npy_intp ix, iy, flat_index;
 
         if (!(x >= xmin && x <= xmax && y >= ymin && y <= ymax)) {
             continue;
@@ -391,7 +394,33 @@ arr_histogramdd_uniform2d(PyObject *NPY_UNUSED(self), PyObject *const *args,
         iy = (y == ymax) ? (ny - 1) : (npy_intp)((y - ymin) * yscale);
 
         if (ix >= 0 && ix < nx && iy >= 0 && iy < ny) {
-            hist_data[ix * ny + iy] += 1.0;
+            flat_index = ix * ny + iy;
+            if (flat_index == last_index) {
+                run_count += 1.0;
+            }
+            else {
+                if (last_index >= 0) {
+                    if (monotonic_index) {
+                        hist_data[last_index] = run_count;
+                    }
+                    else {
+                        hist_data[last_index] += run_count;
+                    }
+                }
+                if (flat_index < last_index) {
+                    monotonic_index = NPY_FALSE;
+                }
+                last_index = flat_index;
+                run_count = 1.0;
+            }
+        }
+    }
+    if (last_index >= 0) {
+        if (monotonic_index) {
+            hist_data[last_index] = run_count;
+        }
+        else {
+            hist_data[last_index] += run_count;
         }
     }
     NPY_END_ALLOW_THREADS;
