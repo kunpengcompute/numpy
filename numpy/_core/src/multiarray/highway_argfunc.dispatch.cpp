@@ -26,6 +26,7 @@ namespace hn = hwy::HWY_NAMESPACE;
 
 constexpr size_t BOOL_BLOCK_SIZE_BYTES = 512;
 
+#if defined(__aarch64__) || defined(__arm__) || defined(_M_ARM64) || defined(_M_ARM)
 template <typename T>
 bool ArrayAllSame(const T* HWY_RESTRICT arr, npy_intp len)
 {
@@ -82,6 +83,7 @@ bool ArrayAllSame(const T* HWY_RESTRICT arr, npy_intp len)
     }
     return true;
 }
+#endif
 
 int ComputeArgMinBool(const uint8_t* HWY_RESTRICT arr, npy_intp len)
 {
@@ -212,7 +214,9 @@ template <typename T, bool IsMax>
 int ComputeArgMinMaxFloating(const T* HWY_RESTRICT arr, npy_intp len)
 {
     if (len <= 0) return -1;
+#if defined(__aarch64__) || defined(__arm__) || defined(_M_ARM64) || defined(_M_ARM)
     if (ArrayAllSame(arr, len)) return 0;
+#endif
 
     hn::ScalableTag<T> d;
     using V = hn::Vec<decltype(d)>;

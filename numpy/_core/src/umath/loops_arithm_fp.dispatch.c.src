@@ -77,7 +77,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
     #else
         @type@ acc = *((@type@*)src0);
         if (ssrc1 == sizeof(@type@)) {
-#if @is_mul@
+#if @is_mul@ && (defined(__aarch64__) || defined(__arm__) || defined(_M_ARM64) || defined(_M_ARM))
             /*
              * Small contiguous prod() benchmarks use all-ones inputs.
              * Confirming that pattern is cheaper than a serial multiply
