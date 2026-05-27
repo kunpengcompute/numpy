@@ -7,6 +7,7 @@ import argparse
 import os
 import re
 import textwrap
+import platform
 
 # identity objects
 Zero = "PyLong_FromLong(0)"
@@ -17,6 +18,9 @@ None_ = object()
 AllOnes = "PyLong_FromLong(-1)"
 MinusInfinity = 'PyFloat_FromDouble(-NPY_INFINITY)'
 ReorderableNone = "(Py_INCREF(Py_None), Py_None)"
+
+# for arm optimized dispatch
+IsArm = platform.machine().startswith('arm') or platform.machine().startswith('aarch64')
 
 class docstrings:
     @staticmethod
@@ -458,7 +462,8 @@ defdict = {
           docstrings.get('numpy._core.umath.reciprocal'),
           None,
           TD(ints + inexact, dispatch=[
-              ('loops_unary_fp_ops', 'efdFD'),
+              ('loops_unary_fp_ops', 'eFD'),
+              ('loops_unary_fp', 'fd'),
               ('loops_autovec', ints),
           ]),
           TD(O, f='Py_reciprocal'),
@@ -761,7 +766,8 @@ defdict = {
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.rad2deg'),
           None,
-          TD(flts, dispatch=[('loops_deg_rad_hwy', 'flts')]),
+          TD(flts, dispatch=[('loops_unary_fp_ops', 'efd')]) if IsArm else
+          TD(flts, f='rad2deg', astype={'e': 'f'}),
           TD(P, f='rad2deg'),
           ),
 'radians':
@@ -775,7 +781,8 @@ defdict = {
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.deg2rad'),
           None,
-          TD(flts, dispatch=[('loops_deg_rad_hwy', 'flts')]),
+          TD(flts, dispatch=[('loops_unary_fp_ops', 'efd')]) if IsArm else
+          TD(flts, f='deg2rad', astype={'e': 'f'}),
           TD(P, f='deg2rad'),
           ),
 'arccos':
@@ -953,7 +960,8 @@ defdict = {
           docstrings.get('numpy._core.umath.ceil'),
           None,
           TD(bints),
-          TD('efd', dispatch=[('loops_unary_fp_ops', 'efd')]),
+          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]),
+          TD(inexactvec, dispatch=[('loops_unary_fp', 'fd')]),
           TD('g', f='ceil'),
           TD(O, f='npy_ObjectCeil'),
           ),
@@ -962,7 +970,8 @@ defdict = {
           docstrings.get('numpy._core.umath.trunc'),
           None,
           TD(bints),
-          TD('efd', dispatch=[('loops_unary_fp_ops', 'efd')]),
+          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]),
+          TD(inexactvec, dispatch=[('loops_unary_fp', 'fd')]),
           TD('g', f='trunc'),
           TD(O, f='npy_ObjectTrunc'),
           ),
@@ -978,7 +987,8 @@ defdict = {
           docstrings.get('numpy._core.umath.floor'),
           None,
           TD(bints),
-          TD('efd', dispatch=[('loops_unary_fp_ops', 'efd')]),
+          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]),
+          TD(inexactvec, dispatch=[('loops_unary_fp', 'fd')]),
           TD('g', f='floor'),
           TD(O, f='npy_ObjectFloor'),
           ),
@@ -987,7 +997,8 @@ defdict = {
           docstrings.get('numpy._core.umath.rint'),
           None,
           TD(bints),
-          TD('efd', dispatch=[('loops_unary_fp_ops', 'efd')]),
+          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]),
+          TD(inexactvec, dispatch=[('loops_unary_fp', 'fd')]),
           TD('g' + cmplx, f='rint'),
           TD(P, f='rint'),
           ),

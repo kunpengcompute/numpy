@@ -146,6 +146,83 @@ struct UnaryOpTraits<rint_t> {
     }
 };
 
+struct deg2rad_t {};
+struct rad2deg_t {};
+
+template<>
+struct UnaryOpTraits<deg2rad_t> {
+#if NPY_HWY
+    template<typename T>
+    static HWY_ATTR HWY_INLINE Vec<T> simd_op(Vec<T> a)
+    {
+        if constexpr (std::is_same_v<T, hwy::float16_t>) {
+            auto d16 = _Tag<hwy::float16_t>();
+            auto d32 = _Tag<npy_float>();
+            auto dh = hn::Half<decltype(d16)>();
+            auto c = Set(0.017453292519943295769f);
+            auto lo = Mul(c, hn::PromoteLowerTo(d32, a));
+            auto hi = Mul(c, hn::PromoteUpperTo(d32, a));
+            return hn::Combine(d16, hn::DemoteTo(dh, hi), hn::DemoteTo(dh, lo));
+        } else {
+            return Mul(Set(T(0.017453292519943295769)), a);
+        }
+    }
+#endif
+
+    template<typename T>
+    static inline T scalar_op(T a)
+    {
+#if NPY_HWY_F16
+        if constexpr (std::is_same_v<T, hwy::float16_t>) {
+            return hwy::F16FromF32(npy_deg2radf(hwy::F32FromF16(a)));
+        }
+#endif
+        if constexpr (std::is_same_v<T, npy_double>) {
+            return npy_deg2rad(a);
+        }
+        else {
+            return npy_deg2radf(a);
+        }
+    }
+};
+
+template<>
+struct UnaryOpTraits<rad2deg_t> {
+#if NPY_HWY
+    template<typename T>
+    static HWY_ATTR HWY_INLINE Vec<T> simd_op(Vec<T> a)
+    {
+        if constexpr (std::is_same_v<T, hwy::float16_t>) {
+            auto d16 = _Tag<hwy::float16_t>();
+            auto d32 = _Tag<npy_float>();
+            auto dh = hn::Half<decltype(d16)>();
+            auto c = Set(57.295779513082320877f);
+            auto lo = Mul(c, hn::PromoteLowerTo(d32, a));
+            auto hi = Mul(c, hn::PromoteUpperTo(d32, a));
+            return hn::Combine(d16, hn::DemoteTo(dh, hi), hn::DemoteTo(dh, lo));
+        } else {
+            return Mul(Set(T(57.295779513082320877)), a);
+        }
+    }
+#endif
+
+    template<typename T>
+    static inline T scalar_op(T a)
+    {
+#if NPY_HWY_F16
+        if constexpr (std::is_same_v<T, hwy::float16_t>) {
+            return hwy::F16FromF32(npy_rad2degf(hwy::F32FromF16(a)));
+        }
+#endif
+        if constexpr (std::is_same_v<T, npy_double>) {
+            return npy_rad2deg(a);
+        }
+        else {
+            return npy_rad2degf(a);
+        }
+    }
+};
+
 #if NPY_HWY
 
 template<typename Op, typename T>
@@ -351,18 +428,6 @@ void unary_wrapper(char** args, npy_intp const* dimensions, npy_intp const* step
  ** Exported ufunc inner functions
  ******************************************************************************/
 
-NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_reciprocal)
-(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
-{
-    unary_wrapper<reciprocal_t, npy_float>(args, dimensions, steps);
-}
-
-NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_reciprocal)
-(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
-{
-    unary_wrapper<reciprocal_t, npy_double>(args, dimensions, steps);
-}
-
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_reciprocal)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
@@ -478,18 +543,6 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(CDOUBLE_reciprocal)
  ** Exported ufunc inner functions for ceil, floor, trunc
  ******************************************************************************/
 
-NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_ceil)
-(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
-{
-    unary_wrapper<ceil_t, npy_float>(args, dimensions, steps);
-}
-
-NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_ceil)
-(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
-{
-    unary_wrapper<ceil_t, npy_double>(args, dimensions, steps);
-}
-
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_ceil)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
@@ -503,18 +556,6 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_ceil)
 #endif
 }
 
-NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_floor)
-(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
-{
-    unary_wrapper<floor_t, npy_float>(args, dimensions, steps);
-}
-
-NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_floor)
-(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
-{
-    unary_wrapper<floor_t, npy_double>(args, dimensions, steps);
-}
-
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_floor)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
@@ -526,18 +567,6 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_floor)
         *((npy_half *)op1) = npy_float_to_half(npy_floorf(in1));
     }
 #endif
-}
-
-NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_trunc)
-(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
-{
-    unary_wrapper<trunc_t, npy_float>(args, dimensions, steps);
-}
-
-NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_trunc)
-(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
-{
-    unary_wrapper<trunc_t, npy_double>(args, dimensions, steps);
 }
 
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_trunc)
@@ -557,18 +586,6 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_trunc)
  ** Exported ufunc inner functions for rint
  ******************************************************************************/
 
-NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_rint)
-(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
-{
-    unary_wrapper<rint_t, npy_float>(args, dimensions, steps);
-}
-
-NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_rint)
-(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
-{
-    unary_wrapper<rint_t, npy_double>(args, dimensions, steps);
-}
-
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_rint)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
@@ -578,6 +595,56 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_rint)
     UNARY_LOOP {
         const float in1 = npy_half_to_float(*(npy_half *)ip1);
         *((npy_half *)op1) = npy_float_to_half(npy_rintf(in1));
+    }
+#endif
+}
+
+NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_rad2deg)
+(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
+{
+    unary_wrapper<rad2deg_t, npy_float>(args, dimensions, steps);
+}
+
+NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_deg2rad)
+(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
+{
+    unary_wrapper<deg2rad_t, npy_float>(args, dimensions, steps);
+}
+
+NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_rad2deg)
+(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
+{
+    unary_wrapper<rad2deg_t, npy_double>(args, dimensions, steps);
+}
+
+NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_deg2rad)
+(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
+{
+    unary_wrapper<deg2rad_t, npy_double>(args, dimensions, steps);
+}
+
+NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_rad2deg)
+(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
+{
+#if NPY_HWY_F16
+    unary_wrapper<rad2deg_t, hwy::float16_t>(args, dimensions, steps);
+#else
+    UNARY_LOOP {
+        const npy_float in1 = npy_half_to_float(*(npy_half *)ip1);
+        *(npy_half *)op1 = npy_float_to_half(npy_rad2degf(in1));
+    }
+#endif
+}
+
+NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_deg2rad)
+(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
+{
+#if NPY_HWY_F16
+    unary_wrapper<deg2rad_t, hwy::float16_t>(args, dimensions, steps);
+#else
+    UNARY_LOOP {
+        const npy_float in1 = npy_half_to_float(*(npy_half *)ip1);
+        *(npy_half *)op1 = npy_float_to_half(npy_deg2radf(in1));
     }
 #endif
 }

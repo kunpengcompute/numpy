@@ -255,16 +255,28 @@ NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@kind@,
  */
 #include "loops_unary_fp_ops.dispatch.h"
 /**begin repeat
- *  #TYPE = HALF, FLOAT, DOUBLE, CFLOAT, CDOUBLE#
+ *  #TYPE = HALF, CFLOAT, CDOUBLE#
  */
  NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_reciprocal,
     (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data)))
 /**end repeat**/
+
+/**begin repeat
+ *  #TYPE = HALF#
+ */
+/**begin repeat1
+ * #kind = ceil, floor, trunc, rint#
+ */
+ NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@kind@,
+    (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data)))
+/**end repeat1**/
+/**end repeat**/
+
 /**begin repeat
  *  #TYPE = HALF, FLOAT, DOUBLE#
  */
 /**begin repeat1
- * #kind = ceil, floor, trunc, rint#
+ * #kind = rad2deg, deg2rad#
  */
  NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@kind@,
     (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data)))
@@ -276,7 +288,7 @@ NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@kind@,
  *  #TYPE = FLOAT, DOUBLE#
  */
 /**begin repeat1
- * #kind = sqrt, absolute, square#
+ * #kind = rint, floor, trunc, ceil, sqrt, absolute, square, reciprocal#
  */
 NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@kind@,
    (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data)))
@@ -828,7 +840,7 @@ TIMEDELTA_mm_qm_divmod(char **args, npy_intp const *dimensions, npy_intp const *
 /* #define TIMEDELTA_mm_d_floor_divide TIMEDELTA_mm_d_divide */
 
 /**begin repeat
- * #TYPE = HALF, LONGDOUBLE#
+ * #TYPE = LONGDOUBLE#
  */
 NPY_NO_EXPORT void
 @TYPE@_rad2deg(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func));
@@ -836,19 +848,6 @@ NPY_NO_EXPORT void
 NPY_NO_EXPORT void
 @TYPE@_deg2rad(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func));
 /**end repeat**/
-
-#include "loops_deg_rad_hwy.dispatch.h"
-/**begin repeat
- * #TYPE = FLOAT, DOUBLE#
- */
-/**begin repeat1
- * #kind = rad2deg, deg2rad#
- */
-NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@kind@,
-    (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func)))
-/**end repeat1**/
-/**end repeat**/
-
 
 #include "loops_autovec.dispatch.h"
 /**begin repeat
