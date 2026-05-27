@@ -242,7 +242,7 @@ simd_binary_@intrin@_@sfx@(const npyv_lanetype_@sfx@ *ip1, npy_intp sip1,
                                  npy_intp len)
 {
     const int vstep = npyv_nlanes_@sfx@;
-#if @is_fp@
+#if @is_fp@ && defined(__aarch64__)
     const int unroll = 4;
     const int unroll_vstep = vstep * unroll;
     // Scalar broadcast fast path: when one operand has stride 0,
@@ -250,8 +250,6 @@ simd_binary_@intrin@_@sfx@(const npyv_lanetype_@sfx@ *ip1, npy_intp sip1,
     if (sip1 == 0 || sip2 == 0) {
         npyv_@sfx@ sv = sip1 == 0 ? npyv_setall_@sfx@(*ip1) : npyv_setall_@sfx@(*ip2);
         for (; len >= unroll_vstep; len -= unroll_vstep) {
-            if (sip1 != 0) { NPY_PREFETCH((const char*)(ip1 + sip1 * unroll_vstep), 0, 3); }
-            if (sip2 != 0) { NPY_PREFETCH((const char*)(ip2 + sip2 * unroll_vstep), 0, 3); }
             npyv_@sfx@ a0, a1, a2, a3, b0, b1, b2, b3;
             if (sip1 == 0) {
                 a0 = sv; a1 = sv; a2 = sv; a3 = sv;
@@ -323,41 +321,41 @@ simd_binary_@intrin@_@sfx@(const npyv_lanetype_@sfx@ *ip1, npy_intp sip1,
         }
         return;
     }
-#endif
+
     // 4x unrolled main loop with L1 prefetch — both inputs contiguous only.
     // Single-vector loadn has lower pipeline pressure than 4x loadn on NEON/SVE.
     if (sip1 == 1 && sip2 == 1) {
-    const int unroll_vstep4 = vstep * 4;
-    for (; len >= unroll_vstep4; len -= unroll_vstep4) {
-        NPY_PREFETCH((const char*)(ip1 + unroll_vstep4), 0, 3);
-        NPY_PREFETCH((const char*)(ip2 + unroll_vstep4), 0, 3);
-        npyv_@sfx@ a0 = npyv_load_@sfx@(ip1);
-        npyv_@sfx@ a1 = npyv_load_@sfx@(ip1 + vstep);
-        npyv_@sfx@ a2 = npyv_load_@sfx@(ip1 + vstep * 2);
-        npyv_@sfx@ a3 = npyv_load_@sfx@(ip1 + vstep * 3);
-        npyv_@sfx@ b0 = npyv_load_@sfx@(ip2);
-        npyv_@sfx@ b1 = npyv_load_@sfx@(ip2 + vstep);
-        npyv_@sfx@ b2 = npyv_load_@sfx@(ip2 + vstep * 2);
-        npyv_@sfx@ b3 = npyv_load_@sfx@(ip2 + vstep * 3);
-        npyv_@sfx@ r0 = V_INTRIN(a0, b0);
-        npyv_@sfx@ r1 = V_INTRIN(a1, b1);
-        npyv_@sfx@ r2 = V_INTRIN(a2, b2);
-        npyv_@sfx@ r3 = V_INTRIN(a3, b3);
-        if (sop1 == 1) {
-            npyv_store_@sfx@(op1, r0);
-            npyv_store_@sfx@(op1 + vstep, r1);
-            npyv_store_@sfx@(op1 + vstep * 2, r2);
-            npyv_store_@sfx@(op1 + vstep * 3, r3);
-        } else {
-            npyv_storen_@sfx@(op1, sop1, r0);
-            npyv_storen_@sfx@(op1 + sop1 * vstep, sop1, r1);
-            npyv_storen_@sfx@(op1 + sop1 * vstep * 2, sop1, r2);
-            npyv_storen_@sfx@(op1 + sop1 * vstep * 3, sop1, r3);
+        const int unroll_vstep4 = vstep * 4;
+        for (; len >= unroll_vstep4; len -= unroll_vstep4) {
+            NPY_PREFETCH((const char*)(ip1 + unroll_vstep4), 0, 3);
+            NPY_PREFETCH((const char*)(ip2 + unroll_vstep4), 0, 3);
+            npyv_@sfx@ a0 = npyv_load_@sfx@(ip1);
+            npyv_@sfx@ a1 = npyv_load_@sfx@(ip1 + vstep);
+            npyv_@sfx@ a2 = npyv_load_@sfx@(ip1 + vstep * 2);
+            npyv_@sfx@ a3 = npyv_load_@sfx@(ip1 + vstep * 3);
+            npyv_@sfx@ b0 = npyv_load_@sfx@(ip2);
+            npyv_@sfx@ b1 = npyv_load_@sfx@(ip2 + vstep);
+            npyv_@sfx@ b2 = npyv_load_@sfx@(ip2 + vstep * 2);
+            npyv_@sfx@ b3 = npyv_load_@sfx@(ip2 + vstep * 3);
+            npyv_@sfx@ r0 = V_INTRIN(a0, b0);
+            npyv_@sfx@ r1 = V_INTRIN(a1, b1);
+            npyv_@sfx@ r2 = V_INTRIN(a2, b2);
+            npyv_@sfx@ r3 = V_INTRIN(a3, b3);
+            if (sop1 == 1) {
+                npyv_store_@sfx@(op1, r0);
+                npyv_store_@sfx@(op1 + vstep, r1);
+                npyv_store_@sfx@(op1 + vstep * 2, r2);
+                npyv_store_@sfx@(op1 + vstep * 3, r3);
+            } else {
+                npyv_storen_@sfx@(op1, sop1, r0);
+                npyv_storen_@sfx@(op1 + sop1 * vstep, sop1, r1);
+                npyv_storen_@sfx@(op1 + sop1 * vstep * 2, sop1, r2);
+                npyv_storen_@sfx@(op1 + sop1 * vstep * 3, sop1, r3);
+            }
+            ip1 += unroll_vstep4;
+            ip2 += unroll_vstep4;
+            op1 += sop1 * unroll_vstep4;
         }
-        ip1 += unroll_vstep4;
-        ip2 += unroll_vstep4;
-        op1 += sop1 * unroll_vstep4;
-    }
     }
     for (; len >= vstep; len -= vstep, ip1 += sip1*vstep,
                          ip2 += sip2*vstep, op1 += sop1*vstep
@@ -380,6 +378,7 @@ simd_binary_@intrin@_@sfx@(const npyv_lanetype_@sfx@ *ip1, npy_intp sip1,
             npyv_storen_@sfx@(op1, sop1, r);
         }
     }
+#endif
     for (; len > 0; --len, ip1 += sip1, ip2 += sip2, op1 += sop1) {
         const npyv_lanetype_@sfx@ a = *ip1;
         const npyv_lanetype_@sfx@ b = *ip2;
@@ -454,44 +453,6 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
     npy_intp is1 = steps[0], is2 = steps[1], os1 = steps[2],
              len = dimensions[0];
     npy_intp i = 0;
-#if !@is_fp@
-#ifdef __aarch64__
-#ifdef NPY_HAVE_HIGHWAY
-    if (!IS_BINARY_REDUCE &&
-        !is_mem_overlap(ip1, is1, op1, os1, len) &&
-        !is_mem_overlap(ip2, is2, op1, os1, len) &&
-        IS_BINARY_CONT(@type@, @type@) &&
-        npy_highway_minmax_available(sizeof(@type@))
-#if NPY_SIMD == 128
-        && sizeof(@type@) <= 4
-#endif
-    ) {
-#if @is_unsigned@
-        if (sizeof(@type@) == 1) {
-            npy_highway_@kind@_u8_contig(args, len);
-        } else if (sizeof(@type@) == 2) {
-            npy_highway_@kind@_u16_contig(args, len);
-        } else if (sizeof(@type@) == 4) {
-            npy_highway_@kind@_u32_contig(args, len);
-        } else {
-            npy_highway_@kind@_u64_contig(args, len);
-        }
-#else
-        if (sizeof(@type@) == 1) {
-            npy_highway_@kind@_s8_contig(args, len);
-        } else if (sizeof(@type@) == 2) {
-            npy_highway_@kind@_s16_contig(args, len);
-        } else if (sizeof(@type@) == 4) {
-            npy_highway_@kind@_s32_contig(args, len);
-        } else {
-            npy_highway_@kind@_s64_contig(args, len);
-        }
-#endif
-        return;
-    }
-#endif
-#endif
-#endif
 #ifdef TO_SIMD_SFX
     #undef STYPE
     #define STYPE TO_SIMD_SFX(npyv_lanetype)
@@ -514,15 +475,10 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
             );
             goto clear_fp;
         }
-    #if @is_fp@ || @is_simd@
+    #if @is_fp@
         if (TO_SIMD_SFX(npyv_loadable_stride)(is1) &&
             TO_SIMD_SFX(npyv_loadable_stride)(is2) &&
             TO_SIMD_SFX(npyv_storable_stride)(os1)
-#if !@is_fp@
-            && (sizeof(@type@) <= 4 || (is1 == sizeof(@type@) && is2 == sizeof(@type@)))
-#elif @is_fp@
-            && (sizeof(@type@) <= 4 || os1 == sizeof(@type@) || (is1 == sizeof(@type@) && is2 == sizeof(@type@)))
-#endif
         ) {
             TO_SIMD_SFX(simd_binary_@intrin@)(
                 (STYPE*)ip1, is1/sizeof(STYPE),

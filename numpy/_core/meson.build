@@ -1348,7 +1348,6 @@ src_umath = umath_gen_headers + [
   'src/umath/loops_complex_maxmin.dispatch.cpp',
   'src/umath/loops_complex_maxmin.h',
   # Highway SIMD integer maximum/minimum
-  'src/umath/loops_minmax_hwy.dispatch.cpp',
   'src/umath/loops_minmax_hwy.h',
   'src/umath/loops_minmax_hwy_avail.c',
   # Highway SIMD floor division

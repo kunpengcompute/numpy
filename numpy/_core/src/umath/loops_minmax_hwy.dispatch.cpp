@@ -66,8 +66,6 @@ simd_minmax_int_unrolled(const T *HWY_RESTRICT src1, const T *HWY_RESTRICT src2,
 
     for (; len >= vstep_unroll;
          len -= vstep_unroll, src1 += vstep_unroll, src2 += vstep_unroll, dst += vstep_unroll) {
-        hwy::Prefetch(src1 + vstep_unroll);
-        hwy::Prefetch(src2 + vstep_unroll);
         for (int i = 0; i < UnrollFactor; ++i) {
             auto a = hn::LoadU(d, src1 + i * vstep);
             auto b = hn::LoadU(d, src2 + i * vstep);
@@ -77,8 +75,6 @@ simd_minmax_int_unrolled(const T *HWY_RESTRICT src1, const T *HWY_RESTRICT src2,
     }
 
     for (; len >= vstep; len -= vstep, src1 += vstep, src2 += vstep, dst += vstep) {
-        hwy::Prefetch(src1 + vstep);
-        hwy::Prefetch(src2 + vstep);
         auto a = hn::LoadU(d, src1);
         auto b = hn::LoadU(d, src2);
         auto r = IsMax ? hn::Max(a, b) : hn::Min(a, b);
