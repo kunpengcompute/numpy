@@ -953,17 +953,6 @@ foreach gen_mtargets : [
     ]
   ], 
   [
-    'loops_deg_rad_hwy.dispatch.h',
-    'src/umath/loops_deg_rad_hwy.dispatch.cpp',
-    [
-      X86_V4, X86_V3, X86_V2,
-      NEON,
-      VSX4, VSX2,
-      VX,
-      LSX,
-    ]
-  ],
-  [
     'loops_arithmetic.dispatch.h',
     src_file.process('src/umath/loops_arithmetic.dispatch.c.src'),
     [
@@ -1146,11 +1135,7 @@ foreach gen_mtargets : [
     'loops_unary_fp_ops.dispatch.h',
     'src/umath/loops_unary_fp_ops.dispatch.cpp',
     [
-      X86_V3, X86_V2,
-      VSX2,
       ASIMDHP, NEON,
-      VXE, VX,
-      LSX,
     ]
   ],
   [
