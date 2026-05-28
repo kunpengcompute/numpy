@@ -10,7 +10,7 @@ class _AbstractBinary(Benchmark):
     params = []
     param_names = ['ufunc', 'stride_in0', 'stride_in1', 'stride_out', 'dtype']
     timeout = 10
-    arrlen = 1000000
+    arrlen = 10000
     data_finite = True
     data_denormal = False
     data_zeros = False
