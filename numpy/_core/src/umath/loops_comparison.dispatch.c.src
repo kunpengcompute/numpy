@@ -305,7 +305,7 @@ static inline void
 run_binary_simd_@kind@_@sfx@(char **args, npy_intp const *dimensions, npy_intp const *steps)
 {
 #if @VECTOR@
-#if @bool@
+#if @bool@ && (defined(__aarch64__) || defined(__arm__) || defined(_M_ARM64) || defined(_M_ARM))
     /* argument one scalar */
     if (IS_BINARY_CONT_S1(@type@, npy_bool)) {
         /* scalar arg is loaded once before the loop; only the streamed input
