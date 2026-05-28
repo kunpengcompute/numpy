@@ -10,7 +10,7 @@ class _AbstractBinary(Benchmark):
     params = []
     param_names = ['ufunc', 'stride_in0', 'stride_in1', 'stride_out', 'dtype']
     timeout = 10
-    arrlen = 10000
+    arrlen = 1000000
     data_finite = True
     data_denormal = False
     data_zeros = False
@@ -149,6 +149,7 @@ class BinaryInt(_AbstractBinary):
     ]
 
 class BinaryIntContig(_AbstractBinary):
+    arrlen = 10000
     params = [
         [getattr(np, uf) for uf in (
             'add', 'subtract', 'multiply', 'bitwise_and', 'bitwise_or',
