@@ -8,6 +8,10 @@
 // Provides the various *_LOOP macros
 #include "fast_loop_macros.h"
 #include "loops_autovec_abs_hwy.h"
+#include "loops_bitwise_sve.h"
+#include "loops_logical_sve.h"
+#include "loops_logical_and_sve.h"
+#include "loops_shift_sve.h"
 
 /*
  *****************************************************************************
@@ -50,6 +54,8 @@
  * #SIGNED = 1, 0, 1, 0, 1, 0, 1, 0, 1, 0#
  * #c = hh,uhh,h,uh,,u,l,ul,ll,ull#
  * #big = 0, 0, 0, 0, 0, 0, 1, 1, 1, 1#
+ * #use_sve_lshift_scalar = 1, 1, 1, 1, 0, 0, 1, 1, 1, 1#
+ * #use_sve_rshift_scalar = 1, 1, 1, 1, 0, 0, 1, 1, 1, 1#
  */
 
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_positive)
@@ -182,6 +188,34 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_left_shift)
 (char **args, npy_intp const *dimensions, npy_intp const *steps,
                   void *NPY_UNUSED(func))
 {
+#if defined(__aarch64__)
+    if (IS_BINARY_CONT(@type@, @type@) &&
+            (abs_ptrdiff(args[2], args[0]) == 0 ||
+             abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE) &&
+            (abs_ptrdiff(args[2], args[1]) == 0 ||
+             abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) &&
+            npy_shift_sve_scalar_available()) {
+        npy_left_shift_sve_contig(
+                args, dimensions[0], (int)sizeof(@type@), @SIGNED@);
+#ifdef @TYPE@_left_shift_needs_clear_floatstatus
+        npy_clear_floatstatus_barrier((char*)dimensions);
+#endif
+        return;
+    }
+#endif
+#if defined(__aarch64__) && @use_sve_lshift_scalar@
+    if (IS_BINARY_CONT_S1(@type@, @type@) &&
+            (abs_ptrdiff(args[2], args[1]) == 0 ||
+             abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) &&
+            npy_shift_sve_scalar_available()) {
+        @TYPE@_left_shift_sve_scalar_in0(args, dimensions[0]);
+#ifdef @TYPE@_left_shift_needs_clear_floatstatus
+        // Keep the existing left-shift status side effect on this fast path.
+        npy_clear_floatstatus_barrier((char*)dimensions);
+#endif
+        return;
+    }
+#endif
     BINARY_LOOP_FAST(@type@, @type@, *out = npy_lshift@c@(in1, in2));
 #ifdef @TYPE@_left_shift_needs_clear_floatstatus
     // For some reason, our macOS CI sets an "invalid" flag here, but only
@@ -194,6 +228,27 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_right_shift)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
 #ifndef NPY_DO_NOT_OPTIMIZE_@TYPE@_right_shift
+#if defined(__aarch64__)
+    if (IS_BINARY_CONT(@type@, @type@) &&
+            (abs_ptrdiff(args[2], args[0]) == 0 ||
+             abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE) &&
+            (abs_ptrdiff(args[2], args[1]) == 0 ||
+             abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) &&
+            npy_shift_sve_scalar_available()) {
+        npy_right_shift_sve_contig(
+                args, dimensions[0], (int)sizeof(@type@), @SIGNED@);
+        return;
+    }
+#endif
+#if defined(__aarch64__) && @use_sve_rshift_scalar@
+    if (IS_BINARY_CONT_S1(@type@, @type@) &&
+            (abs_ptrdiff(args[2], args[1]) == 0 ||
+             abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) &&
+            npy_shift_sve_scalar_available()) {
+        @TYPE@_right_shift_sve_scalar_in0(args, dimensions[0]);
+        return;
+    }
+#endif
     BINARY_LOOP_FAST(@type@, @type@, *out = npy_rshift@c@(in1, in2));
 #else
     BINARY_LOOP {
@@ -204,6 +259,9 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_right_shift)
 #endif
 }
 
+#ifdef __aarch64__
+NPY_GCC_UNROLL_LOOPS
+#endif
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_bitwise_count)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
@@ -239,6 +297,8 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_sign)
  * Arithmetic
  * #kind = bitwise_and, bitwise_or, bitwise_xor#
  * #OP = &, |, ^#
+ * #use_sve_bitwise_and = 1, 0, 0#
+ * #sve_bitwise_op = 0, 1, 2#
  */
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
@@ -247,6 +307,34 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
         BINARY_REDUCE_LOOP_FAST(@type@, io1 @OP@= in2);
     }
     else {
+#if defined(__aarch64__)
+        if (IS_BINARY_CONT(@type@, @type@) &&
+                (abs_ptrdiff(args[2], args[0]) == 0 ||
+                 abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE) &&
+                (abs_ptrdiff(args[2], args[1]) == 0 ||
+                 abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) &&
+                npy_bitwise_sve_available()) {
+            npy_bitwise_sve_contig(
+                    args, dimensions[0], (int)sizeof(@type@), @sve_bitwise_op@);
+            return;
+        }
+        if (IS_BINARY_CONT_S1(@type@, @type@) &&
+                (abs_ptrdiff(args[2], args[1]) == 0 ||
+                 abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) &&
+                npy_bitwise_sve_available()) {
+            npy_bitwise_sve_scalar_in0(
+                    args, dimensions[0], (int)sizeof(@type@), @sve_bitwise_op@);
+            return;
+        }
+        if (IS_BINARY_CONT_S2(@type@, @type@) &&
+                (abs_ptrdiff(args[2], args[0]) == 0 ||
+                 abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE) &&
+                npy_bitwise_sve_available()) {
+            npy_bitwise_sve_scalar_in1(
+                    args, dimensions[0], (int)sizeof(@type@), @sve_bitwise_op@);
+            return;
+        }
+#endif
         BINARY_LOOP_FAST(@type@, @type@, *out = in1 @OP@ in2);
     }
 }
@@ -255,6 +343,8 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
 /**begin repeat1
  * #kind = logical_and, logical_or#
  * #OP = &&, ||#
+ * #use_sve_scalar_and = 1, 0#
+ * #use_sve_scalar_or = 0, 1#
  */
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
@@ -263,6 +353,42 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
      * gcc vectorization of this is not good (PR60575) but manual integer
      * vectorization is too tedious to be worthwhile
      */
+#if defined(__aarch64__) && @use_sve_scalar_and@
+    if ((sizeof(@type@) == 4 || sizeof(@type@) == sizeof(npy_long)) &&
+            IS_BINARY_CONT_S1(@type@, npy_bool) &&
+            abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE &&
+            npy_logical_and_sve_scalar_available()) {
+        npy_logical_and_sve_scalar_in0(
+                args, dimensions, steps, (int)sizeof(@type@));
+        return;
+    }
+    if ((sizeof(@type@) == 4 || sizeof(@type@) == sizeof(npy_long)) &&
+            IS_BINARY_CONT_S2(@type@, npy_bool) &&
+            abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE &&
+            npy_logical_and_sve_scalar_available()) {
+        npy_logical_and_sve_scalar_in1(
+                args, dimensions, steps, (int)sizeof(@type@));
+        return;
+    }
+#endif
+#if defined(__aarch64__) && @use_sve_scalar_or@
+    if (sizeof(@type@) > 1 &&
+            IS_BINARY_CONT_S1(@type@, npy_bool) &&
+            abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE &&
+            npy_logical_or_sve_scalar_in0_available()) {
+        npy_logical_or_sve_scalar_in0(
+                args, dimensions, steps, (int)sizeof(@type@));
+        return;
+    }
+    if (sizeof(@type@) > 1 &&
+            IS_BINARY_CONT_S2(@type@, npy_bool) &&
+            abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE &&
+            npy_logical_or_sve_scalar_in0_available()) {
+        npy_logical_or_sve_scalar_in1(
+                args, dimensions, steps, (int)sizeof(@type@));
+        return;
+    }
+#endif
     BINARY_LOOP_FAST(@type@, npy_bool, *out = in1 @OP@ in2);
 }
 /**end repeat1**/
@@ -273,6 +399,17 @@ NPY_FINLINE npy_bool @TYPE@_logical_xor_(@type@ in1, @type@ in2)
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_logical_xor)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
+#if defined(__aarch64__)
+    if (IS_BINARY_CONT(@type@, npy_bool) &&
+            (abs_ptrdiff(args[2], args[0]) == 0 ||
+             abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE) &&
+            (abs_ptrdiff(args[2], args[1]) == 0 ||
+             abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) &&
+            npy_bitwise_sve_available()) {
+        npy_logical_xor_sve_contig(args, dimensions[0], (int)sizeof(@type@));
+        return;
+    }
+#endif
     BINARY_LOOP_FAST(@type@, npy_bool, *out = @TYPE@_logical_xor_(in1, in2));
 }
 

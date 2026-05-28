@@ -1364,6 +1364,24 @@ src_umath = umath_gen_headers + [
   'src/umath/_scaled_float_dtype.c',
 ]
 
+if cpu_family == 'aarch64'
+  src_umath += [
+    # AArch64 SVE bitwise specializations
+    'src/umath/loops_sve_utils.h',
+    'src/umath/loops_bitwise_sve.c',
+    'src/umath/loops_bitwise_sve.h',
+    # AArch64 SVE logical specializations
+    'src/umath/loops_logical_sve.c',
+    'src/umath/loops_logical_sve.h',
+    # AArch64 SVE logical_and scalar-input specialization
+    'src/umath/loops_logical_and_sve.c',
+    'src/umath/loops_logical_and_sve.h',
+    # AArch64 SVE shift scalar-input specialization
+    'src/umath/loops_shift_sve.c',
+    'src/umath/loops_shift_sve.h',
+  ]
+endif
+
 # SVML object files. If functionality is migrated to universal intrinsics and
 # the object files are no longer needed, comment out the relevant object files
 # here. Note that this migration is desirable; we then get the performance
