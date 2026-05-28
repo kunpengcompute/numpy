@@ -3,13 +3,17 @@
 
 #include "npy_cpu_features.h"
 
-#ifndef __has_include
-    #define __has_include(header) 0
-#endif
-
-#if defined(__aarch64__) && __has_include(<arm_sve.h>)
-    #include <arm_sve.h>
-    #define NPY_HAVE_ARM_SVE_INTRINSICS 1
+#if defined(__aarch64__)
+    #if defined(__has_include)
+        #if __has_include(<arm_sve.h>)
+            #include <arm_sve.h>
+            #define NPY_HAVE_ARM_SVE_INTRINSICS 1
+        #else
+            #define NPY_HAVE_ARM_SVE_INTRINSICS 0
+        #endif
+    #else
+        #define NPY_HAVE_ARM_SVE_INTRINSICS 0
+    #endif
 #else
     #define NPY_HAVE_ARM_SVE_INTRINSICS 0
 #endif
