@@ -945,6 +945,7 @@ get_view_from_index(PyArrayObject *self, PyArrayObject **view,
     return 0;
 }
 
+#if defined(NPY_CPU_ARMEL_AARCH64) || defined(NPY_CPU_ARMEB_AARCH64)
 static inline int
 copy_small_indexed_subspace(char *dst, char *src, npy_intp total_bytes)
 {
@@ -1172,7 +1173,6 @@ mapiter_trivial_get_axis1_c_subspace(
 
 typedef struct {npy_uint64 a; npy_uint64 b;} indexed_copytype128;
 
-#if defined(NPY_CPU_ARMEL_AARCH64) || defined(NPY_CPU_ARMEB_AARCH64)
 static inline void
 copy_scalar_to_c_subspace(
         char *dst, char *src, npy_intp itemsize, npy_intp subspace_size)
@@ -2107,6 +2107,7 @@ array_subscript(PyArrayObject *self, PyObject *op)
         }
     }
 
+#if defined(NPY_CPU_ARMEL_AARCH64) || defined(NPY_CPU_ARMEB_AARCH64)
     if (index_type == (HAS_FANCY | HAS_ELLIPSIS) &&
             index_num == 2 &&
             indices[0].type == HAS_FANCY &&
@@ -2156,6 +2157,7 @@ array_subscript(PyArrayObject *self, PyObject *op)
             goto finish;
         }
     }
+#endif
 
     /* fancy indexing has to be used. And view is the subspace. */
     mit = (PyArrayMapIterObject *)PyArray_MapIterNew(indices, index_num,
