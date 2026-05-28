@@ -982,6 +982,7 @@ defdict = {
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.fabs'),
           None,
+          TD(flts, cfunc_alias='absolute') if IsArm else
           TD(flts, f='fabs', astype={'e': 'f'}),
           TD(P, f='fabs'),
        ),
