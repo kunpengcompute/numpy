@@ -438,11 +438,21 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_divide)
     }
 #endif
 #if NPY_SIMD && NPY_BITSOF_@TYPE@ == 64 && defined(SIMD_DISABLE_DIV64_OPT)
+    /* Highway SIMD scalar divisor path for int64
+     * (uses SVE when available; on NEON-only falls back to scalar-per-lane).
+     * Faster than libdivide on SVE-capable platforms. */
+    if (IS_BLOCKABLE_BINARY_SCALAR2(sizeof(@type@), NPY_SIMD_WIDTH) &&
+        (*(@type@ *)args[1]) != 0 &&
+        npy_highway_floor_divide_scalar_available(sizeof(@type@))) {
+        npy_highway_floor_divide_s64_scalar_contig(args, dimensions[0]);
+        return;
+    }
     /*
      * libdivide-based scalar divisor path for int64 on platforms where
      * npyv 64-bit div is disabled (ARM NEON, VSX3, LSX).
      * Uses multiply+shift instead of hardware division; no float64
      * precision loss, no FE_INVALID.
+     * Used as fallback when Highway is unavailable or not preferred.
      */
     if (IS_BLOCKABLE_BINARY_SCALAR2(sizeof(@type@), NPY_SIMD_WIDTH) &&
         (*(@type@ *)args[1]) != 0) {
