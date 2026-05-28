@@ -164,9 +164,8 @@ simd_binary_ccc_@intrin@_@sfx@(const npyv_lanetype_@sfx@ *ip1, const npyv_lanety
 #if NPY_SIMD_WIDTH == 128
     // Note, 6x unroll was chosen for best results on Apple M1
     const int vectorsPerLoop = 6;
-#elif NPY_SIMD_WIDTH >= 256
-    const int vectorsPerLoop = 4;
 #else
+    // To avoid memory bandwidth bottleneck
     const int vectorsPerLoop = 2;
 #endif
     const int elemPerVector = npyv_nlanes_@sfx@;
@@ -182,9 +181,6 @@ simd_binary_ccc_@intrin@_@sfx@(const npyv_lanetype_@sfx@ *ip1, const npyv_lanety
         npyv_@sfx@ v3 = npyv_load_@sfx@(&ip1[i + 3 * elemPerVector]);
         npyv_@sfx@ v4 = npyv_load_@sfx@(&ip1[i + 4 * elemPerVector]);
         npyv_@sfx@ v5 = npyv_load_@sfx@(&ip1[i + 5 * elemPerVector]);
-    #elif NPY_SIMD_WIDTH >= 256
-        npyv_@sfx@ v2 = npyv_load_@sfx@(&ip1[i + 2 * elemPerVector]);
-        npyv_@sfx@ v3 = npyv_load_@sfx@(&ip1[i + 3 * elemPerVector]);
     #endif
         npyv_@sfx@ u0 = npyv_load_@sfx@(&ip2[i + 0 * elemPerVector]);
         npyv_@sfx@ u1 = npyv_load_@sfx@(&ip2[i + 1 * elemPerVector]);
@@ -193,9 +189,6 @@ simd_binary_ccc_@intrin@_@sfx@(const npyv_lanetype_@sfx@ *ip1, const npyv_lanety
         npyv_@sfx@ u3 = npyv_load_@sfx@(&ip2[i + 3 * elemPerVector]);
         npyv_@sfx@ u4 = npyv_load_@sfx@(&ip2[i + 4 * elemPerVector]);
         npyv_@sfx@ u5 = npyv_load_@sfx@(&ip2[i + 5 * elemPerVector]);
-    #elif NPY_SIMD_WIDTH >= 256
-        npyv_@sfx@ u2 = npyv_load_@sfx@(&ip2[i + 2 * elemPerVector]);
-        npyv_@sfx@ u3 = npyv_load_@sfx@(&ip2[i + 3 * elemPerVector]);
     #endif
         npyv_@sfx@ m0 = V_INTRIN(v0, u0);
         npyv_@sfx@ m1 = V_INTRIN(v1, u1);
@@ -204,9 +197,6 @@ simd_binary_ccc_@intrin@_@sfx@(const npyv_lanetype_@sfx@ *ip1, const npyv_lanety
         npyv_@sfx@ m3 = V_INTRIN(v3, u3);
         npyv_@sfx@ m4 = V_INTRIN(v4, u4);
         npyv_@sfx@ m5 = V_INTRIN(v5, u5);
-    #elif NPY_SIMD_WIDTH >= 256
-        npyv_@sfx@ m2 = V_INTRIN(v2, u2);
-        npyv_@sfx@ m3 = V_INTRIN(v3, u3);
     #endif
         npyv_store_@sfx@(&op1[i + 0 * elemPerVector], m0);
         npyv_store_@sfx@(&op1[i + 1 * elemPerVector], m1);
@@ -215,9 +205,6 @@ simd_binary_ccc_@intrin@_@sfx@(const npyv_lanetype_@sfx@ *ip1, const npyv_lanety
         npyv_store_@sfx@(&op1[i + 3 * elemPerVector], m3);
         npyv_store_@sfx@(&op1[i + 4 * elemPerVector], m4);
         npyv_store_@sfx@(&op1[i + 5 * elemPerVector], m5);
-    #elif NPY_SIMD_WIDTH >= 256
-        npyv_store_@sfx@(&op1[i + 2 * elemPerVector], m2);
-        npyv_store_@sfx@(&op1[i + 3 * elemPerVector], m3);
     #endif
     }
     for (; (i+elemPerVector) <= len; i += elemPerVector) {
@@ -233,6 +220,7 @@ simd_binary_ccc_@intrin@_@sfx@(const npyv_lanetype_@sfx@ *ip1, const npyv_lanety
         op1[i] = SCALAR_OP(in1, in2);
     }
 }
+
 // non-contiguous (strided) memory access for 32/64-bit lane types
 #if @is_fp@ || @is_simd@
 static inline void
@@ -357,6 +345,7 @@ simd_binary_@intrin@_@sfx@(const npyv_lanetype_@sfx@ *ip1, npy_intp sip1,
             op1 += sop1 * unroll_vstep4;
         }
     }
+#endif
     for (; len >= vstep; len -= vstep, ip1 += sip1*vstep,
                          ip2 += sip2*vstep, op1 += sop1*vstep
     ) {
@@ -378,7 +367,6 @@ simd_binary_@intrin@_@sfx@(const npyv_lanetype_@sfx@ *ip1, npy_intp sip1,
             npyv_storen_@sfx@(op1, sop1, r);
         }
     }
-#endif
     for (; len > 0; --len, ip1 += sip1, ip2 += sip2, op1 += sop1) {
         const npyv_lanetype_@sfx@ a = *ip1;
         const npyv_lanetype_@sfx@ b = *ip2;
