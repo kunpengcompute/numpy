@@ -67,7 +67,11 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
          * use optimized SIMD implementation; otherwise fall back.
          */
         if (ssrc1 == sizeof(@type@) &&
+#if defined(__aarch64__) || defined(__arm__) || defined(_M_ARM64) || defined(_M_ARM)
             npy_highway_pairwise_sum_available(sizeof(@type@))) {
+#else
+            0) {
+#endif
             *((@type@*)src0) @OP@= npy_highway_pairwise_sum_@sfx@_contig(
                 (const @type@*)src1, len);
         }
