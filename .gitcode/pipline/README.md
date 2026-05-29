@@ -106,6 +106,17 @@ auditwheel show wheelhouse/numpy-*.whl
 
 ARM64 与 X86_64 的 wheel 必须在各自原生 runner 上分别构建，不能将同一个 wheel 跨架构安装使用。
 
+### Wheel 适用范围
+
+`wheel.sh` 先生成当前环境的 raw wheel，再通过 `auditwheel repair` 生成最终可安装 wheel。最终 wheel 的 OS 兼容范围由构建环境中的 glibc 版本、依赖库以及 `auditwheel repair` 生成的 `manylinux` tag 决定，而不是简单绑定到某个发行版名称。
+
+因此，在 Ubuntu 上构建出的 wheel 不一定只能在 Ubuntu 上使用；只要目标系统满足最终 wheel 文件名中的 `manylinux_*` tag、CPU 架构和 Python ABI 要求，也可以在 AlmaLinux 等其他 Linux 发行版上安装使用。
+
+例如：
+
+- `cp314-cp314-manylinux_2_28_aarch64.whl`：要求 Python 3.14、AArch64 架构，以及 glibc >= 2.28 的 Linux 系统。
+- `cp311-cp311-manylinux_2_17_x86_64.whl`：要求 Python 3.11、X86_64 架构，以及 glibc >= 2.17 的 Linux 系统。
+
 ## 说明
 
 - `common.sh` 在未跳过系统依赖时，会自动检测并使用 `apt-get`、`dnf` 或 `yum`。
