@@ -112,18 +112,23 @@ inline bool aquicksort_dispatch(T *start, npy_intp* arg, npy_intp num)
 #if !defined(__CYGWIN__)
     using TF = typename np::meta::FixedWidth<T>::Type;
     void (*dispfunc)(TF*, npy_intp*, npy_intp) = nullptr;
+    constexpr npy_intp kHwyArgQSort = 1024;
     if constexpr (sizeof(T) == sizeof(uint16_t)) {
-        // x86-simd-sort lacks 16-bit argsort, use Highway on all platforms
-        #include "highway_qsort_16bit.dispatch.h"
-        NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::highway::qsort_simd::template ArgQSort, <TF>);
+        if (num >= kHwyArgQSort) {
+            // x86-simd-sort lacks 16-bit argsort, use Highway on all platforms
+            #include "highway_qsort_16bit.dispatch.h"
+            NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::highway::qsort_simd::template ArgQSort, <TF>);
+        }
     }
     else if constexpr (sizeof(T) == sizeof(uint32_t) || sizeof(T) == sizeof(uint64_t)) {
 #if defined(NPY_CPU_AMD64) || defined(NPY_CPU_X86) // x86 32-bit and 64-bit
         #include "x86_simd_argsort.dispatch.h"
         NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::qsort_simd::template ArgQSort, <TF>);
 #else
-        #include "highway_qsort.dispatch.h"
-        NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::highway::qsort_simd::template ArgQSort, <TF>);
+        if (num >= kHwyArgQSort) {
+            #include "highway_qsort.dispatch.h"
+            NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::highway::qsort_simd::template ArgQSort, <TF>);
+        }
 #endif
     }
     if (dispfunc) {
