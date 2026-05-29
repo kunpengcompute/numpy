@@ -85,7 +85,9 @@ python -m build --wheel --no-isolation -o "${WHEEL_BUILD_DIR}" \
     -Csetup-args=-Dlapack=openblas \
     -Csetup-args=-Dallow-noblas=false
 
-mapfile -t raw_wheels < <(find "${WHEEL_BUILD_DIR}" -maxdepth 1 -type f -name 'numpy-*.whl' -print)
+shopt -s nullglob
+raw_wheels=("${WHEEL_BUILD_DIR}"/numpy-*.whl)
+shopt -u nullglob
 if [[ "${#raw_wheels[@]}" -ne 1 ]]; then
     printf 'Expected exactly one raw NumPy wheel in %s, found %s.\n' \
         "${WHEEL_BUILD_DIR}" "${#raw_wheels[@]}" >&2
@@ -95,7 +97,9 @@ fi
 ci_log "Repairing wheel and bundling required shared libraries into ${WHEEL_OUTPUT_DIR}."
 auditwheel repair "${raw_wheels[0]}" --wheel-dir "${WHEEL_OUTPUT_DIR}"
 
-mapfile -t repaired_wheels < <(find "${WHEEL_OUTPUT_DIR}" -maxdepth 1 -type f -name 'numpy-*.whl' -print)
+shopt -s nullglob
+repaired_wheels=("${WHEEL_OUTPUT_DIR}"/numpy-*.whl)
+shopt -u nullglob
 if [[ "${#repaired_wheels[@]}" -ne 1 ]]; then
     printf 'Expected exactly one repaired NumPy wheel in %s, found %s.\n' \
         "${WHEEL_OUTPUT_DIR}" "${#repaired_wheels[@]}" >&2
