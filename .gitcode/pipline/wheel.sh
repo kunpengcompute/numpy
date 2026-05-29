@@ -4,7 +4,7 @@ set -euo pipefail
 set -o errtrace
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck disable=SC1091
+# shellcheck source=common.sh
 source "${SCRIPT_DIR}/common.sh"
 
 trap 'ci_dump_meson_log' ERR
