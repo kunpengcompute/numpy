@@ -232,58 +232,9 @@ quicksort_(type *start, npy_intp num)
 }
 
 template <typename Tag, typename type>
-static inline bool
-is_sorted_or_reverse(type *vv, npy_intp *tosort, npy_intp num)
-{
-    if (num <= 1) {
-        return true;
-    }
-    
-    bool is_ascending = true;
-    bool is_descending = true;
-    
-    for (npy_intp i = 1; i < num && (is_ascending || is_descending); i++) {
-        type prev = vv[tosort[i - 1]];
-        type curr = vv[tosort[i]];
-        
-        if (Tag::less(curr, prev)) {
-            is_ascending = false;
-        }
-        if (Tag::less(prev, curr)) {
-            is_descending = false;
-        }
-    }
-    
-    if (is_ascending) {
-        return true;
-    }
-    
-    if (is_descending) {
-        npy_intp *left = tosort;
-        npy_intp *right = tosort + num - 1;
-        while (left < right) {
-            std::swap(*left, *right);
-            left++;
-            right--;
-        }
-        return true;
-    }
-    
-    return false;
-}
-
-template <typename Tag, typename type>
 static int
 aquicksort_(type *vv, npy_intp *tosort, npy_intp num)
 {
-    if (num <= 1) {
-        return 0;
-    }
-    
-    if (is_sorted_or_reverse<Tag>(vv, tosort, num)) {
-        return 0;
-    }
-    
     type *v = vv;
     type vp;
     npy_intp *pl = tosort;
@@ -472,48 +423,6 @@ string_quicksort_(type *start, npy_intp num, void *varr)
 }
 
 template <typename Tag, typename type>
-static inline bool
-string_is_sorted_or_reverse(type *vv, npy_intp *tosort, npy_intp num, size_t len)
-{
-    if (num <= 1) {
-        return true;
-    }
-    
-    type *v = vv;
-    bool is_ascending = true;
-    bool is_descending = true;
-    
-    for (npy_intp i = 1; i < num && (is_ascending || is_descending); i++) {
-        type *prev = v + tosort[i - 1] * len;
-        type *curr = v + tosort[i] * len;
-        
-        if (Tag::less(curr, prev, len)) {
-            is_ascending = false;
-        }
-        if (Tag::less(prev, curr, len)) {
-            is_descending = false;
-        }
-    }
-    
-    if (is_ascending) {
-        return true;
-    }
-    
-    if (is_descending) {
-        npy_intp *left = tosort;
-        npy_intp *right = tosort + num - 1;
-        while (left < right) {
-            std::swap(*left, *right);
-            left++;
-            right--;
-        }
-        return true;
-    }
-    
-    return false;
-}
-
-template <typename Tag, typename type>
 static int
 string_aquicksort_(type *vv, npy_intp *tosort, npy_intp num, void *varr)
 {
@@ -532,10 +441,6 @@ string_aquicksort_(type *vv, npy_intp *tosort, npy_intp num, void *varr)
 
     /* Items that have zero size don't make sense to sort */
     if (len == 0) {
-        return 0;
-    }
-    
-    if (string_is_sorted_or_reverse<Tag>(vv, tosort, num, len)) {
         return 0;
     }
 
@@ -740,50 +645,6 @@ npy_aquicksort(void *vv, npy_intp *tosort, npy_intp num, void *varr)
     return npy_aquicksort_impl(vv, tosort, num, varr, elsize, cmp);
 }
 
-static inline bool
-is_sorted_or_reverse_generic(void *vv, npy_intp *tosort, npy_intp num,
-                             npy_intp elsize, PyArray_CompareFunc *cmp, void *arr)
-{
-    if (num <= 1) {
-        return true;
-    }
-    
-    char *v = (char *)vv;
-    bool is_ascending = true;
-    bool is_descending = true;
-    
-    for (npy_intp i = 1; i < num && (is_ascending || is_descending); i++) {
-        char *prev = v + tosort[i - 1] * elsize;
-        char *curr = v + tosort[i] * elsize;
-        
-        if (cmp(curr, prev, arr) < 0) {
-            is_ascending = false;
-        }
-        if (cmp(prev, curr, arr) < 0) {
-            is_descending = false;
-        }
-    }
-    
-    if (is_ascending) {
-        return true;
-    }
-    
-    if (is_descending) {
-        npy_intp *left = tosort;
-        npy_intp *right = tosort + num - 1;
-        while (left < right) {
-            npy_intp tmp = *left;
-            *left = *right;
-            *right = tmp;
-            left++;
-            right--;
-        }
-        return true;
-    }
-    
-    return false;
-}
-
 NPY_NO_EXPORT int
 npy_aquicksort_impl(void *vv, npy_intp *tosort, npy_intp num, void *varr,
                    npy_intp elsize, PyArray_CompareFunc *cmp)
@@ -802,10 +663,6 @@ npy_aquicksort_impl(void *vv, npy_intp *tosort, npy_intp num, void *varr,
 
     /* Items that have zero size don't make sense to sort */
     if (elsize == 0) {
-        return 0;
-    }
-    
-    if (is_sorted_or_reverse_generic(vv, tosort, num, elsize, cmp, arr)) {
         return 0;
     }
 
