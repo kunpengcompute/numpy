@@ -1132,6 +1132,13 @@ foreach gen_mtargets : [
     ]
   ],
   [
+    'loops_unary_fp_ops.dispatch.h',
+    'src/umath/loops_unary_fp_ops.dispatch.cpp',
+    [
+      ASIMDHP, NEON,
+    ]
+  ],
+  [
     'loops_unary_fp.dispatch.h',
     src_file.process('src/umath/loops_unary_fp.dispatch.c.src'),
     [
@@ -1205,43 +1212,6 @@ foreach gen_mtargets : [
   endif
 endforeach
 
-# Build aarch64-only dispatch-able sources
-# These targets only have aarch64 implementations, so skip them entirely
-# on other platforms to avoid compiling empty baseline fallbacks.
-# -----------------------------------------
-if cpu_family == 'aarch64'
-  foreach gen_mtargets : [
-    [
-      'loops_unary_fp_ops.dispatch.h',
-      'src/umath/loops_unary_fp_ops.dispatch.cpp',
-      [ASIMDHP, NEON],
-    ],
-  ]
-    mtargets = mod_features.multi_targets(
-      gen_mtargets[0], umath_gen_headers + gen_mtargets[1],
-      dispatch: gen_mtargets[2],
-      baseline: CPU_BASELINE,
-      prefix: 'NPY_',
-      dependencies: [py_dep, np_core_dep],
-      c_args: c_args_common + max_opt,
-      cpp_args: cpp_args_common + max_opt,
-      include_directories: [
-        'include',
-        'src/common',
-        'src/multiarray',
-        'src/npymath',
-        'src/umath',
-        'src/highway',
-      ]
-    )
-    if not is_variable('multiarray_umath_mtargets')
-      multiarray_umath_mtargets = mtargets
-    else
-      multiarray_umath_mtargets.extend(mtargets)
-    endif
-  endforeach
-endif
-
 # Build _multiarray_umath module
 # ------------------------------
 src_multiarray_umath_common = [
@@ -1308,6 +1278,7 @@ src_multiarray = multiarray_gen_headers + [
   'src/multiarray/iterators.c',
   'src/multiarray/legacy_dtype_implementation.c',
   src_file.process('src/multiarray/lowlevel_strided_loops.c.src'),
+  'src/multiarray/strided_copy_kernels.cpp',
   'src/multiarray/mapping.c',
   'src/multiarray/methods.c',
   'src/multiarray/multiarraymodule.c',
@@ -1352,16 +1323,6 @@ src_multiarray = multiarray_gen_headers + [
   'src/npymath/arm64_exports.c',
   'src/multiarray/fnv.c',
 ]
-
-if cpu_family == 'aarch64'
-  src_multiarray += [
-    # AArch64 optimized strided copy kernels.
-    # On aarch64, NEON and scalar load/store instructions natively support
-    # unaligned memory access, enabling optimized typed pointer access
-    # regardless of alignment.
-    'src/multiarray/strided_copy_kernels.cpp',
-  ]
-endif
 
 src_umath = umath_gen_headers + [
   src_file.process('src/umath/funcs.inc.src'),
