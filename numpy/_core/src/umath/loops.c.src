@@ -19,6 +19,7 @@
 #include "npy_pycompat.h"
 
 #include "ufunc_object.h"
+#include "loops_logical_not_aarch64.h"
 
 #include <float.h>
 #include <stdint.h>
@@ -1232,6 +1233,12 @@ NPY_NO_EXPORT void
 NPY_NO_EXPORT void
 @TYPE@_logical_not(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
+#if defined(__aarch64__) && @fd@
+    if (npy_float_logical_not_aarch64(
+            args, dimensions, steps, (int)sizeof(@type@))) {
+        return;
+    }
+#endif
     UNARY_LOOP {
         const @type@ in1 = *(@type@ *)ip1;
         *((npy_bool *)op1) = !in1;
@@ -1679,6 +1686,11 @@ HALF_logical_xor(char **args, npy_intp const *dimensions, npy_intp const *steps,
 NPY_NO_EXPORT void
 HALF_logical_not(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
+#if defined(__aarch64__)
+    if (npy_half_logical_not_aarch64(args, dimensions, steps)) {
+        return;
+    }
+#endif
     UNARY_LOOP {
         const npy_half in1 = *(npy_half *)ip1;
         *((npy_bool *)op1) = npy_half_iszero(in1);

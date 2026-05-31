@@ -1376,6 +1376,9 @@ if cpu_family == 'aarch64'
     # AArch64 SVE logical_and scalar-input specialization
     'src/umath/loops_logical_and_sve.c',
     'src/umath/loops_logical_and_sve.h',
+    # AArch64 logical_not specializations
+    'src/umath/loops_logical_not_aarch64.c',
+    'src/umath/loops_logical_not_aarch64.h',
     # AArch64 SVE shift scalar-input specialization
     'src/umath/loops_shift_sve.c',
     'src/umath/loops_shift_sve.h',
