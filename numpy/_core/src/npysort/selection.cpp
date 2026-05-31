@@ -36,6 +36,12 @@
 #define NPY_HAVE_PARTITION_HIGHWAY 0
 #endif
 
+#if defined(__arm__) || defined(__aarch64__)
+#define NPY_ARM_SELECTION_TUNING 1
+#else
+#define NPY_ARM_SELECTION_TUNING 0
+#endif
+
 #define NOT_USED NPY_UNUSED(unused)
 
 template<typename T>
@@ -84,6 +90,18 @@ inline bool argquickselect_dispatch(T* v, npy_intp* arg, npy_intp num, npy_intp 
 #if defined(NPY_CPU_AMD64) || defined(NPY_CPU_X86) // x86 32-bit and 64-bit
         #include "x86_simd_argsort.dispatch.h"
         NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::qsort_simd::template ArgQSelect, <TF>);
+#elif defined(__arm__) || defined(__aarch64__)
+        /*
+         * The Highway arg-select path materializes a full key/value pair buffer.
+         * On ARM this is noticeably slower than introselect for 64-bit patterned
+         * inputs such as sorted_block, while ordered/uniform inputs are already
+         * handled by the already-partitioned fast path before this dispatch.
+         */
+        if constexpr (sizeof(T) != sizeof(uint64_t)) {
+            #include "highway_qsort.dispatch.h"
+            NPY_CPU_DISPATCH_CALL_XB(
+                    dispfunc = np::highway::qsort_simd::template ArgQSelect, <TF>);
+        }
 #else
         #include "highway_qsort.dispatch.h"
         NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::highway::qsort_simd::template ArgQSelect, <TF>);
@@ -202,6 +220,19 @@ use_already_partitioned_check(npy_intp nkth)
      * results when later partitions run.
      */
     return nkth == 1;
+}
+
+template <typename Tag, typename IdxT>
+static inline bool
+ordered_prefix_(typename Tag::type *v, npy_intp num, IdxT idx)
+{
+    const npy_intp limit = std::min<npy_intp>(num, 2048);
+    for (npy_intp i = 1; i < limit; ++i) {
+        if (Tag::less(v[idx(i)], v[idx(i - 1)])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /*
@@ -646,7 +677,8 @@ NPY_NO_EXPORT int
 introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
              npy_intp *pivots, npy_intp *npiv)
 {
-    constexpr npy_intp edge_heap_select_limit = 128;
+    constexpr npy_intp edge_heap_select_limit =
+            (NPY_ARM_SELECTION_TUNING && !arg) ? 1024 : 128;
     constexpr npy_intp bad_split_ratio = 16;
     constexpr npy_intp partition_highway_max_bytes = 32768;
     constexpr npy_intp ninther_bad_split_threshold = 2;
@@ -721,12 +753,6 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         return 0;
     }
 
-    if constexpr (!arg &&
-            (std::is_same_v<type, npy_int64> || std::is_same_v<type, npy_double>)) {
-        partition_scratch = std::malloc(static_cast<size_t>(
-                partition_highway_max_bytes));
-    }
-
     depth_limit = npy_get_msb(num) * 2;
 
     /* guarantee three elements */
@@ -746,6 +772,13 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
                 span >= mom5_min_span &&
                 (bad_split_count >= mom5_bad_split_threshold ||
                  depth_limit <= 0);
+        const bool can_use_partition_highway =
+                !arg &&
+                (std::is_same_v<type, npy_int64> ||
+                 std::is_same_v<type, npy_double>) &&
+                span >= 1024 &&
+                span * static_cast<npy_intp>(sizeof(type)) <=
+                        partition_highway_max_bytes;
 
         /*
          * Prefer median-of-three in the common case.  Use a cheaper wider
@@ -786,8 +819,14 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
          * previous swapping removes need for bound checks
          * pivot 3-lowest [x x x] 3-highest
          */
+        if (can_use_partition_highway && partition_scratch == nullptr) {
+            partition_scratch = std::malloc(static_cast<size_t>(
+                    partition_highway_max_bytes));
+        }
+
         unguarded_partition_<Tag, arg>(v, tosort, v[idx(low)], &ll, &hh,
-                                       partition_scratch);
+                                       can_use_partition_highway ?
+                                               partition_scratch : nullptr);
 
         /* move pivot into position */
         std::swap(sortee(low), sortee(hh));
@@ -860,12 +899,23 @@ introselect_arg(void *v, npy_intp *tosort, npy_intp num, npy_intp kth,
                 npy_intp *pivots, npy_intp *npiv, npy_intp nkth, void *)
 {
     using T = typename Tag::type;
+#if NPY_ARM_SELECTION_TUNING
+    if (use_already_partitioned_check(nkth) &&
+            ordered_prefix_<Tag>((typename Tag::type *)v, num,
+                                 Idx<true>(tosort)) &&
+            already_partitioned_<Tag>((typename Tag::type *)v, num, kth,
+                                      Idx<true>(tosort))) {
+        store_pivot(kth, kth, pivots, npiv);
+        return 0;
+    }
+#else
     if (use_already_partitioned_check(nkth) &&
             already_partitioned_<Tag>((typename Tag::type *)v, num, kth,
                                       Idx<true>(tosort))) {
         store_pivot(kth, kth, pivots, npiv);
         return 0;
     }
+#endif
     if ((nkth == 1) && (argquickselect_dispatch((T *)v, tosort, num, kth))) {
         return 0;
     }
