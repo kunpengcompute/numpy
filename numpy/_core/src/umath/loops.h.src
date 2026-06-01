@@ -329,6 +329,7 @@ NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void HALF_@func@,
 
 /**end repeat**/
 
+#include "loops_power.dispatch.h"
 /**begin repeat
  *  #TYPE = FLOAT, DOUBLE#
  */
