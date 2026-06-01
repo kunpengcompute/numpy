@@ -951,7 +951,7 @@ foreach gen_mtargets : [
       VXE, VX,
       LSX,
     ]
-  ], 
+  ],
   [
     'loops_arithmetic.dispatch.h',
     src_file.process('src/umath/loops_arithmetic.dispatch.c.src'),

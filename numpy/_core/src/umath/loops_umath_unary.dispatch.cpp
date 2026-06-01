@@ -82,7 +82,7 @@ hwy_cbrt_f64_impl(hn::Vec<hn::ScalableTag<double>> x)
     const hn::ScalableTag<uint64_t> du;
 
     const double poly_coefs[] = {0x1.2c74eaa3ba428p-3, -0x1.08e83026b7e74p-1, 0x1.dd2d3f99e4c0ep-1, 0x1.c14e8ee44767p-2};
-    const double table[] = {0x1.428a2f98d728bp-1, 0x1.965fea53d6e3dp-1, 0x1p0, 
+    const double table[] = {0x1.428a2f98d728bp-1, 0x1.965fea53d6e3dp-1, 0x1p0,
                             0x1.428a2f98d728bp0, 0x1.965fea53d6e3dp0};
     const double one_third = 0x1.5555555555555p-2;
 
