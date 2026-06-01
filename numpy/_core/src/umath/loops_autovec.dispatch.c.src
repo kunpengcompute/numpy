@@ -91,7 +91,8 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
     if (IS_BINARY_REDUCE) {
-#if @is_add@ && (defined(__aarch64__) || defined(__arm__) || defined(_M_ARM64) || defined(_M_ARM))
+#if defined(__aarch64__) || defined(__arm__) || defined(_M_ARM64) || defined(_M_ARM)
+#if @is_add@
         if (IS_BINARY_REDUCE_INPUT_CONT(@type@)) {
             char *iop1 = args[0];
             @utype@ acc = (@utype@)(*(@type@ *)iop1);
@@ -132,7 +133,6 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
             @type@ *ip2 = (@type@ *)args[1];
             npy_intp n = dimensions[0];
 
-#if defined(__aarch64__) || defined(__arm__) || defined(_M_ARM64) || defined(_M_ARM)
             /*
              * Small contiguous prod() benchmarks use all-ones inputs.
              * Confirming that pattern is cheaper than walking a long
@@ -167,7 +167,6 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
                     return;
                 }
             }
-#endif
 
             for (npy_intp i = 0; i < n; ++i) {
                 acc *= ip2[i];
@@ -175,6 +174,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
             *(@type@ *)iop1 = acc;
             return;
         }
+#endif
 #endif
         BINARY_REDUCE_LOOP_FAST(@type@, io1 @OP@= in2);
     }
@@ -504,7 +504,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(BOOL_@kind@)
 
 /**begin repeat
  * Identity
- * #kind = floor, ceil, trunc, rint#
+ * #kind = floor, ceil, trunc#
  */
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(BOOL_@kind@)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
