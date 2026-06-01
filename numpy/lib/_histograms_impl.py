@@ -821,6 +821,24 @@ def histogram(a, bins=10, range=None, density=None, weights=None):
         # Pre-compute histogram scaling factor
         norm_numerator = n_equal_bins
         norm_denom = _unsigned_subtract(last_edge, first_edge)
+        fast_float_index = bin_edges.dtype.kind == 'f'
+
+        # For extreme floating-point ranges, precomputing the scaling
+        # factor can overflow.  Detect this case and fall back to the
+        # original per-element division which avoids overflow by
+        # dividing first (small/small = normal range).
+        if fast_float_index:
+            with np.errstate(over='ignore', divide='ignore'):
+                norm_factor = norm_numerator / norm_denom
+            norm_factor_safe = np.isfinite(norm_factor)
+        else:
+            norm_factor = norm_numerator / norm_denom
+            norm_factor_safe = True
+        
+        if fast_float_index:
+            edge_tol = 16 * np.finfo(bin_edges.dtype).eps * n_equal_bins
+        else:
+            edge_tol = None
 
         # We iterate over blocks here for two reasons: the first is that for
         # large arrays, it is actually faster (for example for a 10^8 array it
@@ -847,20 +865,49 @@ def histogram(a, bins=10, range=None, density=None, weights=None):
             tmp_a = tmp_a.astype(bin_edges.dtype, copy=False)
 
             # Compute the bin indices, and for values that lie exactly on
-            # last_edge we need to subtract one
-            f_indices = ((_unsigned_subtract(tmp_a, first_edge) / norm_denom)
-                         * norm_numerator)
+            # last_edge we need to subtract one.  For floating-point bins,
+            # use a precomputed scaling factor to avoid one division per
+            # element.
+            if fast_float_index and norm_factor_safe:
+                f_indices = (tmp_a - first_edge) * norm_factor
+            else:
+                f_indices = ((_unsigned_subtract(tmp_a, first_edge) / norm_denom)
+                            * norm_numerator)
+            
             indices = f_indices.astype(np.intp)
             indices[indices == n_equal_bins] -= 1
+            
+            # The index computation is not guaranteed to give exactly 
+            # consistent results within ~1 ULP of the bin edges.  Most values,
+            # however, are not close to bin edges.  Avoid the expensive
+            # bin_edges[indices] and bin_edges[indices + 1] lookups for values
+            # that are safely away from edges.
+            if fast_float_index:
+                frac = f_indices - indices
+                edge_candidate = ((frac <= edge_tol) |
+                                (frac >= 1.0 - edge_tol))
 
-            # The index computation is not guaranteed to give exactly
-            # consistent results within ~1 ULP of the bin edges.
-            decrement = tmp_a < bin_edges[indices]
-            indices[decrement] -= 1
-            # The last bin includes the right edge. The other bins do not.
-            increment = ((tmp_a >= bin_edges[indices + 1])
-                         & (indices != n_equal_bins - 1))
-            indices[increment] += 1
+                if np.any(edge_candidate):
+                    edge_a = tmp_a[edge_candidate]
+                    edge_indices = indices[edge_candidate]
+
+                    decrement = edge_a < bin_edges[edge_indices]
+                    edge_indices[decrement] -= 1
+
+                    increment = ((edge_a >= bin_edges[edge_indices + 1])
+                                & (edge_indices != n_equal_bins - 1))
+                    edge_indices[increment] += 1
+
+                    indices[edge_candidate] = edge_indices
+            else:
+                # The index computation is not guaranteed to give exactly
+                # consistent results within ~1 ULP of the bin edges.
+                decrement = tmp_a < bin_edges[indices]
+                indices[decrement] -= 1
+                # The last bin includes the right edge. The other bins do not.
+                increment = ((tmp_a >= bin_edges[indices + 1])
+                            & (indices != n_equal_bins - 1))
+                indices[increment] += 1
 
             # We now compute the histogram using bincount
             if ntype.kind == 'c':

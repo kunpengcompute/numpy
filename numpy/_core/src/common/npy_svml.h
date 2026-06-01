@@ -1,3 +1,7 @@
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #if NPY_SIMD && defined(NPY_HAVE_AVX512_SPR) && defined(NPY_CAN_LINK_SVML)
 extern void __svml_exps32(const npy_half*, npy_half*, npy_intp);
 extern void __svml_exp2s32(const npy_half*, npy_half*, npy_intp);
@@ -68,4 +72,8 @@ extern __m512d __svml_asinh8_ha(__m512d x);
 extern __m512d __svml_acosh8_ha(__m512d x);
 extern __m512d __svml_atanh8_ha(__m512d x);
 extern __m512d __svml_pow8_ha(__m512d x, __m512d y);
+#endif
+
+#ifdef __cplusplus
+}
 #endif

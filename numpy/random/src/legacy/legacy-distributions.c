@@ -39,6 +39,38 @@ double legacy_gauss(aug_bitgen_t *aug_state) {
   }
 }
 
+void legacy_gauss_fill(aug_bitgen_t *aug_state, npy_intp cnt, double *out) {
+  npy_intp i = 0;
+
+  if (cnt == 0) {
+    return;
+  }
+
+  if (aug_state->has_gauss) {
+    out[i++] = aug_state->gauss;
+    aug_state->has_gauss = false;
+    aug_state->gauss = 0.0;
+  }
+
+  while (i + 1 < cnt) {
+    double f, x1, x2, r2;
+
+    do {
+      x1 = 2.0 * legacy_double(aug_state) - 1.0;
+      x2 = 2.0 * legacy_double(aug_state) - 1.0;
+      r2 = x1 * x1 + x2 * x2;
+    } while (r2 >= 1.0 || r2 == 0.0);
+
+    f = sqrt(-2.0 * log(r2) / r2);
+    out[i++] = f * x2;
+    out[i++] = f * x1;
+  }
+
+  if (i < cnt) {
+    out[i] = legacy_gauss(aug_state);
+  }
+}
+
 double legacy_standard_exponential(aug_bitgen_t *aug_state) {
   /* We use -log(1-U) since U is [0, 1) */
   return -log(1.0 - legacy_double(aug_state));
