@@ -76,7 +76,7 @@ asv continuous BASELINE_COMMIT OPTIMIZED_COMMIT -b benchmark_name
 
 详细的变更说明、构建指南和开发说明请参阅以下文档或目录：
 
-- [doc/release/upcoming_changes/90.performance.rst](doc/release/upcoming_changes/90.performance.rst) — ARM64 / 鲲鹏性能优化概述，包含本版本主要优化方向、性能劣化修复、benchmark 覆盖和验证说明。
+- [doc/release/upcoming_changes/00001.arm64_kunpeng_optimization.rst](doc/release/upcoming_changes/00001.arm64_kunpeng_optimization.rst) — ARM64 / 鲲鹏性能优化概述，包含本版本主要优化方向、性能劣化修复、benchmark 覆盖和验证说明。
 - [doc/release/upcoming_changes](doc/release/upcoming_changes) — 即将发布版本的变更说明目录，包含新特性、修复项和其他变更记录模板。
 - [doc/source/building](doc/source/building) — 源码构建相关文档，包含 BLAS/LAPACK、编译器选项、交叉编译、FFT 后端、Meson 构建机制和二进制分发等说明。
 - [doc/source/dev](doc/source/dev) — 开发者文档，包含开发环境、开发流程、调试方法、文档构建、FFT 后端开发、发布流程和代码评审指南等内容。
