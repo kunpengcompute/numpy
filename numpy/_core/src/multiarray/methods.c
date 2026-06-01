@@ -81,6 +81,10 @@ npy_forward_method(
     npy_intp len_kwargs = kwnames != NULL ? PyTuple_GET_SIZE(kwnames) : 0;
     npy_intp total_nargs = (len_args + len_kwargs);
 
+    if (total_nargs == 0) {
+        return PyObject_Vectorcall(callable, &self, 1, NULL);
+    }
+
     NPY_ALLOC_WORKSPACE(new_args, PyObject *, 14, total_nargs + 1);
     if (new_args == NULL) {
         /*
