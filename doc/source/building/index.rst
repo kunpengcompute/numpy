@@ -515,6 +515,7 @@ Customizing builds
 
    compilers_and_options
    blas_lapack
+   fft_backend
    cross_compilation
    redistributable_binaries
 

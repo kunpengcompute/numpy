@@ -112,8 +112,25 @@ inline bool aquicksort_dispatch(T *start, npy_intp* arg, npy_intp num)
 #if !defined(__CYGWIN__)
     using TF = typename np::meta::FixedWidth<T>::Type;
     void (*dispfunc)(TF*, npy_intp*, npy_intp) = nullptr;
-    #include "x86_simd_argsort.dispatch.h"
-    NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::qsort_simd::template ArgQSort, <TF>);
+    constexpr npy_intp kHwyArgQSort = 1024;
+    if constexpr (sizeof(T) == sizeof(uint16_t)) {
+        if (num >= kHwyArgQSort) {
+            // x86-simd-sort lacks 16-bit argsort, use Highway on all platforms
+            #include "highway_qsort_16bit.dispatch.h"
+            NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::highway::qsort_simd::template ArgQSort, <TF>);
+        }
+    }
+    else if constexpr (sizeof(T) == sizeof(uint32_t) || sizeof(T) == sizeof(uint64_t)) {
+#if defined(NPY_CPU_AMD64) || defined(NPY_CPU_X86) // x86 32-bit and 64-bit
+        #include "x86_simd_argsort.dispatch.h"
+        NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::qsort_simd::template ArgQSort, <TF>);
+#else
+        if (num >= kHwyArgQSort) {
+            #include "highway_qsort.dispatch.h"
+            NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::highway::qsort_simd::template ArgQSort, <TF>);
+        }
+#endif
+    }
     if (dispfunc) {
         (*dispfunc)(reinterpret_cast<TF*>(start), arg, num);
         return true;
@@ -215,9 +232,58 @@ quicksort_(type *start, npy_intp num)
 }
 
 template <typename Tag, typename type>
+static inline bool
+is_sorted_or_reverse(type *vv, npy_intp *tosort, npy_intp num)
+{
+    if (num <= 1) {
+        return true;
+    }
+    
+    bool is_ascending = true;
+    bool is_descending = true;
+    
+    for (npy_intp i = 1; i < num && (is_ascending || is_descending); i++) {
+        type prev = vv[tosort[i - 1]];
+        type curr = vv[tosort[i]];
+        
+        if (Tag::less(curr, prev)) {
+            is_ascending = false;
+        }
+        if (Tag::less(prev, curr)) {
+            is_descending = false;
+        }
+    }
+    
+    if (is_ascending) {
+        return true;
+    }
+    
+    if (is_descending) {
+        npy_intp *left = tosort;
+        npy_intp *right = tosort + num - 1;
+        while (left < right) {
+            std::swap(*left, *right);
+            left++;
+            right--;
+        }
+        return true;
+    }
+    
+    return false;
+}
+
+template <typename Tag, typename type>
 static int
 aquicksort_(type *vv, npy_intp *tosort, npy_intp num)
 {
+    if (num <= 1) {
+        return 0;
+    }
+    
+    if (is_sorted_or_reverse<Tag>(vv, tosort, num)) {
+        return 0;
+    }
+    
     type *v = vv;
     type vp;
     npy_intp *pl = tosort;
@@ -406,6 +472,48 @@ string_quicksort_(type *start, npy_intp num, void *varr)
 }
 
 template <typename Tag, typename type>
+static inline bool
+string_is_sorted_or_reverse(type *vv, npy_intp *tosort, npy_intp num, size_t len)
+{
+    if (num <= 1) {
+        return true;
+    }
+    
+    type *v = vv;
+    bool is_ascending = true;
+    bool is_descending = true;
+    
+    for (npy_intp i = 1; i < num && (is_ascending || is_descending); i++) {
+        type *prev = v + tosort[i - 1] * len;
+        type *curr = v + tosort[i] * len;
+        
+        if (Tag::less(curr, prev, len)) {
+            is_ascending = false;
+        }
+        if (Tag::less(prev, curr, len)) {
+            is_descending = false;
+        }
+    }
+    
+    if (is_ascending) {
+        return true;
+    }
+    
+    if (is_descending) {
+        npy_intp *left = tosort;
+        npy_intp *right = tosort + num - 1;
+        while (left < right) {
+            std::swap(*left, *right);
+            left++;
+            right--;
+        }
+        return true;
+    }
+    
+    return false;
+}
+
+template <typename Tag, typename type>
 static int
 string_aquicksort_(type *vv, npy_intp *tosort, npy_intp num, void *varr)
 {
@@ -424,6 +532,10 @@ string_aquicksort_(type *vv, npy_intp *tosort, npy_intp num, void *varr)
 
     /* Items that have zero size don't make sense to sort */
     if (len == 0) {
+        return 0;
+    }
+    
+    if (string_is_sorted_or_reverse<Tag>(vv, tosort, num, len)) {
         return 0;
     }
 
@@ -628,6 +740,50 @@ npy_aquicksort(void *vv, npy_intp *tosort, npy_intp num, void *varr)
     return npy_aquicksort_impl(vv, tosort, num, varr, elsize, cmp);
 }
 
+static inline bool
+is_sorted_or_reverse_generic(void *vv, npy_intp *tosort, npy_intp num,
+                             npy_intp elsize, PyArray_CompareFunc *cmp, void *arr)
+{
+    if (num <= 1) {
+        return true;
+    }
+    
+    char *v = (char *)vv;
+    bool is_ascending = true;
+    bool is_descending = true;
+    
+    for (npy_intp i = 1; i < num && (is_ascending || is_descending); i++) {
+        char *prev = v + tosort[i - 1] * elsize;
+        char *curr = v + tosort[i] * elsize;
+        
+        if (cmp(curr, prev, arr) < 0) {
+            is_ascending = false;
+        }
+        if (cmp(prev, curr, arr) < 0) {
+            is_descending = false;
+        }
+    }
+    
+    if (is_ascending) {
+        return true;
+    }
+    
+    if (is_descending) {
+        npy_intp *left = tosort;
+        npy_intp *right = tosort + num - 1;
+        while (left < right) {
+            npy_intp tmp = *left;
+            *left = *right;
+            *right = tmp;
+            left++;
+            right--;
+        }
+        return true;
+    }
+    
+    return false;
+}
+
 NPY_NO_EXPORT int
 npy_aquicksort_impl(void *vv, npy_intp *tosort, npy_intp num, void *varr,
                    npy_intp elsize, PyArray_CompareFunc *cmp)
@@ -646,6 +802,10 @@ npy_aquicksort_impl(void *vv, npy_intp *tosort, npy_intp num, void *varr,
 
     /* Items that have zero size don't make sense to sort */
     if (elsize == 0) {
+        return 0;
+    }
+    
+    if (is_sorted_or_reverse_generic(vv, tosort, num, elsize, cmp, arr)) {
         return 0;
     }
 
@@ -879,12 +1039,18 @@ NPY_NO_EXPORT int
 aquicksort_short(void *vv, npy_intp *tosort, npy_intp n,
                  void *NPY_UNUSED(varr))
 {
+    if (aquicksort_dispatch((npy_short *)vv, tosort, n)) {
+        return 0;
+    }
     return aquicksort_<npy::short_tag>((npy_short *)vv, tosort, n);
 }
 NPY_NO_EXPORT int
 aquicksort_ushort(void *vv, npy_intp *tosort, npy_intp n,
                   void *NPY_UNUSED(varr))
 {
+    if (aquicksort_dispatch((npy_ushort *)vv, tosort, n)) {
+        return 0;
+    }
     return aquicksort_<npy::ushort_tag>((npy_ushort *)vv, tosort, n);
 }
 NPY_NO_EXPORT int
@@ -941,6 +1107,9 @@ aquicksort_ulonglong(void *vv, npy_intp *tosort, npy_intp n,
 NPY_NO_EXPORT int
 aquicksort_half(void *vv, npy_intp *tosort, npy_intp n, void *NPY_UNUSED(varr))
 {
+    if (aquicksort_dispatch((np::Half *)vv, tosort, n)) {
+        return 0;
+    }
     return aquicksort_<npy::half_tag>((npy_half *)vv, tosort, n);
 }
 NPY_NO_EXPORT int

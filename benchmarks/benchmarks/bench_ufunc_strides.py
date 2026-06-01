@@ -149,6 +149,7 @@ class BinaryInt(_AbstractBinary):
     ]
 
 class BinaryIntContig(_AbstractBinary):
+    arrlen = 10000
     params = [
         [getattr(np, uf) for uf in (
             'add', 'subtract', 'multiply', 'bitwise_and', 'bitwise_or',

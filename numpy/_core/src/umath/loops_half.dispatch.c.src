@@ -34,8 +34,8 @@ NPY_FINLINE void npyvh_store_till_f16(npy_half *ptr, npy_uintp nlane, npyvh_f16 
 }
 
 /**begin repeat
- * #func = sin, cos, tan, exp, exp2, expm1, log, log2, log10, log1p, cbrt, asin, acos, atan, sinh, cosh, tanh, asinh, acosh, atanh#
- * #default_val = 0, 0, 0, 0, 0, 0x3c00, 0x3c00, 0x3c00, 0x3c00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x3c00, 0#
+ * #func = expm1, log10, log1p, asin, acos, atan, sinh, cosh, tanh, asinh, acosh, atanh#
+ * #default_val = 0x3c00, 0x3c00, 0, 0, 0, 0, 0, 0, 0, 0x3c00, 0x3c00, 0#
  */
 static void
 avx512_@func@_f16(const npy_half *src, npy_half *dst, npy_intp len)
@@ -65,8 +65,8 @@ avx512_@func@_f16(const npy_half *src, npy_half *dst, npy_intp len)
 #endif // NPY__SVML_IS_ENABLED
 
 /**begin repeat
- *  #func = sin, cos, tan, exp, exp2, expm1, log, log2, log10, log1p, cbrt, arcsin, arccos, arctan, sinh, cosh, tanh, arcsinh, arccosh, arctanh#
- *  #intrin = sin, cos, tan, exp, exp2, expm1, log, log2, log10, log1p, cbrt, asin, acos, atan, sinh, cosh, tanh, asinh, acosh, atanh#
+ *  #func = expm1, log10, log1p, arcsin, arccos, arctan, sinh, cosh, tanh, arcsinh, arccosh, arctanh#
+ *  #intrin = expm1, log10, log1p, asin, acos, atan, sinh, cosh, tanh, asinh, acosh, atanh#
  */
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_@func@)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))

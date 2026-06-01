@@ -8,6 +8,7 @@ import warnings
 
 import numpy as np
 from numpy._core import overrides
+from numpy._core._multiarray_umath import _histogramdd_uniform2d
 
 __all__ = ['histogram', 'histogramdd', 'histogram_bin_edges']
 
@@ -821,6 +822,24 @@ def histogram(a, bins=10, range=None, density=None, weights=None):
         # Pre-compute histogram scaling factor
         norm_numerator = n_equal_bins
         norm_denom = _unsigned_subtract(last_edge, first_edge)
+        fast_float_index = bin_edges.dtype.kind == 'f'
+
+        # For extreme floating-point ranges, precomputing the scaling
+        # factor can overflow.  Detect this case and fall back to the
+        # original per-element division which avoids overflow by
+        # dividing first (small/small = normal range).
+        if fast_float_index:
+            with np.errstate(over='ignore', divide='ignore'):
+                norm_factor = norm_numerator / norm_denom
+            norm_factor_safe = np.isfinite(norm_factor)
+        else:
+            norm_factor = norm_numerator / norm_denom
+            norm_factor_safe = True
+        
+        if fast_float_index:
+            edge_tol = 16 * np.finfo(bin_edges.dtype).eps * n_equal_bins
+        else:
+            edge_tol = None
 
         # We iterate over blocks here for two reasons: the first is that for
         # large arrays, it is actually faster (for example for a 10^8 array it
@@ -847,20 +866,49 @@ def histogram(a, bins=10, range=None, density=None, weights=None):
             tmp_a = tmp_a.astype(bin_edges.dtype, copy=False)
 
             # Compute the bin indices, and for values that lie exactly on
-            # last_edge we need to subtract one
-            f_indices = ((_unsigned_subtract(tmp_a, first_edge) / norm_denom)
-                         * norm_numerator)
+            # last_edge we need to subtract one.  For floating-point bins,
+            # use a precomputed scaling factor to avoid one division per
+            # element.
+            if fast_float_index and norm_factor_safe:
+                f_indices = (tmp_a - first_edge) * norm_factor
+            else:
+                f_indices = ((_unsigned_subtract(tmp_a, first_edge) / norm_denom)
+                            * norm_numerator)
+            
             indices = f_indices.astype(np.intp)
             indices[indices == n_equal_bins] -= 1
+            
+            # The index computation is not guaranteed to give exactly 
+            # consistent results within ~1 ULP of the bin edges.  Most values,
+            # however, are not close to bin edges.  Avoid the expensive
+            # bin_edges[indices] and bin_edges[indices + 1] lookups for values
+            # that are safely away from edges.
+            if fast_float_index:
+                frac = f_indices - indices
+                edge_candidate = ((frac <= edge_tol) |
+                                (frac >= 1.0 - edge_tol))
 
-            # The index computation is not guaranteed to give exactly
-            # consistent results within ~1 ULP of the bin edges.
-            decrement = tmp_a < bin_edges[indices]
-            indices[decrement] -= 1
-            # The last bin includes the right edge. The other bins do not.
-            increment = ((tmp_a >= bin_edges[indices + 1])
-                         & (indices != n_equal_bins - 1))
-            indices[increment] += 1
+                if np.any(edge_candidate):
+                    edge_a = tmp_a[edge_candidate]
+                    edge_indices = indices[edge_candidate]
+
+                    decrement = edge_a < bin_edges[edge_indices]
+                    edge_indices[decrement] -= 1
+
+                    increment = ((edge_a >= bin_edges[edge_indices + 1])
+                                & (edge_indices != n_equal_bins - 1))
+                    edge_indices[increment] += 1
+
+                    indices[edge_candidate] = edge_indices
+            else:
+                # The index computation is not guaranteed to give exactly
+                # consistent results within ~1 ULP of the bin edges.
+                decrement = tmp_a < bin_edges[indices]
+                indices[decrement] -= 1
+                # The last bin includes the right edge. The other bins do not.
+                increment = ((tmp_a >= bin_edges[indices + 1])
+                            & (indices != n_equal_bins - 1))
+                indices[increment] += 1
 
             # We now compute the histogram using bincount
             if ntype.kind == 'c':
@@ -989,6 +1037,7 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
     nbin = np.empty(D, np.intp)
     edges = D * [None]
     dedges = D * [None]
+    uniform_bins = D * [False]
     if weights is not None:
         weights = np.asarray(weights)
 
@@ -1002,6 +1051,8 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
         # bins is an integer
         bins = D * [bins]
 
+    explicit_range = range is not None
+
     # normalize the range argument
     if range is None:
         range = (None,) * D
@@ -1011,6 +1062,7 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
     # Create edge arrays
     for i in _range(D):
         if np.ndim(bins[i]) == 0:
+            uniform_bins[i] = True
             if bins[i] < 1:
                 raise ValueError(
                     f'`bins[{i}]` must be positive, when an integer')
@@ -1035,6 +1087,15 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
 
         nbin[i] = len(edges[i]) + 1  # includes an outlier on each end
         dedges[i] = np.diff(edges[i])
+
+    if (D == 2 and weights is None and not density and explicit_range and
+            range[0] is not None and range[1] is not None and
+            uniform_bins[0] and uniform_bins[1] and
+            sample.dtype == np.float64 and sample.flags.c_contiguous):
+        hist = _histogramdd_uniform2d(
+            sample, nbin[0] - 2, nbin[1] - 2,
+            edges[0][0], edges[0][-1], edges[1][0], edges[1][-1])
+        return hist, edges
 
     # Compute the bin number each sample falls into.
     Ncount = tuple(

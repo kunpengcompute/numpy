@@ -20,10 +20,16 @@
 
 #include "ufunc_object.h"
 
+#include <float.h>
+#include <stdint.h>
 #include <string.h> /* for memchr */
 
 /* Use Libdivide for faster division */
 #include "numpy/libdivide/libdivide.h"
+
+#if defined(__aarch64__)
+    #include <arm_neon.h>
+#endif
 
 /*
  * cutoff blocksize for pairwise summation
@@ -35,6 +41,170 @@
 
 /** Provides the various *_LOOP macros */
 #include "fast_loop_macros.h"
+
+#if defined(__aarch64__)
+static inline int
+aarch64_logical_not_contig_ok(char **args, npy_intp const *steps,
+        size_t elsize, npy_intp len)
+{
+    return len > 0 &&
+            steps[0] == (npy_intp)elsize &&
+            steps[1] == (npy_intp)sizeof(npy_bool) &&
+            abs_ptrdiff(args[1], args[0]) >= AUTOVEC_OVERLAP_SIZE;
+}
+
+static inline int
+aarch64_logical_not_strided_ok(char **args, npy_intp const *steps,
+        size_t elsize, npy_intp len)
+{
+    return len >= 16 &&
+            (steps[0] == (npy_intp)elsize ||
+             steps[0] == (npy_intp)(4 * elsize)) &&
+            (steps[1] == (npy_intp)sizeof(npy_bool) ||
+             steps[1] == (npy_intp)(2 * sizeof(npy_bool))) &&
+            abs_ptrdiff(args[1], args[0]) >= AUTOVEC_OVERLAP_SIZE;
+}
+
+static inline void
+HALF_logical_not_aarch64_contig(char **args, npy_intp len)
+{
+    const uint16_t *ip = (const uint16_t *)args[0];
+    npy_bool *op = (npy_bool *)args[1];
+    const uint16x8_t sign_mask = vdupq_n_u16((uint16_t)0x7fff);
+    const uint16x8_t zero = vdupq_n_u16(0);
+    const uint8x8_t one = vdup_n_u8(1);
+
+    for (; len >= 8; len -= 8, ip += 8, op += 8) {
+        uint16x8_t mag = vandq_u16(vld1q_u16(ip), sign_mask);
+        uint16x8_t cmp = vceqq_u16(mag, zero);
+        vst1_u8(op, vand_u8(vmovn_u16(cmp), one));
+    }
+
+    for (; len > 0; --len, ++ip, ++op) {
+        *op = (npy_bool)((*ip & 0x7fffu) == 0);
+    }
+}
+
+static inline void
+FLOAT_logical_not_aarch64_contig(char **args, npy_intp len)
+{
+    const float *ip = (const float *)args[0];
+    npy_bool *op = (npy_bool *)args[1];
+    const float32x4_t zero = vdupq_n_f32(0.0f);
+    const uint8x8_t one = vdup_n_u8(1);
+
+    for (; len >= 8; len -= 8, ip += 8, op += 8) {
+        uint32x4_t cmp0 = vceqq_f32(vld1q_f32(ip), zero);
+        uint32x4_t cmp1 = vceqq_f32(vld1q_f32(ip + 4), zero);
+        uint16x4_t lo = vmovn_u32(cmp0);
+        uint16x4_t hi = vmovn_u32(cmp1);
+        vst1_u8(op, vand_u8(vmovn_u16(vcombine_u16(lo, hi)), one));
+    }
+
+    for (; len > 0; --len, ++ip, ++op) {
+        *op = (npy_bool)(*ip == 0.0f);
+    }
+}
+
+static inline void
+DOUBLE_logical_not_aarch64_contig(char **args, npy_intp len)
+{
+    const double *ip = (const double *)args[0];
+    npy_bool *op = (npy_bool *)args[1];
+    const float64x2_t zero = vdupq_n_f64(0.0);
+    const uint8x8_t one = vdup_n_u8(1);
+
+    for (; len >= 8; len -= 8, ip += 8, op += 8) {
+        uint64x2_t cmp0 = vceqq_f64(vld1q_f64(ip), zero);
+        uint64x2_t cmp1 = vceqq_f64(vld1q_f64(ip + 2), zero);
+        uint64x2_t cmp2 = vceqq_f64(vld1q_f64(ip + 4), zero);
+        uint64x2_t cmp3 = vceqq_f64(vld1q_f64(ip + 6), zero);
+        uint32x2_t p0 = vmovn_u64(cmp0);
+        uint32x2_t p1 = vmovn_u64(cmp1);
+        uint32x2_t p2 = vmovn_u64(cmp2);
+        uint32x2_t p3 = vmovn_u64(cmp3);
+        uint16x4_t lo = vmovn_u32(vcombine_u32(p0, p1));
+        uint16x4_t hi = vmovn_u32(vcombine_u32(p2, p3));
+        vst1_u8(op, vand_u8(vmovn_u16(vcombine_u16(lo, hi)), one));
+    }
+
+    for (; len > 0; --len, ++ip, ++op) {
+        *op = (npy_bool)(*ip == 0.0);
+    }
+}
+
+static inline void
+HALF_logical_not_aarch64_strided(char **args,
+        npy_intp const *steps, npy_intp len)
+{
+    const char *ip = args[0];
+    char *op = args[1];
+    const npy_intp is = steps[0];
+    const npy_intp os = steps[1];
+
+    for (; len >= 8; len -= 8, ip += 8 * is, op += 8 * os) {
+        *((npy_bool *)(op + 0 * os)) = (npy_bool)((*(const uint16_t *)(ip + 0 * is) & 0x7fffu) == 0);
+        *((npy_bool *)(op + 1 * os)) = (npy_bool)((*(const uint16_t *)(ip + 1 * is) & 0x7fffu) == 0);
+        *((npy_bool *)(op + 2 * os)) = (npy_bool)((*(const uint16_t *)(ip + 2 * is) & 0x7fffu) == 0);
+        *((npy_bool *)(op + 3 * os)) = (npy_bool)((*(const uint16_t *)(ip + 3 * is) & 0x7fffu) == 0);
+        *((npy_bool *)(op + 4 * os)) = (npy_bool)((*(const uint16_t *)(ip + 4 * is) & 0x7fffu) == 0);
+        *((npy_bool *)(op + 5 * os)) = (npy_bool)((*(const uint16_t *)(ip + 5 * is) & 0x7fffu) == 0);
+        *((npy_bool *)(op + 6 * os)) = (npy_bool)((*(const uint16_t *)(ip + 6 * is) & 0x7fffu) == 0);
+        *((npy_bool *)(op + 7 * os)) = (npy_bool)((*(const uint16_t *)(ip + 7 * is) & 0x7fffu) == 0);
+    }
+    for (; len > 0; --len, ip += is, op += os) {
+        *(npy_bool *)op = (npy_bool)((*(const uint16_t *)ip & 0x7fffu) == 0);
+    }
+}
+
+static inline void
+FLOAT_logical_not_aarch64_strided(char **args,
+        npy_intp const *steps, npy_intp len)
+{
+    const char *ip = args[0];
+    char *op = args[1];
+    const npy_intp is = steps[0];
+    const npy_intp os = steps[1];
+
+    for (; len >= 8; len -= 8, ip += 8 * is, op += 8 * os) {
+        *((npy_bool *)(op + 0 * os)) = (npy_bool)(*(const float *)(ip + 0 * is) == 0.0f);
+        *((npy_bool *)(op + 1 * os)) = (npy_bool)(*(const float *)(ip + 1 * is) == 0.0f);
+        *((npy_bool *)(op + 2 * os)) = (npy_bool)(*(const float *)(ip + 2 * is) == 0.0f);
+        *((npy_bool *)(op + 3 * os)) = (npy_bool)(*(const float *)(ip + 3 * is) == 0.0f);
+        *((npy_bool *)(op + 4 * os)) = (npy_bool)(*(const float *)(ip + 4 * is) == 0.0f);
+        *((npy_bool *)(op + 5 * os)) = (npy_bool)(*(const float *)(ip + 5 * is) == 0.0f);
+        *((npy_bool *)(op + 6 * os)) = (npy_bool)(*(const float *)(ip + 6 * is) == 0.0f);
+        *((npy_bool *)(op + 7 * os)) = (npy_bool)(*(const float *)(ip + 7 * is) == 0.0f);
+    }
+    for (; len > 0; --len, ip += is, op += os) {
+        *(npy_bool *)op = (npy_bool)(*(const float *)ip == 0.0f);
+    }
+}
+
+static inline void
+DOUBLE_logical_not_aarch64_strided(char **args,
+        npy_intp const *steps, npy_intp len)
+{
+    const char *ip = args[0];
+    char *op = args[1];
+    const npy_intp is = steps[0];
+    const npy_intp os = steps[1];
+
+    for (; len >= 8; len -= 8, ip += 8 * is, op += 8 * os) {
+        *((npy_bool *)(op + 0 * os)) = (npy_bool)(*(const double *)(ip + 0 * is) == 0.0);
+        *((npy_bool *)(op + 1 * os)) = (npy_bool)(*(const double *)(ip + 1 * is) == 0.0);
+        *((npy_bool *)(op + 2 * os)) = (npy_bool)(*(const double *)(ip + 2 * is) == 0.0);
+        *((npy_bool *)(op + 3 * os)) = (npy_bool)(*(const double *)(ip + 3 * is) == 0.0);
+        *((npy_bool *)(op + 4 * os)) = (npy_bool)(*(const double *)(ip + 4 * is) == 0.0);
+        *((npy_bool *)(op + 5 * os)) = (npy_bool)(*(const double *)(ip + 5 * is) == 0.0);
+        *((npy_bool *)(op + 6 * os)) = (npy_bool)(*(const double *)(ip + 6 * is) == 0.0);
+        *((npy_bool *)(op + 7 * os)) = (npy_bool)(*(const double *)(ip + 7 * is) == 0.0);
+    }
+    for (; len > 0; --len, ip += is, op += os) {
+        *(npy_bool *)op = (npy_bool)(*(const double *)ip == 0.0);
+    }
+}
+#endif
 
 /******************************************************************************
  **                          GENERIC FLOAT LOOPS                             **
@@ -1226,6 +1396,18 @@ NPY_NO_EXPORT void
 NPY_NO_EXPORT void
 @TYPE@_logical_not(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
+#if defined(__aarch64__) && @fd@
+    if (aarch64_logical_not_contig_ok(
+            args, steps, sizeof(@type@), dimensions[0])) {
+        @TYPE@_logical_not_aarch64_contig(args, dimensions[0]);
+        return;
+    }
+    if (aarch64_logical_not_strided_ok(
+            args, steps, sizeof(@type@), dimensions[0])) {
+        @TYPE@_logical_not_aarch64_strided(args, steps, dimensions[0]);
+        return;
+    }
+#endif
     UNARY_LOOP {
         const @type@ in1 = *(@type@ *)ip1;
         *((npy_bool *)op1) = !in1;
@@ -1538,6 +1720,24 @@ LONGDOUBLE_ldexp(char **args, npy_intp const *dimensions, npy_intp const *steps,
     }
 }
 
+NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(LONGDOUBLE_rad2deg)
+(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
+{
+    UNARY_LOOP {
+        const npy_longdouble in1 = *(npy_longdouble *)ip1;
+        *(npy_longdouble *)op1 = npy_rad2degl(in1);
+    }
+}
+
+NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(LONGDOUBLE_deg2rad)
+(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
+{
+    UNARY_LOOP {
+        const npy_longdouble in1 = *(npy_longdouble *)ip1;
+        *(npy_longdouble *)op1 = npy_deg2radl(in1);
+    }
+}
+
 /*
  *****************************************************************************
  **                          HALF-FLOAT LOOPS                               **
@@ -1550,10 +1750,28 @@ LONGDOUBLE_ldexp(char **args, npy_intp const *dimensions, npy_intp const *steps,
  * # kind = add, subtract, multiply, divide#
  * # OP = +, -, *, /#
  * # PW = 1, 0, 0, 0#
+ * # is_mul = 0, 0, 1, 0#
  */
 NPY_NO_EXPORT void
 HALF_@kind@(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
+    if (!IS_BINARY_REDUCE && args[0] == args[1] && steps[0] == steps[1] &&
+            steps[0] == steps[2] && steps[0] == sizeof(npy_half)) {
+        char *src = args[0];
+        char *dst = args[2];
+        npy_intp len = dimensions[0];
+        for (; len > 0; --len, src += steps[0], dst += steps[2]) {
+            const float in1 = npy_half_to_float(*(npy_half *)src);
+#if @PW@
+            *((npy_half *)dst) = npy_float_to_half(in1 + in1);
+#elif @is_mul@
+            *((npy_half *)dst) = npy_float_to_half(in1 * in1);
+#else
+            *((npy_half *)dst) = npy_float_to_half(in1 @OP@ in1);
+#endif
+        }
+        return;
+    }
     if (IS_BINARY_REDUCE) {
         char *iop1 = args[0];
         float io1 = npy_half_to_float(*(npy_half *)iop1);
@@ -1637,6 +1855,18 @@ HALF_logical_xor(char **args, npy_intp const *dimensions, npy_intp const *steps,
 NPY_NO_EXPORT void
 HALF_logical_not(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
+#if defined(__aarch64__)
+    if (aarch64_logical_not_contig_ok(
+            args, steps, sizeof(npy_half), dimensions[0])) {
+        HALF_logical_not_aarch64_contig(args, dimensions[0]);
+        return;
+    }
+    if (aarch64_logical_not_strided_ok(
+            args, steps, sizeof(npy_half), dimensions[0])) {
+        HALF_logical_not_aarch64_strided(args, steps, dimensions[0]);
+        return;
+    }
+#endif
     UNARY_LOOP {
         const npy_half in1 = *(npy_half *)ip1;
         *((npy_bool *)op1) = npy_half_iszero(in1);
@@ -1849,15 +2079,6 @@ HALF_square(char **args, npy_intp const *dimensions, npy_intp const *steps, void
 }
 
 NPY_NO_EXPORT void
-HALF_reciprocal(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
-{
-    UNARY_LOOP {
-        const float in1 = npy_half_to_float(*(npy_half *)ip1);
-        *((npy_half *)op1) = npy_float_to_half(1/in1);
-    }
-}
-
-NPY_NO_EXPORT void
 HALF__ones_like(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
 {
     OUTPUT_LOOP {
@@ -1982,6 +2203,53 @@ HALF_ldexp_int64(char **args, npy_intp const *dimensions, npy_intp const *steps,
 #define CEQ(xr,xi,yr,yi) (xr == yr && xi == yi)
 #define CNE(xr,xi,yr,yi) (xr != yr || xi != yi)
 
+#if defined(__aarch64__)
+static inline float32x4_t
+neon_cfloat_div_step_re(float32x4_t a_re, float32x4_t a_im,
+                        float32x4_t b_re, float32x4_t b_im)
+{
+    float32x4_t b_re_abs = vabsq_f32(b_re);
+    float32x4_t b_im_abs = vabsq_f32(b_im);
+    uint32x4_t mask = vcgeq_f32(b_re_abs, b_im_abs);
+
+    float32x4_t ratio = vdivq_f32(
+            vbslq_f32(mask, b_im, b_re),
+            vbslq_f32(mask, b_re, b_im));
+    float32x4_t den = vmlaq_f32(
+            vbslq_f32(mask, b_re, b_im),
+            vbslq_f32(mask, b_im, b_re),
+            ratio);
+    float32x4_t scl = vdivq_f32(vdupq_n_f32(1.0f), den);
+    float32x4_t num = vmlaq_f32(
+            vbslq_f32(mask, a_re, a_im),
+            vbslq_f32(mask, a_im, a_re),
+            ratio);
+    return vmulq_f32(num, scl);
+}
+
+static inline float32x4_t
+neon_cfloat_div_step_im(float32x4_t a_re, float32x4_t a_im,
+                        float32x4_t b_re, float32x4_t b_im)
+{
+    float32x4_t b_re_abs = vabsq_f32(b_re);
+    float32x4_t b_im_abs = vabsq_f32(b_im);
+    uint32x4_t mask = vcgeq_f32(b_re_abs, b_im_abs);
+
+    float32x4_t ratio = vdivq_f32(
+            vbslq_f32(mask, b_im, b_re),
+            vbslq_f32(mask, b_re, b_im));
+    float32x4_t den = vmlaq_f32(
+            vbslq_f32(mask, b_re, b_im),
+            vbslq_f32(mask, b_im, b_re),
+            ratio);
+    float32x4_t scl = vdivq_f32(vdupq_n_f32(1.0f), den);
+    float32x4_t num = vsubq_f32(
+            vbslq_f32(mask, a_im, vmulq_f32(a_im, ratio)),
+            vbslq_f32(mask, vmulq_f32(a_re, ratio), a_re));
+    return vmulq_f32(num, scl);
+}
+#endif
+
 /**begin repeat
  * complex types
  * #TYPE = CFLOAT, CDOUBLE, CLONGDOUBLE#
@@ -1989,6 +2257,7 @@ HALF_ldexp_int64(char **args, npy_intp const *dimensions, npy_intp const *steps,
  * #c = f, , l#
  * #C = F, , L#
  * #SIMD = 1, 1, 0#
+ * #is_cfloat = 1, 0, 0#
  */
 
 #if !@SIMD@
@@ -2096,6 +2365,75 @@ NPY_NO_EXPORT int @TYPE@_multiply_indexed
 NPY_NO_EXPORT void
 @TYPE@_divide(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
+#if @is_cfloat@ && defined(__aarch64__)
+    if (steps[0] == 2 * (npy_intp)sizeof(@ftype@) &&
+            steps[1] == 2 * (npy_intp)sizeof(@ftype@) &&
+            steps[2] == 2 * (npy_intp)sizeof(@ftype@)) {
+        const float32x4_t zero = vdupq_n_f32(0.0f);
+        const float32x4_t fin_max = vdupq_n_f32(FLT_MAX);
+        char *src0 = args[0], *src1 = args[1], *dst = args[2];
+        npy_intp len = dimensions[0];
+
+        while (len >= 4) {
+            float32x4x2_t a = vld2q_f32((const float *)src0);
+            float32x4x2_t b = vld2q_f32((const float *)src1);
+
+            uint32x4_t a_re_finite = vcleq_f32(vabsq_f32(a.val[0]), fin_max);
+            uint32x4_t a_im_finite = vcleq_f32(vabsq_f32(a.val[1]), fin_max);
+            uint32x4_t b_re_finite = vcleq_f32(vabsq_f32(b.val[0]), fin_max);
+            uint32x4_t b_im_finite = vcleq_f32(vabsq_f32(b.val[1]), fin_max);
+            uint32x4_t b_nonzero = vorrq_u32(
+                    vcgtq_f32(vabsq_f32(b.val[0]), zero),
+                    vcgtq_f32(vabsq_f32(b.val[1]), zero));
+            uint32x4_t ok = vandq_u32(
+                    vandq_u32(vandq_u32(a_re_finite, a_im_finite),
+                              vandq_u32(b_re_finite, b_im_finite)),
+                    b_nonzero);
+            uint64x2_t ok64 = vreinterpretq_u64_u32(ok);
+            if ((vgetq_lane_u64(ok64, 0) & vgetq_lane_u64(ok64, 1)) != UINT64_MAX) {
+                break;
+            }
+
+            float32x4x2_t r;
+            r.val[0] = neon_cfloat_div_step_re(a.val[0], a.val[1], b.val[0], b.val[1]);
+            r.val[1] = neon_cfloat_div_step_im(a.val[0], a.val[1], b.val[0], b.val[1]);
+            vst2q_f32((float *)dst, r);
+
+            src0 += 8 * (npy_intp)sizeof(@ftype@);
+            src1 += 8 * (npy_intp)sizeof(@ftype@);
+            dst += 8 * (npy_intp)sizeof(@ftype@);
+            len -= 4;
+        }
+
+        for (; len > 0; --len, src0 += steps[0], src1 += steps[1], dst += steps[2]) {
+            const @ftype@ in1r = ((@ftype@ *)src0)[0];
+            const @ftype@ in1i = ((@ftype@ *)src0)[1];
+            const @ftype@ in2r = ((@ftype@ *)src1)[0];
+            const @ftype@ in2i = ((@ftype@ *)src1)[1];
+            const @ftype@ in2r_abs = npy_fabs@c@(in2r);
+            const @ftype@ in2i_abs = npy_fabs@c@(in2i);
+            if (in2r_abs >= in2i_abs) {
+                if (in2r_abs == 0 && in2i_abs == 0) {
+                    ((@ftype@ *)dst)[0] = in1r/in2r_abs;
+                    ((@ftype@ *)dst)[1] = in1i/in2i_abs;
+                }
+                else {
+                    const @ftype@ rat = in2i/in2r;
+                    const @ftype@ scl = 1.0@c@/(in2r + in2i*rat);
+                    ((@ftype@ *)dst)[0] = (in1r + in1i*rat)*scl;
+                    ((@ftype@ *)dst)[1] = (in1i - in1r*rat)*scl;
+                }
+            }
+            else {
+                const @ftype@ rat = in2r/in2i;
+                const @ftype@ scl = 1.0@c@/(in2i + in2r*rat);
+                ((@ftype@ *)dst)[0] = (in1r*rat + in1i)*scl;
+                ((@ftype@ *)dst)[1] = (in1i*rat - in1r)*scl;
+            }
+        }
+        return;
+    }
+#endif
     BINARY_LOOP {
         const @ftype@ in1r = ((@ftype@ *)ip1)[0];
         const @ftype@ in1i = ((@ftype@ *)ip1)[1];
@@ -2214,7 +2552,6 @@ NPY_NO_EXPORT void
         ((@ftype@ *)op1)[1] = in1r*in1i + in1i*in1r;
     }
 }
-#endif
 
 NPY_NO_EXPORT void
 @TYPE@_reciprocal(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
@@ -2235,6 +2572,7 @@ NPY_NO_EXPORT void
         }
     }
 }
+#endif
 
 NPY_NO_EXPORT void
 @TYPE@__ones_like(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
@@ -2315,29 +2653,6 @@ NPY_NO_EXPORT void
         }
     }
 }
-
-/**begin repeat1
- * #kind = maximum, minimum#
- * #OP = CGE, CLE#
- */
-NPY_NO_EXPORT void
-@TYPE@_@kind@(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
-{
-    BINARY_LOOP {
-        @ftype@ in1r = ((@ftype@ *)ip1)[0];
-        @ftype@ in1i = ((@ftype@ *)ip1)[1];
-        const @ftype@ in2r = ((@ftype@ *)ip2)[0];
-        const @ftype@ in2i = ((@ftype@ *)ip2)[1];
-        if ( !(npy_isnan(in1r) || npy_isnan(in1i) || @OP@(in1r, in1i, in2r, in2i))) {
-            in1r = in2r;
-            in1i = in2i;
-        }
-        ((@ftype@ *)op1)[0] = in1r;
-        ((@ftype@ *)op1)[1] = in1i;
-    }
-    npy_clear_floatstatus_barrier((char*)dimensions);
-}
-/**end repeat1**/
 
 /**begin repeat1
  * #kind = fmax, fmin#

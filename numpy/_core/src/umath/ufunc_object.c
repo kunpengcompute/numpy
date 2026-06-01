@@ -39,6 +39,7 @@
 #include "numpy/arrayobject.h"
 #include "numpy/ufuncobject.h"
 #include "numpy/arrayscalars.h"
+#include "numpy/npy_math.h"
 #include "lowlevel_strided_loops.h"
 #include "ufunc_type_resolution.h"
 #include "reduction.h"
@@ -67,6 +68,49 @@
 #include "multiarraymodule.h"
 #include "number.h"
 #include "scalartypes.h"  // for is_anyscalar_exact and scalar_value
+
+/*
+ * Generic scalar fast path framework for unary ufuncs.
+ * This framework allows adding new ufuncs by simply adding entries to the table.
+ */
+
+typedef struct {
+    const char *name;
+    void *f32;
+    void *f64;
+    void *longdouble;
+    void *c64;
+    void *c128;
+    void *clongdouble;
+} scalar_fast_path_entry;
+
+static const scalar_fast_path_entry scalar_fast_path_table[] = {
+    {"sqrt", (void *)npy_sqrtf, (void *)npy_sqrt, (void *)npy_sqrtl,
+             (void *)npy_csqrtf, (void *)npy_csqrt, (void *)npy_csqrtl},
+    {"cos", (void *)npy_cosf, (void *)npy_cos, (void *)npy_cosl,
+            (void *)npy_ccosf, (void *)npy_ccos, (void *)npy_ccosl},
+    {"sin", (void *)npy_sinf, (void *)npy_sin, (void *)npy_sinl,
+            (void *)npy_csinf, (void *)npy_csin, (void *)npy_csinl},
+    {"tan", (void *)npy_tanf, (void *)npy_tan, (void *)npy_tanl,
+            (void *)npy_ctanf, (void *)npy_ctan, (void *)npy_ctanl},
+    {"exp", (void *)npy_expf, (void *)npy_exp, (void *)npy_expl,
+            (void *)npy_cexpf, (void *)npy_cexp, (void *)npy_cexpl},
+    {"log", (void *)npy_logf, (void *)npy_log, (void *)npy_logl,
+            (void *)npy_clogf, (void *)npy_clog, (void *)npy_clogl},
+    {NULL, NULL, NULL, NULL, NULL, NULL, NULL}
+};
+
+static NPY_INLINE const scalar_fast_path_entry *
+find_scalar_fast_path(const char *name)
+{
+    for (const scalar_fast_path_entry *entry = scalar_fast_path_table;
+         entry->name != NULL; entry++) {
+        if (strcmp(entry->name, name) == 0) {
+            return entry;
+        }
+    }
+    return NULL;
+}
 
 /********** PRINTF DEBUG TRACING **************/
 #define NPY_UF_DBG_TRACING 0
@@ -4332,6 +4376,81 @@ try_trivial_scalar_call(
     else {
         return -2;
     }
+    /*
+     * Fast path for unary math ufuncs: directly call math function,
+     * bypassing the full loop mechanism.
+     */
+    const char *ufunc_name = ufunc_get_name_cstr(ufunc);
+    const scalar_fast_path_entry *entry = find_scalar_fast_path(ufunc_name);
+    if (entry != NULL) {
+        int typenum = dt->type_num;
+        npy_clear_floatstatus();
+        
+        switch (typenum) {
+            case NPY_FLOAT32:
+                if (entry->f32) {
+                    *(float *)out = ((float (*)(float))entry->f32)(*(float *)data[0]);
+                } else {
+                    goto normal_path;
+                }
+                break;
+            case NPY_FLOAT64:
+                if (entry->f64) {
+                    *(double *)out = ((double (*)(double))entry->f64)(*(double *)data[0]);
+                } else {
+                    goto normal_path;
+                }
+                break;
+            case NPY_LONGDOUBLE:
+                if (entry->longdouble) {
+                    *(npy_longdouble *)out = ((npy_longdouble (*)(npy_longdouble))entry->longdouble)(
+                        *(npy_longdouble *)data[0]);
+                } else {
+                    goto normal_path;
+                }
+                break;
+            case NPY_COMPLEX64:
+                if (entry->c64) {
+                    *(npy_cfloat *)out = ((npy_cfloat (*)(npy_cfloat))entry->c64)(*(npy_cfloat *)data[0]);
+                } else {
+                    goto normal_path;
+                }
+                break;
+            case NPY_COMPLEX128:
+                if (entry->c128) {
+                    *(npy_cdouble *)out = ((npy_cdouble (*)(npy_cdouble))entry->c128)(*(npy_cdouble *)data[0]);
+                } else {
+                    goto normal_path;
+                }
+                break;
+            case NPY_CLONGDOUBLE:
+                if (entry->clongdouble) {
+                    *(npy_clongdouble *)out = ((npy_clongdouble (*)(npy_clongdouble))entry->clongdouble)(
+                        *(npy_clongdouble *)data[0]);
+                } else {
+                    goto normal_path;
+                }
+                break;
+            default:
+                goto normal_path;
+        }
+        
+        int fpe_errors = npy_get_floatstatus();
+        if (fpe_errors) {
+            if (PyUFunc_GiveFloatingpointErrors(ufunc_name, fpe_errors) < 0) {
+                Py_DECREF(dt);
+                return -1;
+            }
+        }
+        *result = PyArray_Scalar(out, dt, NULL);
+        if (*result == NULL) {
+            Py_DECREF(dt);
+            return -1;
+        }
+        Py_DECREF(dt);
+        return 0;
+    }
+normal_path:
     /*
      * Check the ufunc supports our descriptor, bailing (return -2) if not.
      */
