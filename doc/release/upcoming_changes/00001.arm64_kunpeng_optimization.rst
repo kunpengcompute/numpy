@@ -14,17 +14,11 @@ Highlights include:
   argmax, argmin, floor division, pairwise sum, and min/max related operations.
 * Improved selected sorting and partition-related paths, including radix sort,
   timsort, sorted-status checking, partition, and argpartition cases.
-* Added a pluggable FFT backend mechanism with KML FFT backend support, together
-  with related documentation and tests.
 * Optimized selected histogram, random number generation, indexing, strided
   copy, and mathematical function paths on ARM64 platforms.
-* Added and adjusted benchmark coverage for BLAS, LAPACK, FFT, element-wise,
-  statistics, sorting, ufunc stride, and histogram-related cases.
 * Fixed multiple performance regressions and correctness issues identified
   during benchmark and test validation, including limiting selected
   optimizations to ARM64 paths where appropriate and reverting changes that did
   not provide stable performance gains.
-* Improved CI, smoke test, coverage, and code-check related scripts used by the
-  development and validation workflow.
 
 These changes are validated with functional tests and ASV benchmark results.
