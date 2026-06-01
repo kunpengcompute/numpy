@@ -899,18 +899,24 @@ NPY_NO_EXPORT int
 aquicksort_short(void *vv, npy_intp *tosort, npy_intp n,
                  void *NPY_UNUSED(varr))
 {
+#if !defined(NPY_CPU_AMD64) && !defined(NPY_CPU_X86)
+    // x86-simd-sort lacks 16-bit argsort; skip dispatch on x86
     if (aquicksort_dispatch((npy_short *)vv, tosort, n)) {
         return 0;
     }
+#endif
     return aquicksort_<npy::short_tag>((npy_short *)vv, tosort, n);
 }
 NPY_NO_EXPORT int
 aquicksort_ushort(void *vv, npy_intp *tosort, npy_intp n,
                   void *NPY_UNUSED(varr))
 {
+#if !defined(NPY_CPU_AMD64) && !defined(NPY_CPU_X86)
+    // x86-simd-sort lacks 16-bit argsort; skip dispatch on x86
     if (aquicksort_dispatch((npy_ushort *)vv, tosort, n)) {
         return 0;
     }
+#endif
     return aquicksort_<npy::ushort_tag>((npy_ushort *)vv, tosort, n);
 }
 NPY_NO_EXPORT int
@@ -967,9 +973,12 @@ aquicksort_ulonglong(void *vv, npy_intp *tosort, npy_intp n,
 NPY_NO_EXPORT int
 aquicksort_half(void *vv, npy_intp *tosort, npy_intp n, void *NPY_UNUSED(varr))
 {
+#if !defined(NPY_CPU_AMD64) && !defined(NPY_CPU_X86)
+    // x86-simd-sort lacks 16-bit argsort; skip dispatch on x86
     if (aquicksort_dispatch((np::Half *)vv, tosort, n)) {
         return 0;
     }
+#endif
     return aquicksort_<npy::half_tag>((npy_half *)vv, tosort, n);
 }
 NPY_NO_EXPORT int
