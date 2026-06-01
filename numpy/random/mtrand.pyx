@@ -69,6 +69,7 @@ cdef extern from "include/legacy-distributions.h":
     ctypedef aug_bitgen aug_bitgen_t
 
     double legacy_gauss(aug_bitgen_t *aug_state) nogil
+    void legacy_gauss_fill(aug_bitgen_t *aug_state, np.npy_intp cnt, double *out) nogil
     double legacy_pareto(aug_bitgen_t *aug_state, double a) nogil
     double legacy_weibull(aug_bitgen_t *aug_state, double a) nogil
     double legacy_standard_gamma(aug_bitgen_t *aug_state, double shape) nogil
@@ -1467,11 +1468,8 @@ cdef class RandomState:
                [ 0.39924804,  4.68456316,  4.99394529,  4.84057254]])  # random
 
         """
-        return cont(&legacy_gauss, &self._aug_state, size, self.lock, 0,
-                    None, None, CONS_NONE,
-                    None, None, CONS_NONE,
-                    None, None, CONS_NONE,
-                    None)
+        return double_fill(<void *>&legacy_gauss_fill, <bitgen_t *>&self._aug_state,
+                           size, self.lock, None)
 
     def normal(self, loc=0.0, scale=1.0, size=None):
         """

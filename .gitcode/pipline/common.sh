@@ -115,6 +115,79 @@ ci_activate_python() {
     python -m pip --version >/dev/null
 }
 
+ci_python_version() {
+    python - <<'PY'
+import sys
+print(sys.version_info[0], sys.version_info[1])
+PY
+}
+
+ci_apply_numpy_distutils_policy() {
+    local args_array_name="$1"
+    local suite_name="${2:-test}"
+    local mode="${CI_NUMPY_DISTUTILS_MODE:-auto}"
+    local python_major
+    local python_minor
+    local current_args
+
+    if [[ -z "${args_array_name}" ]]; then
+        printf 'ci_apply_numpy_distutils_policy requires an args array variable name\n' >&2
+        return 1
+    fi
+
+    case "${mode}" in
+        auto|ignore|stdlib|off)
+            ;;
+        *)
+            printf 'Unsupported CI_NUMPY_DISTUTILS_MODE: %s (expected auto, ignore, stdlib, or off)\n' "${mode}" >&2
+            return 1
+            ;;
+    esac
+
+    if [[ "${mode}" == "off" ]]; then
+        ci_log "Skipping numpy.distutils policy for ${suite_name} (CI_NUMPY_DISTUTILS_MODE=off)."
+        return 0
+    fi
+
+    read -r python_major python_minor <<< "$(ci_python_version)"
+
+    case "${mode}" in
+        auto)
+            if (( python_major > 3 || (python_major == 3 && python_minor >= 12) )); then
+                mode="ignore"
+            else
+                mode="stdlib"
+            fi
+            ;;
+    esac
+
+    declare -n args_ref="${args_array_name}"
+    current_args=" ${args_ref[*]} "
+
+    if [[ "${mode}" == "ignore" ]]; then
+        case "${current_args}" in
+            *" --ignore=numpy/distutils/tests "*)
+                ;;
+            *)
+                ci_log "Python ${python_major}.${python_minor} detected; excluding numpy/distutils/tests for ${suite_name}."
+                args_ref+=(--ignore=numpy/distutils/tests)
+                ;;
+        esac
+        return 0
+    fi
+
+    export SETUPTOOLS_USE_DISTUTILS="${SETUPTOOLS_USE_DISTUTILS:-stdlib}"
+    ci_log "Using SETUPTOOLS_USE_DISTUTILS=${SETUPTOOLS_USE_DISTUTILS} for numpy.distutils tests in ${suite_name}."
+
+    case "${current_args}" in
+        *" ignore:Reliance on distutils from stdlib is deprecated:UserWarning "*)
+            ;;
+        *)
+            args_ref+=(-W "ignore:Reliance on distutils from stdlib is deprecated:UserWarning")
+            ;;
+    esac
+}
+
 ci_detect_pkg_manager() {
     if command -v apt-get >/dev/null 2>&1; then
         printf 'apt-get\n'

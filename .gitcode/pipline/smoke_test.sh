@@ -29,4 +29,6 @@ ci_install_python_requirements requirements/test_requirements.txt
 
 ci_log "Running smoke test suite."
 read -r -a smoke_test_args <<< "${SMOKE_TEST_ARGS}"
+ci_apply_numpy_distutils_policy smoke_test_args smoke
+
 spin test -- "${smoke_test_args[@]}"

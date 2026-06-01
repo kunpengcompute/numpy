@@ -827,6 +827,14 @@ foreach gen_mtargets : [
       VXE, VX
     ]
   ],
+  [
+    'highway_argfunc.dispatch.h',
+    'src/multiarray/highway_argfunc.dispatch.cpp',
+    use_highway ? [
+      X86_V4, X86_V3, X86_V2,
+      SVE, ASIMD, NEON
+    ] : []
+  ],
 ]
   mtargets = mod_features.multi_targets(
     gen_mtargets[0], multiarray_gen_headers + gen_mtargets[1],
@@ -842,7 +850,8 @@ foreach gen_mtargets : [
       'src/multiarray',
       'src/multiarray/stringdtype',
       'src/npymath',
-      'src/umath'
+      'src/umath',
+      'src/highway',
     ]
   )
   if not is_variable('multiarray_umath_mtargets')
@@ -876,7 +885,7 @@ foreach gen_mtargets : [
     'highway_qsort.dispatch.h',
     'src/npysort/highway_qsort.dispatch.cpp',
     use_highway ? [
-      ASIMD, VSX2,  # FIXME: disable VXE due to runtime segfault
+      SVE, ASIMD, VSX2,  # FIXME: disable VXE due to runtime segfault
     ] : []
   ],
   [
@@ -884,6 +893,13 @@ foreach gen_mtargets : [
     'src/npysort/highway_qsort_16bit.dispatch.cpp',
     use_highway ? [
       ASIMDHP, VSX2,  # VXE FIXME: disable VXE due to runtime segfault
+    ] : []
+  ],
+  [
+    'partition_highway.dispatch.h',
+    'src/npysort/partition_highway.dispatch.cpp',
+    use_highway ? [
+      ASIMD, VSX2,  # VXE FIXME: disable VXE due to runtime segfault
     ] : []
   ],
 ]
@@ -946,6 +962,14 @@ foreach gen_mtargets : [
     ]
   ],
   [
+    'loops_arithmetic_floor_hwy.dispatch.h',
+    'src/umath/loops_arithmetic_floor_hwy.dispatch.cpp',
+    use_highway ? [
+      X86_V4, X86_V3, X86_V2,
+      SVE, ASIMD, NEON
+    ] : []
+  ],
+  [
     'loops_comparison.dispatch.h',
     src_file.process('src/umath/loops_comparison.dispatch.c.src'),
     [
@@ -954,6 +978,14 @@ foreach gen_mtargets : [
       NEON,
       VXE, VX,
       LSX,
+    ]
+  ],
+  [
+    'loops_explog.dispatch.h',
+    'src/umath/loops_explog.dispatch.cpp',
+    [
+      ASIMD, NEON,
+      X86_V4, X86_V3,
     ]
   ],
   [
@@ -998,6 +1030,22 @@ foreach gen_mtargets : [
     ]
   ],
   [
+    'loops_minmax_hwy.dispatch.h',
+    'src/umath/loops_minmax_hwy.dispatch.cpp',
+    use_highway ? [
+      X86_V4, X86_V3, X86_V2,
+      SVE, ASIMD, NEON
+    ] : []
+  ],
+  [
+    'loops_arithm_sum_hwy.dispatch.h',
+    'src/umath/loops_arithm_sum_hwy.dispatch.cpp',
+    use_highway ? [
+      X86_V4, X86_V3, X86_V2,
+      SVE, ASIMD, NEON
+    ] : []
+  ],
+  [
     'loops_modulo.dispatch.h',
     src_file.process('src/umath/loops_modulo.dispatch.c.src'),
     [
@@ -1008,17 +1056,31 @@ foreach gen_mtargets : [
     'loops_trigonometric.dispatch.h',
     'src/umath/loops_trigonometric.dispatch.cpp',
     [
-      X86_V4, X86_V3,
+      AVX512_SPR, X86_V4, X86_V3,
       VSX4, VSX3, VSX2,
+      ASIMD, NEON,
       NEON_VFPV4,
       VXE2, VXE,
       LSX,
     ]
   ],
   [
+    'loops_power.dispatch.h',
+    'src/umath/loops_power.dispatch.cpp',
+    [X86_V4, X86_V3, SVE, NEON_VFPV4]
+  ],
+  [
     'loops_umath_fp.dispatch.h',
     src_file.process('src/umath/loops_umath_fp.dispatch.c.src'),
     [X86_V4]
+  ],
+  [
+    'loops_umath_unary.dispatch.h',
+    'src/umath/loops_umath_unary.dispatch.cpp',
+    [
+      AVX512_SPR, X86_V4,
+      ASIMD, NEON,
+    ]
   ],
   [
     'loops_unary.dispatch.h',
@@ -1027,6 +1089,17 @@ foreach gen_mtargets : [
       ASIMD, NEON,
       X86_V4, X86_V3, X86_V2,
       VSX2,
+      VXE, VX,
+      LSX,
+    ]
+  ],
+  [
+    'loops_unary_fp_ops.dispatch.h',
+    'src/umath/loops_unary_fp_ops.dispatch.cpp',
+    [
+      X86_V3, X86_V2,
+      VSX2,
+      ASIMDHP, NEON,
       VXE, VX,
       LSX,
     ]
@@ -1171,6 +1244,7 @@ src_multiarray = multiarray_gen_headers + [
   'src/multiarray/iterators.c',
   'src/multiarray/legacy_dtype_implementation.c',
   src_file.process('src/multiarray/lowlevel_strided_loops.c.src'),
+  'src/multiarray/strided_copy_kernels.cpp',
   'src/multiarray/mapping.c',
   'src/multiarray/methods.c',
   'src/multiarray/multiarraymodule.c',
@@ -1236,6 +1310,19 @@ src_umath = umath_gen_headers + [
   'src/umath/string_ufuncs.cpp',
   'src/umath/stringdtype_ufuncs.cpp',
   'src/umath/wrapping_array_method.c',
+  # Highway SIMD complex maximum/minimum
+  'src/umath/loops_complex_maxmin.dispatch.cpp',
+  'src/umath/loops_complex_maxmin.h',
+  # Highway SIMD integer maximum/minimum
+  'src/umath/loops_minmax_hwy.dispatch.cpp',
+  'src/umath/loops_minmax_hwy.h',
+  'src/umath/loops_minmax_hwy_avail.c',
+  # Highway SIMD floor division
+  'src/umath/loops_arithmetic_floor_hwy.h',
+  'src/umath/loops_arithmetic_floor_hwy_avail.c',
+  # Highway SIMD pairwise sum
+  'src/umath/loops_arithm_sum_hwy.h',
+  'src/umath/loops_arithm_sum_hwy_avail.c',
   # For testing. Eventually, should use public API and be separate:
   'src/umath/_scaled_float_dtype.c',
 ]

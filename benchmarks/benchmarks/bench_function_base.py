@@ -241,8 +241,15 @@ class Sort(Benchmark):
     def setup(self, kind, dtype, array_type):
         rnd = np.random.RandomState(507582308)
         array_class = array_type[0]
-        generate_array_method = getattr(SortGenerator, array_class)
-        self.arr = generate_array_method(self.ARRAY_SIZE, dtype, *array_type[1:], rnd)
+
+        # only reversed + 16bit dtype
+        if array_class == 'reversed' and np.dtype(dtype).itemsize == 2:
+            size = 10000
+        else:
+            size = self.ARRAY_SIZE
+
+        generate = getattr(SortGenerator, array_class)
+        self.arr = generate(size, dtype, *array_type[1:], rnd)
 
     def time_sort(self, kind, dtype, array_type):
         # Using np.sort(...) instead of arr.sort(...) because it makes a copy.

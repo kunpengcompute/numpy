@@ -171,9 +171,55 @@ double random_standard_normal(bitgen_t *bitgen_state) {
 
 void random_standard_normal_fill(bitgen_t *bitgen_state, npy_intp cnt, double *out) {
   npy_intp i;
+#if defined(__aarch64__) || defined(__arm64__)
+  uint64_t r;
+  int sign;
+  uint64_t rabs;
+  int idx;
+  double x, xx, yy;
+
+  for (i = 0; i < cnt; i++) {
+    for (;;) {
+      /* r = e3n52sb8 */
+      r = next_uint64(bitgen_state);
+      idx = r & 0xff;
+      r >>= 8;
+      sign = r & 0x1;
+      rabs = (r >> 1) & 0x000fffffffffffff;
+      x = rabs * wi_double[idx];
+      if (sign & 0x1) {
+        x = -x;
+      }
+      if (rabs < ki_double[idx]) {
+        out[i] = x;
+        break;
+      }
+      if (idx == 0) {
+        for (;;) {
+          /* Switch to 1.0 - U to avoid log(0.0), see GH 13361 */
+          xx = -ziggurat_nor_inv_r * npy_log1p(-next_double(bitgen_state));
+          yy = -npy_log1p(-next_double(bitgen_state));
+          if (yy + yy > xx * xx) {
+            out[i] = ((rabs >> 8) & 0x1) ? -(ziggurat_nor_r + xx)
+                                         : ziggurat_nor_r + xx;
+            break;
+          }
+        }
+        break;
+      } else {
+        if (((fi_double[idx - 1] - fi_double[idx]) * next_double(bitgen_state) +
+             fi_double[idx]) < exp(-0.5 * x * x)) {
+          out[i] = x;
+          break;
+        }
+      }
+    }
+  }
+#else
   for (i = 0; i < cnt; i++) {
     out[i] = random_standard_normal(bitgen_state);
   }
+#endif
 }
 
 float random_standard_normal_f(bitgen_t *bitgen_state) {
