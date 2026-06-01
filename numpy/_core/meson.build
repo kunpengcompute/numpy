@@ -714,6 +714,7 @@ c_args_common = [
   '-DNPY_INTERNAL_BUILD',
   '-DHAVE_NPY_CONFIG_H',
   cflags_large_file_support,
+  '-falign-functions=64',  # stabilize code layout, reduce inter-build fluctuation
 ]
 
 # CPP exceptions are handled in the unique_hash code and therefore the `-fexceptions`
