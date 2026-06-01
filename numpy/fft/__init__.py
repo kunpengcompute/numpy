@@ -53,6 +53,17 @@ Helper routines
    fftshift  Shift zero-frequency component to center of spectrum.
    ifftshift Inverse of fftshift.
 
+Backend management
+------------------
+
+.. autosummary::
+   :toctree: generated/
+
+   get_backend          Return the name of the currently active FFT backend.
+   set_backend          Context manager to temporarily set the FFT backend.
+   set_global_backend   Set the global default FFT backend.
+   reset_backend        Reset the global backend to the system default.
+
 
 Background information
 ----------------------
@@ -200,12 +211,20 @@ For examples, see the various functions.
 
 """
 
-from . import _helper, _pocketfft
+from . import _backend, _helper, _pocketfft
+from ._backend import (
+    get_backend,
+    reset_backend,
+    set_backend,
+    set_global_backend,
+)
 from ._helper import *
 from ._pocketfft import *
 
 __all__ = _pocketfft.__all__.copy()  # noqa: PLE0605
 __all__ += _helper.__all__
+__all__ += ['get_backend', 'set_backend', 'set_global_backend',
+            'reset_backend']
 
 from numpy._pytesttester import PytestTester
 

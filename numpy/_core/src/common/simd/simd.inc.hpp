@@ -43,6 +43,14 @@ using Vec = hn::Vec<_Tag<TLane>>;
 template <typename TLane>
 using Mask = hn::Mask<_Tag<TLane>>;
 
+/// Signed integer type with the same width as TLane (for gather/scatter index vectors).
+template <typename TLane>
+using _SignedTag = hn::RebindToSigned<_Tag<TLane>>;
+
+/// Vector of signed integers with same lane count as TLane.
+template <typename TLane>
+using IdxVec = hn::Vec<_SignedTag<TLane>>;
+
 /// Unaligned load of a vector from memory.
 template <typename TLane>
 HWY_API Vec<TLane>
@@ -51,12 +59,76 @@ LoadU(const TLane *ptr)
     return hn::LoadU(_Tag<TLane>(), ptr);
 }
 
+/// Load up to max_lanes elements; zero-fills remaining lanes.
+template <typename TLane>
+HWY_API Vec<TLane>
+LoadN(const TLane *ptr, size_t max_lanes)
+{
+    return hn::LoadN(_Tag<TLane>(), ptr, max_lanes);
+}
+
+/// Load up to max_lanes elements; fills remaining lanes from `no`.
+template <typename TLane>
+HWY_API Vec<TLane>
+LoadNOr(Vec<TLane> no, const TLane *ptr, size_t max_lanes)
+{
+    return hn::LoadNOr(no, _Tag<TLane>(), ptr, max_lanes);
+}
+
 /// Unaligned store of a vector to memory.
 template <typename TLane>
 HWY_API void
 StoreU(const Vec<TLane> &a, TLane *ptr)
 {
     hn::StoreU(a, _Tag<TLane>(), ptr);
+}
+
+/// Store up to max_lanes elements to memory.
+template <typename TLane>
+HWY_API void
+StoreN(const Vec<TLane> &a, TLane *ptr, size_t max_lanes)
+{
+    hn::StoreN(a, _Tag<TLane>(), ptr, max_lanes);
+}
+
+/// Gather indexed elements from memory.
+template <typename TLane>
+HWY_API Vec<TLane>
+GatherIndex(const TLane *base, IdxVec<TLane> idx)
+{
+    return hn::GatherIndex(_Tag<TLane>(), base, idx);
+}
+
+/// Gather up to max_lanes indexed elements; zero-fills remaining lanes.
+template <typename TLane>
+HWY_API Vec<TLane>
+GatherIndexN(const TLane *base, IdxVec<TLane> idx, size_t max_lanes)
+{
+    return hn::GatherIndexN(_Tag<TLane>(), base, idx, max_lanes);
+}
+
+/// Gather up to max_lanes indexed elements; fills remaining lanes from `no`.
+template <typename TLane>
+HWY_API Vec<TLane>
+GatherIndexNOr(Vec<TLane> no, const TLane *base, IdxVec<TLane> idx, size_t max_lanes)
+{
+    return hn::GatherIndexNOr(no, _Tag<TLane>(), base, idx, max_lanes);
+}
+
+/// Scatter indexed elements to memory.
+template <typename TLane>
+HWY_API void
+ScatterIndex(Vec<TLane> v, TLane *base, IdxVec<TLane> idx)
+{
+    hn::ScatterIndex(v, _Tag<TLane>(), base, idx);
+}
+
+/// Scatter up to max_lanes indexed elements.
+template <typename TLane>
+HWY_API void
+ScatterIndexN(Vec<TLane> v, TLane *base, IdxVec<TLane> idx, size_t max_lanes)
+{
+    hn::ScatterIndexN(v, _Tag<TLane>(), base, idx, max_lanes);
 }
 
 /// Returns the number of vector lanes based on the lane type.

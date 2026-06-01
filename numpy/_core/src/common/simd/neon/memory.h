@@ -52,12 +52,12 @@ NPYV_IMPL_NEON_MEM(f64, double)
  ***************************/
 NPY_FINLINE npyv_s32 npyv_loadn_s32(const npy_int32 *ptr, npy_intp stride)
 {
-    int32x4_t a = vdupq_n_s32(0);
-    a = vld1q_lane_s32((const int32_t*)ptr,            a, 0);
-    a = vld1q_lane_s32((const int32_t*)ptr + stride,   a, 1);
-    a = vld1q_lane_s32((const int32_t*)ptr + stride*2, a, 2);
-    a = vld1q_lane_s32((const int32_t*)ptr + stride*3, a, 3);
-    return a;
+    npy_int32 tmp[4];
+    tmp[0] = ptr[0];
+    tmp[1] = ptr[stride];
+    tmp[2] = ptr[stride * 2];
+    tmp[3] = ptr[stride * 3];
+    return vld1q_s32((const int32_t *)tmp);
 }
 
 NPY_FINLINE npyv_u32 npyv_loadn_u32(const npy_uint32 *ptr, npy_intp stride)
@@ -97,6 +97,9 @@ NPY_FINLINE npyv_f64 npyv_loadn_f64(const double *ptr, npy_intp stride)
 //// 64-bit load over 32-bit stride
 NPY_FINLINE npyv_u32 npyv_loadn2_u32(const npy_uint32 *ptr, npy_intp stride)
 {
+    if (stride == 2) {
+        return vld1q_u32((const uint32_t*)ptr);
+    }
     return vcombine_u32(
         vld1_u32((const uint32_t*)ptr), vld1_u32((const uint32_t*)ptr + stride)
     );
@@ -148,6 +151,10 @@ NPY_FINLINE void npyv_storen_f64(double *ptr, npy_intp stride, npyv_f64 a)
 //// 64-bit store over 32-bit stride
 NPY_FINLINE void npyv_storen2_u32(npy_uint32 *ptr, npy_intp stride, npyv_u32 a)
 {
+    if (stride == 2) {
+        vst1q_u32((uint32_t*)ptr, a);
+        return;
+    }
 #if NPY_SIMD_F64
     vst1q_lane_u64((uint64_t*)ptr, npyv_reinterpret_u64_u32(a), 0);
     vst1q_lane_u64((uint64_t*)(ptr + stride), npyv_reinterpret_u64_u32(a), 1);

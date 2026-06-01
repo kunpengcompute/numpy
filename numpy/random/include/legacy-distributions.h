@@ -11,6 +11,7 @@ typedef struct aug_bitgen {
 } aug_bitgen_t;
 
 extern double legacy_gauss(aug_bitgen_t *aug_state);
+extern void legacy_gauss_fill(aug_bitgen_t *aug_state, npy_intp cnt, double *out);
 extern double legacy_standard_exponential(aug_bitgen_t *aug_state);
 extern double legacy_pareto(aug_bitgen_t *aug_state, double a);
 extern double legacy_weibull(aug_bitgen_t *aug_state, double a);
