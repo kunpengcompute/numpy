@@ -7,6 +7,7 @@ import argparse
 import os
 import re
 import textwrap
+import platform
 
 # identity objects
 Zero = "PyLong_FromLong(0)"
@@ -17,6 +18,9 @@ None_ = object()
 AllOnes = "PyLong_FromLong(-1)"
 MinusInfinity = 'PyFloat_FromDouble(-NPY_INFINITY)'
 ReorderableNone = "(Py_INCREF(Py_None), Py_None)"
+
+# for arm optimized dispatch
+IsArm = platform.machine().startswith('arm') or platform.machine().startswith('aarch64')
 
 class docstrings:
     @staticmethod
@@ -458,6 +462,7 @@ defdict = {
           docstrings.get('numpy._core.umath.reciprocal'),
           None,
           TD(ints + inexact, dispatch=[
+              ('loops_unary_fp_ops', 'eFD'),
               ('loops_unary_fp', 'fd'),
               ('loops_autovec', ints),
           ]),
@@ -755,25 +760,33 @@ defdict = {
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.degrees'),
           None,
-          TD(fltsP, f='degrees', astype={'e': 'f'}),
+          TD(flts, cfunc_alias='rad2deg') if IsArm else
+          TD(flts, f='degrees', astype={'e': 'f'}),
+          TD(P, f='degrees'),
           ),
 'rad2deg':
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.rad2deg'),
           None,
-          TD(fltsP, f='rad2deg', astype={'e': 'f'}),
+          TD(flts, dispatch=[('loops_unary_fp_ops', 'efd')]) if IsArm else
+          TD(flts, f='rad2deg', astype={'e': 'f'}),
+          TD(P, f='rad2deg'),
           ),
 'radians':
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.radians'),
           None,
-          TD(fltsP, f='radians', astype={'e': 'f'}),
+          TD(flts, cfunc_alias='deg2rad') if IsArm else
+          TD(flts, f='radians', astype={'e': 'f'}),
+          TD(P, f='radians'),
           ),
 'deg2rad':
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.deg2rad'),
           None,
-          TD(fltsP, f='deg2rad', astype={'e': 'f'}),
+          TD(flts, dispatch=[('loops_unary_fp_ops', 'efd')]) if IsArm else
+          TD(flts, f='deg2rad', astype={'e': 'f'}),
+          TD(P, f='deg2rad'),
           ),
 'arccos':
     Ufunc(1, 1, None,
@@ -876,7 +889,7 @@ defdict = {
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.exp'),
           None,
-          TD('efd', dispatch=[('loops_explog', 'efd')]),
+          TD('efd', dispatch=[('loops_exp', 'efd')]),
           TD('fdg' + cmplx, f='exp'),
           TD(P, f='exp'),
           ),
@@ -884,7 +897,7 @@ defdict = {
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.exp2'),
           None,
-          TD('efd', dispatch=[('loops_umath_fp', 'fd'), ('loops_half', 'e')]),
+          TD('efd', dispatch=[('loops_exp2', 'efd')]),
           TD(inexact, f='exp2', astype={'e': 'f'}),
           TD(P, f='exp2'),
           ),
@@ -900,7 +913,7 @@ defdict = {
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.log'),
           None,
-          TD('efd', dispatch=[('loops_explog', 'efd')]),
+          TD('efd', dispatch=[('loops_log', 'efd')]),
           TD('fdg' + cmplx, f='log'),
           TD(P, f='log'),
           ),
@@ -908,7 +921,7 @@ defdict = {
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.log2'),
           None,
-          TD('efd', dispatch=[('loops_umath_fp', 'fd'), ('loops_half', 'e')]),
+          TD('efd', dispatch=[('loops_log2', 'efd')]),
           TD(inexact, f='log2', astype={'e': 'f'}),
           TD(P, f='log2'),
           ),
@@ -941,7 +954,7 @@ defdict = {
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.cbrt'),
           None,
-          TD('efd', dispatch=[('loops_umath_fp', 'fd'), ('loops_half', 'e')]),
+          TD('efd', dispatch=[('loops_umath_unary', 'efd')]),
           TD(flts, f='cbrt', astype={'e': 'f'}),
           TD(P, f='cbrt'),
           ),
@@ -950,9 +963,9 @@ defdict = {
           docstrings.get('numpy._core.umath.ceil'),
           None,
           TD(bints),
-          TD('e', f='ceil', astype={'e': 'f'}),
+          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]),
           TD(inexactvec, dispatch=[('loops_unary_fp', 'fd')]),
-          TD('fdg', f='ceil'),
+          TD('g', f='ceil'),
           TD(O, f='npy_ObjectCeil'),
           ),
 'trunc':
@@ -960,15 +973,16 @@ defdict = {
           docstrings.get('numpy._core.umath.trunc'),
           None,
           TD(bints),
-          TD('e', f='trunc', astype={'e': 'f'}),
+          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]),
           TD(inexactvec, dispatch=[('loops_unary_fp', 'fd')]),
-          TD('fdg', f='trunc'),
+          TD('g', f='trunc'),
           TD(O, f='npy_ObjectTrunc'),
           ),
 'fabs':
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.fabs'),
           None,
+          TD(flts, cfunc_alias='absolute') if IsArm else
           TD(flts, f='fabs', astype={'e': 'f'}),
           TD(P, f='fabs'),
        ),
@@ -977,18 +991,19 @@ defdict = {
           docstrings.get('numpy._core.umath.floor'),
           None,
           TD(bints),
-          TD('e', f='floor', astype={'e': 'f'}),
+          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]),
           TD(inexactvec, dispatch=[('loops_unary_fp', 'fd')]),
-          TD('fdg', f='floor'),
+          TD('g', f='floor'),
           TD(O, f='npy_ObjectFloor'),
           ),
 'rint':
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.rint'),
           None,
-          TD('e', f='rint', astype={'e': 'f'}),
+          TD(bints),
+          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]),
           TD(inexactvec, dispatch=[('loops_unary_fp', 'fd')]),
-          TD('fdg' + cmplx, f='rint'),
+          TD('g' + cmplx, f='rint'),
           TD(P, f='rint'),
           ),
 'arctan2':
@@ -1593,6 +1608,7 @@ def make_code(funcdict, filename):
     #include "matmul.h"
     #include "clip.h"
     #include "loops_complex_maxmin.h"
+    #include "loops_explog.h"
     #include "dtypemeta.h"
     #include "dispatching.h"
     #include "_umath_doc_generated.h"

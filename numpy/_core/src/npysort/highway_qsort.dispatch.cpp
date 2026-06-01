@@ -16,37 +16,80 @@
 namespace np::highway::qsort_simd {
 
 /*
- * Single-pass check: returns 1 if ascending, -1 if descending, 0 otherwise.
- * Early-exits as soon as both directions are ruled out.
+ * Single-pass check: returns 1 if ascending or uniform, -1 if descending, 0 otherwise.
+ * Early-exits as soon as both directions are ruled out and uniformity is ruled out.
+ * Uniform arrays (all elements equal) are detected to avoid VQSort overhead on ARM SVE.
+ *
+ * Uses Highway SIMD to compare N adjacent pairs per iteration.
+ * Uses Gt instead of AndNot(mask_ne, mask_lt) for ascending-pair detection
+ * to avoid a GCC 12 SVE predicate-manipulation code-generation bug.
  */
 template <typename T>
-static inline int sorted_status(T *arr, npy_intp num)
+static int sorted_status(T *arr, npy_intp num)
 {
     if (num <= 1)
         return 1;
+
+    namespace hn = hwy::HWY_NAMESPACE;
+    const hn::ScalableTag<T> d;
+    const size_t N = hn::Lanes(d);
+
     bool maybe_ascending = true;
     bool maybe_descending = true;
-    bool has_nan = false;
-    for (npy_intp i = 1; i < num; ++i) {
+    bool all_equal = true;
+
+    npy_intp i = 1;
+
+    for (; i + static_cast<npy_intp>(N) <= num; i += static_cast<npy_intp>(N)) {
+        const auto v_curr = hn::LoadU(d, arr + i);
+        const auto v_prev = hn::LoadU(d, arr + i - 1);
+
+        const auto mask_ne = hn::Ne(v_curr, v_prev);
+        if (hn::AllFalse(d, mask_ne)) {
+            continue;
+        }
+
+        if constexpr (std::is_floating_point_v<T>) {
+            const auto nan_mask = hn::Or(hn::IsNaN(v_curr), hn::IsNaN(v_prev));
+            if (!hn::AllFalse(d, nan_mask)) {
+                return 0;
+            }
+        }
+
+        all_equal = false;
+        const auto mask_lt = hn::Lt(v_curr, v_prev);
+        const auto mask_gt = hn::Gt(v_curr, v_prev);
+        if (!hn::AllFalse(d, mask_lt)) {
+            maybe_ascending = false;
+        }
+        if (!hn::AllFalse(d, mask_gt)) {
+            maybe_descending = false;
+        }
+
+        if (!maybe_ascending && !maybe_descending) {
+            return 0;
+        }
+    }
+
+    for (; i < num; ++i) {
         if constexpr (std::is_floating_point_v<T>) {
             if (std::isnan(arr[i]) || std::isnan(arr[i - 1])) {
-                has_nan = true;
-                continue;
+                return 0;
             }
         }
         if (arr[i] < arr[i - 1]) {
             maybe_ascending = false;
+            all_equal = false;
             if (!maybe_descending) return 0;
         }
-        if (arr[i - 1] < arr[i]) {
+        else if (arr[i - 1] < arr[i]) {
             maybe_descending = false;
+            all_equal = false;
             if (!maybe_ascending) return 0;
         }
     }
-    // NaN breaks the < comparison: with NaN present both flags can
-    // remain true even for unsorted data (e.g. [NaN, 0.5, NaN, NaN]).
-    // Fall through to the actual sort path.
-    if (has_nan) return 0;
+
+    if (all_equal) return 1;
     if (maybe_ascending) return 1;
     if (maybe_descending) return -1;
     return 0;
