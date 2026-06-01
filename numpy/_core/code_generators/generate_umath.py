@@ -963,7 +963,8 @@ defdict = {
           docstrings.get('numpy._core.umath.ceil'),
           None,
           TD(bints),
-          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]),
+          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]) if IsArm else
+          TD('e', f='ceil', astype={'e': 'f'}),
           TD(inexactvec, dispatch=[('loops_unary_fp', 'fd')]),
           TD('g', f='ceil'),
           TD(O, f='npy_ObjectCeil'),
@@ -973,7 +974,8 @@ defdict = {
           docstrings.get('numpy._core.umath.trunc'),
           None,
           TD(bints),
-          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]),
+          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]) if IsArm else
+          TD('e', f='trunc', astype={'e': 'f'}),
           TD(inexactvec, dispatch=[('loops_unary_fp', 'fd')]),
           TD('g', f='trunc'),
           TD(O, f='npy_ObjectTrunc'),
@@ -991,7 +993,8 @@ defdict = {
           docstrings.get('numpy._core.umath.floor'),
           None,
           TD(bints),
-          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]),
+          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]) if IsArm else
+          TD('e', f='floor', astype={'e': 'f'}),
           TD(inexactvec, dispatch=[('loops_unary_fp', 'fd')]),
           TD('g', f='floor'),
           TD(O, f='npy_ObjectFloor'),
@@ -1000,8 +1003,8 @@ defdict = {
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.rint'),
           None,
-          TD(bints),
-          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]),
+          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]) if IsArm else
+          TD('e', f='rint', astype={'e': 'f'}),
           TD(inexactvec, dispatch=[('loops_unary_fp', 'fd')]),
           TD('g' + cmplx, f='rint'),
           TD(P, f='rint'),
