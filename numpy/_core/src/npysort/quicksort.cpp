@@ -60,6 +60,13 @@
 #include <cstdlib>
 #include <utility>
 
+// Align functions to cache-line boundaries within this translation unit
+// so that changes in other object files do not shift the sort/argsort
+// dispatch routines into unfavourable alignments.
+#if defined(__GNUC__)
+#pragma GCC optimize ("-falign-functions=64")
+#endif
+
 #define NOT_USED NPY_UNUSED(unused)
 
 /*
@@ -112,25 +119,30 @@ inline bool aquicksort_dispatch(T *start, npy_intp* arg, npy_intp num)
 #if !defined(__CYGWIN__)
     using TF = typename np::meta::FixedWidth<T>::Type;
     void (*dispfunc)(TF*, npy_intp*, npy_intp) = nullptr;
+#if defined(NPY_CPU_AMD64) || defined(NPY_CPU_X86)
+    // x86: use x86-simd-sort for 32/64-bit types.
+    // x86-simd-sort lacks 16-bit argsort; skip those to avoid
+    // undefined-symbol errors during link.
+    if constexpr (sizeof(T) >= sizeof(uint32_t)) {
+        #include "x86_simd_argsort.dispatch.h"
+        NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::qsort_simd::template ArgQSort, <TF>);
+    }
+#else
+    // ARM / POWER / etc: use Highway VQSort for large arrays.
     constexpr npy_intp kHwyArgQSort = 1024;
-    if constexpr (sizeof(T) == sizeof(uint16_t)) {
-        if (num >= kHwyArgQSort) {
-            // x86-simd-sort lacks 16-bit argsort, use Highway on all platforms
+    if (num >= kHwyArgQSort) {
+        // 16-bit types (including Half) use the dedicated 16-bit dispatch.
+        if constexpr (sizeof(T) == sizeof(uint16_t)) {
             #include "highway_qsort_16bit.dispatch.h"
             NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::highway::qsort_simd::template ArgQSort, <TF>);
         }
-    }
-    else if constexpr (sizeof(T) == sizeof(uint32_t) || sizeof(T) == sizeof(uint64_t)) {
-#if defined(NPY_CPU_AMD64) || defined(NPY_CPU_X86) // x86 32-bit and 64-bit
-        #include "x86_simd_argsort.dispatch.h"
-        NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::qsort_simd::template ArgQSort, <TF>);
-#else
-        if (num >= kHwyArgQSort) {
+        else if constexpr (sizeof(T) == sizeof(uint32_t) ||
+                           sizeof(T) == sizeof(uint64_t)) {
             #include "highway_qsort.dispatch.h"
             NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::highway::qsort_simd::template ArgQSort, <TF>);
         }
-#endif
     }
+#endif
     if (dispfunc) {
         (*dispfunc)(reinterpret_cast<TF*>(start), arg, num);
         return true;
