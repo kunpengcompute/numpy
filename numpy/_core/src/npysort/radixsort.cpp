@@ -335,7 +335,7 @@ radixsort0<npy_ushort, npy_ushort>(npy_ushort *start, npy_ushort *aux, npy_intp 
 {
     return radixsort0_16bit<npy_ushort, npy_ushort>(start, aux, num);
 }
-#endif
+#else
 
 template <class T, class UT>
 static UT *
@@ -546,6 +546,7 @@ radixsort0_16bit(UT *start, UT *aux, npy_intp num)
 
     return src;
 }
+#endif
 
 template <class T, class UT>
 static int
@@ -909,7 +910,7 @@ aradixsort0<npy_ushort, npy_ushort>(npy_ushort *start, npy_intp *aux, npy_intp *
 {
     return aradixsort0_16bit<npy_ushort, npy_ushort>(start, aux, tosort, num);
 }
-#endif
+#else
 
 template <class T, class UT>
 static npy_intp *
@@ -1121,6 +1122,7 @@ aradixsort0_16bit(UT *start, npy_intp *aux, npy_intp *tosort, npy_intp num)
 
     return src;
 }
+#endif
 
 template <class T, class UT>
 static int
