@@ -60,6 +60,13 @@
 #include <cstdlib>
 #include <utility>
 
+// Align functions to cache-line boundaries within this translation unit
+// so that changes in other object files do not shift the sort/argsort
+// dispatch routines into unfavourable alignments.
+#if defined(__GNUC__)
+#pragma GCC optimize ("-falign-functions=64")
+#endif
+
 #define NOT_USED NPY_UNUSED(unused)
 
 /*
@@ -113,11 +120,13 @@ inline bool aquicksort_dispatch(T *start, npy_intp* arg, npy_intp num)
     using TF = typename np::meta::FixedWidth<T>::Type;
     void (*dispfunc)(TF*, npy_intp*, npy_intp) = nullptr;
 #if defined(NPY_CPU_AMD64) || defined(NPY_CPU_X86)
-    // x86: use x86-simd-sort for all types.
-    // x86-simd-sort only provides 32/64-bit argsort; for 16-bit types
-    // dispfunc stays NULL and we fall through to the C++ introsort.
-    #include "x86_simd_argsort.dispatch.h"
-    NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::qsort_simd::template ArgQSort, <TF>);
+    // x86: use x86-simd-sort for 32/64-bit types.
+    // x86-simd-sort lacks 16-bit argsort; skip those to avoid
+    // undefined-symbol errors during link.
+    if constexpr (sizeof(T) >= sizeof(uint32_t)) {
+        #include "x86_simd_argsort.dispatch.h"
+        NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::qsort_simd::template ArgQSort, <TF>);
+    }
 #else
     // ARM / POWER / etc: use Highway VQSort for large arrays.
     constexpr npy_intp kHwyArgQSort = 1024;
@@ -899,24 +908,18 @@ NPY_NO_EXPORT int
 aquicksort_short(void *vv, npy_intp *tosort, npy_intp n,
                  void *NPY_UNUSED(varr))
 {
-#if !defined(NPY_CPU_AMD64) && !defined(NPY_CPU_X86)
-    // x86-simd-sort lacks 16-bit argsort; skip dispatch on x86
     if (aquicksort_dispatch((npy_short *)vv, tosort, n)) {
         return 0;
     }
-#endif
     return aquicksort_<npy::short_tag>((npy_short *)vv, tosort, n);
 }
 NPY_NO_EXPORT int
 aquicksort_ushort(void *vv, npy_intp *tosort, npy_intp n,
                   void *NPY_UNUSED(varr))
 {
-#if !defined(NPY_CPU_AMD64) && !defined(NPY_CPU_X86)
-    // x86-simd-sort lacks 16-bit argsort; skip dispatch on x86
     if (aquicksort_dispatch((npy_ushort *)vv, tosort, n)) {
         return 0;
     }
-#endif
     return aquicksort_<npy::ushort_tag>((npy_ushort *)vv, tosort, n);
 }
 NPY_NO_EXPORT int
@@ -973,12 +976,9 @@ aquicksort_ulonglong(void *vv, npy_intp *tosort, npy_intp n,
 NPY_NO_EXPORT int
 aquicksort_half(void *vv, npy_intp *tosort, npy_intp n, void *NPY_UNUSED(varr))
 {
-#if !defined(NPY_CPU_AMD64) && !defined(NPY_CPU_X86)
-    // x86-simd-sort lacks 16-bit argsort; skip dispatch on x86
     if (aquicksort_dispatch((np::Half *)vv, tosort, n)) {
         return 0;
     }
-#endif
     return aquicksort_<npy::half_tag>((npy_half *)vv, tosort, n);
 }
 NPY_NO_EXPORT int
