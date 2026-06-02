@@ -12,6 +12,7 @@
 #include "loops_logical_sve.h"
 #include "loops_logical_and_sve.h"
 #include "loops_shift_sve.h"
+#include <string.h>
 
 /*
  *****************************************************************************
@@ -61,6 +62,15 @@
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_positive)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
+#if !defined(__aarch64__) && !defined(__arm__) && !defined(_M_ARM64) && !defined(_M_ARM)
+    if (args[0] == args[1] && steps[0] == steps[1]) {
+        return;
+    }
+    if (IS_UNARY_CONT(@type@, @type@)) {
+        memmove(args[1], args[0], dimensions[0] * sizeof(@type@));
+        return;
+    }
+#endif
     UNARY_LOOP_FAST(@type@, @type@, *out = +in);
 }
 
