@@ -1602,22 +1602,6 @@ void random_bounded_uint64_fill(bitgen_t *bitgen_state, uint64_t off,
       for (i = 0; i < cnt; i++) {
         out[i] = off + (uint64_t) next_uint32(bitgen_state);
       }
-    } else if (
-#if defined(__aarch64__) || defined(__arm64__)
-        ((rng + 1) & rng) == 0
-#else
-        0
-#endif
-    ) {
-      uint64_t rng_excl = rng + 1;
-      uint32_t shift = 0;
-      while (rng_excl < 0x100000000ULL) {
-        rng_excl <<= 1;
-        shift++;
-      }
-      for (i = 0; i < cnt; i++) {
-        out[i] = off + ((uint64_t)(next_uint32(bitgen_state) >> shift));
-      }
     } else {
       uint32_t buf = 0;
       int bcnt = 0;
