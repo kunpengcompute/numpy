@@ -1223,6 +1223,34 @@ copy_scalar_to_c_subspace(
     }
 }
 
+#define MAPITER_TRIVIAL_SET_SCALAR_LOOP(ctype, ind_size, ind_ptr, fancy_dim, \
+                                        base_ptr, self_stride, src,          \
+                                        subspace_size, ind_stride)           \
+    do {                                                                     \
+        npy_intp _ind_size = (ind_size);                                     \
+        char *_ind_ptr = (char *)(ind_ptr);                                  \
+        npy_intp _fancy_dim = (fancy_dim);                                   \
+        char *_base_ptr = (base_ptr);                                        \
+        npy_intp _self_stride = (self_stride);                               \
+        const char *_src = (const char *)(src);                              \
+        npy_intp _subspace_size = (subspace_size);                           \
+        npy_intp _ind_stride = (ind_stride);                                 \
+        while (_ind_size--) {                                                \
+            npy_intp indval = *((npy_intp *)_ind_ptr);                       \
+            char *dst;                                                       \
+            if (indval < 0) {                                                \
+                indval += _fancy_dim;                                        \
+            }                                                                \
+            dst = _base_ptr + indval * _self_stride;                         \
+            ctype val = *(const ctype *)_src;                                \
+            for (npy_intp _i = 0; _i < _subspace_size; _i++) {               \
+                *(ctype *)dst = val;                                         \
+                dst += sizeof(ctype);                                        \
+            }                                                                \
+            _ind_ptr += _ind_stride;                                         \
+        }                                                                    \
+    } while (0)
+
 /*
  * Fast path for arr[ind] = scalar when ind is a simple 1-D integer array
  * indexing the first axis and each selected trailing subspace is C-contiguous.
@@ -1275,21 +1303,51 @@ mapiter_trivial_set_c_subspace_scalar(
     ind_ptr = PyArray_BYTES(ind);
 
     NPY_BEGIN_THREADS_THRESHOLDED(ind_size);
-    while (ind_size--) {
-        npy_intp indval = *((npy_intp *)ind_ptr);
-        char *self_ptr;
-
-        if (indval < 0) {
-            indval += fancy_dim;
+    if (is_aligned && (
+            itemsize == 1 || itemsize == 2 || itemsize == 4 ||
+            itemsize == 8 || itemsize == 16)) {
+        switch (itemsize) {
+            case 1: {
+                MAPITER_TRIVIAL_SET_SCALAR_LOOP(npy_uint8, ind_size, ind_ptr, fancy_dim,
+                                                base_ptr, self_stride, value_ptr, subspace_size,
+                                                ind_stride);
+                break;
+            }
+            case 2: {
+                MAPITER_TRIVIAL_SET_SCALAR_LOOP(npy_uint16, ind_size, ind_ptr, fancy_dim,
+                                                base_ptr, self_stride, value_ptr, subspace_size,
+                                                ind_stride);
+                break;
+            }
+            case 4: {
+                MAPITER_TRIVIAL_SET_SCALAR_LOOP(npy_uint32, ind_size, ind_ptr, fancy_dim,
+                                                base_ptr, self_stride, value_ptr, subspace_size,
+                                                ind_stride);
+                break;
+            }
+            case 8: {
+                MAPITER_TRIVIAL_SET_SCALAR_LOOP(npy_uint64, ind_size, ind_ptr, fancy_dim,
+                                                base_ptr, self_stride, value_ptr, subspace_size,
+                                                ind_stride);
+                break;
+            }
+            case 16: {
+                MAPITER_TRIVIAL_SET_SCALAR_LOOP(indexed_copytype128, ind_size, ind_ptr, fancy_dim,
+                                                base_ptr, self_stride, value_ptr, subspace_size,
+                                                ind_stride);
+                break;
+            }
         }
-        self_ptr = base_ptr + indval * self_stride;
+    } else {
+        while (ind_size--) {
+            npy_intp indval = *((npy_intp *)ind_ptr);
+            char *self_ptr;
 
-        if (is_aligned && (
-                itemsize == 1 || itemsize == 2 || itemsize == 4 ||
-                itemsize == 8 || itemsize == 16)) {
-            copy_scalar_to_c_subspace(self_ptr, value_ptr, itemsize, subspace_size);
-        }
-        else {
+            if (indval < 0) {
+                indval += fancy_dim;
+            }
+            self_ptr = base_ptr + indval * self_stride;
+
             char *args[2] = {value_ptr, self_ptr};
             npy_intp strides[2] = {value_stride, itemsize};
             if (NPY_UNLIKELY(cast_info->func(&cast_info->context,
@@ -1298,9 +1356,9 @@ mapiter_trivial_set_c_subspace_scalar(
                 NPY_END_THREADS;
                 return -1;
             }
-        }
 
-        ind_ptr += ind_stride;
+            ind_ptr += ind_stride;
+        }
     }
     NPY_END_THREADS;
 
