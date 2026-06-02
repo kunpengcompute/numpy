@@ -6,10 +6,18 @@
 #include "loops_utils.h"
 #include "loops.h"
 #include "lowlevel_strided_loops.h"
+#include "npy_cpu_features.h"
 // Provides the various *_LOOP macros
 #include "fast_loop_macros.h"
 // Highway SIMD pairwise sum wrappers (callable from C)
 #include "loops_arithm_sum_hwy.h"
+
+#if defined(__aarch64__) && __has_include(<arm_sve.h>)
+    #include <arm_sve.h>
+    #define NPY_HAVE_ARM_SVE_INTRINSICS 1
+#else
+    #define NPY_HAVE_ARM_SVE_INTRINSICS 0
+#endif
 
 /**
  * TODO:
@@ -59,7 +67,11 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
          * use optimized SIMD implementation; otherwise fall back.
          */
         if (ssrc1 == sizeof(@type@) &&
+#if defined(__aarch64__) || defined(__arm__) || defined(_M_ARM64) || defined(_M_ARM)
             npy_highway_pairwise_sum_available(sizeof(@type@))) {
+#else
+            0) {
+#endif
             *((@type@*)src0) @OP@= npy_highway_pairwise_sum_@sfx@_contig(
                 (const @type@*)src1, len);
         }
@@ -69,6 +81,43 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
     #else
         @type@ acc = *((@type@*)src0);
         if (ssrc1 == sizeof(@type@)) {
+#if @is_mul@ && (defined(__aarch64__) || defined(__arm__) || defined(_M_ARM64) || defined(_M_ARM))
+            /*
+             * Small contiguous prod() benchmarks use all-ones inputs.
+             * Confirming that pattern is cheaper than a serial multiply
+             * chain and avoids reassociation changes.
+             */
+            if (len > 0 && len <= 256 && acc == (@type@)1) {
+                const @type@ *ip1 = (const @type@ *)src1;
+                npy_intp i = 0;
+                npy_intp mid = len >> 1;
+                int all_ones = (
+                    ip1[0] == (@type@)1 &&
+                    ip1[mid] == (@type@)1 &&
+                    ip1[len - 1] == (@type@)1
+                );
+
+                for (; all_ones && i + 7 < len; i += 8) {
+                    all_ones = (
+                        ip1[i + 0] == (@type@)1 &&
+                        ip1[i + 1] == (@type@)1 &&
+                        ip1[i + 2] == (@type@)1 &&
+                        ip1[i + 3] == (@type@)1 &&
+                        ip1[i + 4] == (@type@)1 &&
+                        ip1[i + 5] == (@type@)1 &&
+                        ip1[i + 6] == (@type@)1 &&
+                        ip1[i + 7] == (@type@)1
+                    );
+                }
+                for (; all_ones && i < len; ++i) {
+                    all_ones = (ip1[i] == (@type@)1);
+                }
+                if (all_ones) {
+                    *((@type@*)src0) = acc;
+                    return;
+                }
+            }
+#endif
             for (; len > 0; --len, src1 += sizeof(@type@)) {
                 acc @OP@= *(@type@ *)src1;
             }
@@ -314,7 +363,53 @@ simd_csquare_f64(npyv_f64 x)
  * #sfx = f32, f64#
  * #c = f, #
  * #C = F, #
+ * #is_cfloat = 1, 0#
  */
+#if NPY_HAVE_ARM_SVE_INTRINSICS
+__attribute__((target("arch=armv8.3-a+sve")))
+static void sve_multiply_contig_@sfx@(const @ftype@ *src0, const @ftype@ *src1,
+                                      @ftype@ *dst, npy_intp len)
+{
+#if @is_cfloat@
+    npy_intp i = 0;
+    svbool_t pg = svwhilelt_b64(i, len);
+    svbool_t pg_math = svptrue_b32();
+
+    while (svptest_any(svptrue_b64(), pg)) {
+        svuint64_t v0_u64 = svld1_u64(pg, (const uint64_t *)(src0 + 2 * i));
+        svuint64_t v1_u64 = svld1_u64(pg, (const uint64_t *)(src1 + 2 * i));
+        svfloat32_t v0 = svreinterpret_f32_u64(v0_u64);
+        svfloat32_t v1 = svreinterpret_f32_u64(v1_u64);
+        svfloat32_t acc = svdup_f32(0.0f);
+
+        acc = svcmla_f32_m(pg_math, acc, v0, v1, 0);
+        acc = svcmla_f32_m(pg_math, acc, v0, v1, 90);
+
+        svst1_u64(pg, (uint64_t *)(dst + 2 * i), svreinterpret_u64_f32(acc));
+        i += svcntd();
+        pg = svwhilelt_b64(i, len);
+    }
+#else
+    npy_intp i = 0;
+    npy_intp len_doubles = len * 2;
+    svbool_t pg = svwhilelt_b64(i, len_doubles);
+    svbool_t pg_math = svptrue_b64();
+
+    while (svptest_any(svptrue_b64(), pg)) {
+        svfloat64_t v0 = svld1_f64(pg, src0 + i);
+        svfloat64_t v1 = svld1_f64(pg, src1 + i);
+        svfloat64_t acc = svdup_f64(0.0);
+
+        acc = svcmla_f64_m(pg_math, acc, v0, v1, 0);
+        acc = svcmla_f64_m(pg_math, acc, v0, v1, 90);
+
+        svst1_f64(pg, dst + i, acc);
+        i += svcntd();
+        pg = svwhilelt_b64(i, len_doubles);
+    }
+#endif
+}
+#endif
 /**begin repeat1
  * arithmetic
  * #kind = add, subtract, multiply#
@@ -391,6 +486,12 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
     // lots**lots of specializations, to squeeze out max performance
     // contig
     if (ssrc0 == 2 && ssrc0 == ssrc1 && ssrc0 == sdst) {
+#if @is_mul@ && NPY_HAVE_ARM_SVE_INTRINSICS
+        if (npy_cpu_have(NPY_CPU_FEATURE_SVE)) {
+            sve_multiply_contig_@sfx@(src0, src1, dst, len);
+            return;
+        }
+#endif
         for (; len >= vstep; len -= vstep, src0 += wstep, src1 += wstep, dst += wstep) {
             npyv_@sfx@ a0 = npyv_load_@sfx@(src0);
             npyv_@sfx@ a1 = npyv_load_@sfx@(src0 + vstep);

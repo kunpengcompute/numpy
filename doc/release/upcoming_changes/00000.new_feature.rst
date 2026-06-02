@@ -1,0 +1,25 @@
+``get_backend``, ``set_backend``, ``set_global_backend``, and ``reset_backend`` added to ``numpy.fft``
+-----------------------------------------------------------------------------------------------
+New backend management API functions are available in the ``numpy.fft`` module,
+providing runtime FFT backend switching:
+
+* ``np.fft.get_backend()`` returns the name of the currently active backend
+  (``"pocketfft"`` or ``"kmlfft"``).
+* ``np.fft.set_backend(name)`` is a context manager to temporarily switch the
+  backend within a ``with`` block.
+* ``np.fft.set_global_backend(name)`` sets the global default backend.
+* ``np.fft.reset_backend()`` resets the global backend to the system default.
+
+Backend priority from highest to lowest:
+
+1. Thread-local backend set via ``set_backend`` context
+2. Global backend set via ``set_global_backend``
+3. ``NUMPY_FFT_BACKEND`` environment variable
+4. System default (``pocketfft``)
+
+Invalid backend names raise ``ValueError``. An invalid ``NUMPY_FFT_BACKEND``
+environment variable value issues a ``RuntimeWarning`` and falls back to
+the default backend.
+
+An optional KML FFT backend (Kunpeng Math Library) can be enabled at build time
+via the ``-Dfft-backend=kml`` Meson option.

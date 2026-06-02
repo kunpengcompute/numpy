@@ -9,6 +9,7 @@
 // Provides the various *_LOOP macros
 #include "fast_loop_macros.h"
 #include "loops_arithmetic_floor_hwy.h"
+#include "numpy/libdivide/libdivide.h"
 
 //###############################################################################
 //## Division
@@ -330,6 +331,7 @@ vsx4_simd_divide_contig_@sfx@(char **args, npy_intp len)
  * Signed types
  *  #type  = npy_byte, npy_short, npy_int, npy_long, npy_longlong#
  *  #TYPE  = BYTE,     SHORT,     INT,     LONG,     LONGLONG#
+ *  #is_simd  = 1, 1, 1, 0, 0#
  */
 #undef TO_SIMD_SFX
 #if 0
@@ -371,6 +373,7 @@ NPY_FINLINE @type@ floor_div_@TYPE@(const @type@ n, const @type@ d)
     return r;
 }
 
+__attribute__((aligned(64)))
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_divide)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
@@ -416,10 +419,80 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_divide)
         return;
     }
 #endif
+    /* Highway scalar floor divide for signed integers on ARM NEON
+     * (faster than npyv for 32-bit; 8/16-bit use npyv scalar path) */
+#if @is_simd@ && NPY_BITSOF_@TYPE@ == 32 && defined(NPY_HAVE_NEON)
+    if (IS_BLOCKABLE_BINARY_SCALAR2(sizeof(@type@), NPY_SIMD_WIDTH) &&
+        (*(@type@ *)args[1]) != 0) {
+        if (sizeof(@type@) == 4) {
+            npy_highway_floor_divide_s32_scalar_contig(args, dimensions[0]);
+        }
+        return;
+    }
+#endif
     /* Scalar divisor optimization: contiguous array, scalar non-zero divisor */
     if (IS_BLOCKABLE_BINARY_SCALAR2(sizeof(@type@), NPY_SIMD_WIDTH) &&
         (*(@type@ *)args[1]) != 0) {
         TO_SIMD_SFX(simd_divide_by_scalar_contig)(args, dimensions[0]);
+        return;
+    }
+#endif
+#if NPY_SIMD && NPY_BITSOF_@TYPE@ == 64 && defined(SIMD_DISABLE_DIV64_OPT)
+    /* Highway SIMD scalar divisor path for int64
+     * (uses SVE when available; on NEON-only falls back to scalar-per-lane).
+     * Faster than libdivide on SVE-capable platforms. */
+    if (IS_BLOCKABLE_BINARY_SCALAR2(sizeof(@type@), NPY_SIMD_WIDTH) &&
+        (*(@type@ *)args[1]) != 0 &&
+        npy_highway_floor_divide_scalar_available(sizeof(@type@))) {
+        npy_highway_floor_divide_s64_scalar_contig(args, dimensions[0]);
+        return;
+    }
+    /*
+     * libdivide-based scalar divisor path for int64 on platforms where
+     * npyv 64-bit div is disabled (ARM NEON, VSX3, LSX).
+     * Uses multiply+shift instead of hardware division; no float64
+     * precision loss, no FE_INVALID.
+     * Used as fallback when Highway is unavailable or not preferred.
+     */
+    if (IS_BLOCKABLE_BINARY_SCALAR2(sizeof(@type@), NPY_SIMD_WIDTH) &&
+        (*(@type@ *)args[1]) != 0) {
+        const @type@ divisor = *(@type@ *)args[1];
+        if (divisor == -1) {
+            const npy_intp n = dimensions[0];
+            @type@ *src = (@type@ *)args[0];
+            @type@ *dst = (@type@ *)args[2];
+            bool warn_overflow = false;
+            for (npy_intp i = 0; i < n; ++i) {
+                if (src[i] == NPY_MIN_@TYPE@) {
+                    dst[i] = NPY_MIN_@TYPE@;
+                    warn_overflow = true;
+                } else {
+                    dst[i] = -src[i];
+                }
+            }
+            if (warn_overflow) {
+                npy_set_floatstatus_overflow();
+            }
+        } else if (divisor == 1) {
+            const npy_intp n = dimensions[0];
+            @type@ *src = (@type@ *)args[0];
+            @type@ *dst = (@type@ *)args[2];
+            for (npy_intp i = 0; i < n; ++i) {
+                dst[i] = src[i];
+            }
+        } else {
+            struct libdivide_s64_t fast_d = libdivide_s64_gen(divisor);
+            const npy_intp n = dimensions[0];
+            @type@ *src = (@type@ *)args[0];
+            @type@ *dst = (@type@ *)args[2];
+            for (npy_intp i = 0; i < n; ++i) {
+                @type@ r = (@type@)libdivide_s64_do(src[i], &fast_d);
+                if (((src[i] > 0) != (divisor > 0)) && (r * divisor != src[i])) {
+                    r--;
+                }
+                dst[i] = r;
+            }
+        }
         return;
     }
 #endif
@@ -528,6 +601,16 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_divide)
         }
         return;
     }
+#if NPY_BITSOF_@STYPE@ == 32 && defined(NPY_HAVE_NEON)
+    /* Highway scalar floor divide for uint32 on ARM NEON
+     * Exclude scalar==0 so it falls through to BINARY_LOOP,
+     * consistent with the signed path's defensive approach. */
+    if (IS_BLOCKABLE_BINARY_SCALAR2(sizeof(@type@), NPY_SIMD_WIDTH) &&
+        (*(@type@ *)args[1]) != 0) {
+        npy_highway_floor_divide_u32_scalar_contig(args, dimensions[0]);
+        return;
+    }
+#endif
 #endif
     /* Scalar divisor optimization: contiguous array, scalar non-zero divisor */
     if (IS_BLOCKABLE_BINARY_SCALAR2(sizeof(@type@), NPY_SIMD_WIDTH) &&

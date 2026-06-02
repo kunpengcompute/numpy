@@ -71,7 +71,7 @@ BOOL_@kind@(char **args, npy_intp const *dimensions, npy_intp const *steps, void
 
 #include "loops_autovec.dispatch.h"
 /**begin repeat
- * #kind = isnan, isinf, isfinite, floor, ceil, trunc#
+ * #kind = isnan, isinf, isfinite, floor, ceil, trunc, rint#
  */
 NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void BOOL_@kind@,
     (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func)))
@@ -164,7 +164,7 @@ NPY_NO_EXPORT void
 @S@@TYPE@_positive(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func));
 
 /**begin repeat2
- * #kind = floor, ceil, trunc#
+ * #kind = floor, ceil, trunc, rint#
  */
 #define @S@@TYPE@_@kind@ @S@@TYPE@_positive
 /**end repeat2**/
@@ -237,6 +237,36 @@ NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@kind@,
  **                             FLOAT LOOPS                                 **
  *****************************************************************************
  */
+#include "loops_unary_fp_ops.dispatch.h"
+/**begin repeat
+ *  #TYPE = HALF, CFLOAT, CDOUBLE#
+ */
+ NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_reciprocal,
+    (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data)))
+/**end repeat**/
+
+/**begin repeat
+ *  #TYPE = HALF#
+ */
+/**begin repeat1
+ * #kind = ceil, floor, trunc, rint#
+ */
+ NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@kind@,
+    (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data)))
+/**end repeat1**/
+/**end repeat**/
+
+/**begin repeat
+ *  #TYPE = HALF, FLOAT, DOUBLE#
+ */
+/**begin repeat1
+ * #kind = rad2deg, deg2rad#
+ */
+ NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@kind@,
+    (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data)))
+/**end repeat1**/
+/**end repeat**/
+
 #include "loops_unary_fp.dispatch.h"
 /**begin repeat
  *  #TYPE = FLOAT, DOUBLE#
@@ -318,25 +348,24 @@ NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@func@,
 /**end repeat1**/
 /**end repeat**/
 
-#include "loops_explog.dispatch.h"
-/**begin repeat
- *  #TYPE = FLOAT, DOUBLE, HALF#
- */
-/**begin repeat1
- * # kind = exp, log#
- */
-NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@kind@, 
-  (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func)))
-
-/**end repeat1**/
-/**end repeat**/
-
 #include "loops_umath_unary.dispatch.h"
 /**begin repeat
  *  #TYPE = HALF#
  */
 /**begin repeat1
- *  #func = sqrt#
+ *  #func = sqrt, cbrt#
+ */
+NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@func@,
+    (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func)))
+
+/**end repeat1**/
+/**end repeat**/
+
+/**begin repeat
+ *  #TYPE = FLOAT, DOUBLE#
+ */
+/**begin repeat1
+ *  #func = cbrt#
  */
 NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@func@,
     (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func)))
@@ -351,7 +380,7 @@ NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@func@,
  *  #TYPE = FLOAT, DOUBLE#
  */
 /**begin repeat1
- * #func = tanh, exp2, log2, log10, expm1, log1p, cbrt, arcsin, arccos, arctan, sinh, cosh, arcsinh, arccosh, arctanh#
+ * #func = tanh, log10, expm1, log1p, arcsin, arccos, arctan, sinh, cosh, arcsinh, arccosh, arctanh#
  */
 
 NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@func@,
@@ -364,7 +393,7 @@ NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@func@,
     #include "loops_half.dispatch.h"
 #endif
 /**begin repeat
- * #func = exp2, log2, log10, expm1, log1p, cbrt, arcsin, arccos, arctan, sinh, cosh, tanh, arcsinh, arccosh, arctanh#
+ * #func = log10, expm1, log1p, arcsin, arccos, arctan, sinh, cosh, tanh, arcsinh, arccosh, arctanh#
  */
 
 NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void HALF_@func@,
@@ -646,9 +675,6 @@ C@TYPE@_@kind@(char **args, npy_intp const *dimensions, npy_intp const *steps, v
 /**end repeat1**/
 
 NPY_NO_EXPORT void
-C@TYPE@_reciprocal(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data));
-
-NPY_NO_EXPORT void
 C@TYPE@__ones_like(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data));
 
 NPY_NO_EXPORT void
@@ -683,6 +709,9 @@ C@TYPE@_@kind@(char **args, npy_intp const *dimensions, npy_intp const *steps, v
 /**end repeat1**/
 
 /**end repeat**/
+
+NPY_NO_EXPORT void
+CLONGDOUBLE_reciprocal(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data));
 
 #undef CGE
 #undef CLE
@@ -794,6 +823,15 @@ TIMEDELTA_mm_qm_divmod(char **args, npy_intp const *dimensions, npy_intp const *
 #define TIMEDELTA_md_m_floor_divide TIMEDELTA_md_m_divide
 /* #define TIMEDELTA_mm_d_floor_divide TIMEDELTA_mm_d_divide */
 
+/**begin repeat
+ * #TYPE = LONGDOUBLE#
+ */
+NPY_NO_EXPORT void
+@TYPE@_rad2deg(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func));
+
+NPY_NO_EXPORT void
+@TYPE@_deg2rad(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func));
+/**end repeat**/
 
 #include "loops_autovec.dispatch.h"
 /**begin repeat

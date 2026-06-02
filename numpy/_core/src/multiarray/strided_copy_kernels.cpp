@@ -228,7 +228,7 @@ broadcast_copy_dispatch(
 
 /* Aligned + Contiguous src + Contiguous dst */
 template<int N>
-inline NPY_GCC_OPT_3 NPY_GCC_UNROLL_LOWLEVEL_LOOPS int
+inline NPY_GCC_UNROLL_LOOPS int
 strided_copy_acc_impl(const char *src, char *dst, npy_intp count) {
     using T = uint_of_size_t<N>;
     while (count > 0) {
@@ -242,7 +242,7 @@ strided_copy_acc_impl(const char *src, char *dst, npy_intp count) {
 
 /* Aligned + Contiguous src + Strided dst */
 template<int N>
-inline NPY_GCC_OPT_3 NPY_GCC_UNROLL_LOWLEVEL_LOOPS int
+inline NPY_GCC_UNROLL_LOOPS int
 strided_copy_acs_impl(const char *src, char *dst, npy_intp count, npy_intp dst_stride) {
     using T = uint_of_size_t<N>;
     while (count > 0) {
@@ -256,7 +256,7 @@ strided_copy_acs_impl(const char *src, char *dst, npy_intp count, npy_intp dst_s
 
 /* Aligned + Strided src + Contiguous dst */
 template<int N>
-inline NPY_GCC_OPT_3 NPY_GCC_UNROLL_LOWLEVEL_LOOPS int
+inline NPY_GCC_UNROLL_LOOPS int
 strided_copy_asc_impl(const char *src, char *dst, npy_intp count, npy_intp src_stride) {
     using T = uint_of_size_t<N>;
     while (count > 0) {
@@ -270,7 +270,7 @@ strided_copy_asc_impl(const char *src, char *dst, npy_intp count, npy_intp src_s
 
 /* Aligned + Strided src + Strided dst */
 template<int N>
-inline NPY_GCC_OPT_3 NPY_GCC_UNROLL_LOWLEVEL_LOOPS int
+inline NPY_GCC_UNROLL_LOOPS int
 strided_copy_ass_impl(const char *src, char *dst, npy_intp count, npy_intp src_stride, npy_intp dst_stride) {
     using T = uint_of_size_t<N>;
     while (count > 0) {
@@ -284,7 +284,7 @@ strided_copy_ass_impl(const char *src, char *dst, npy_intp count, npy_intp src_s
 
 /* Unaligned + Contiguous src + Contiguous dst */
 template<int N>
-inline NPY_GCC_OPT_3 NPY_GCC_UNROLL_LOWLEVEL_LOOPS int
+inline NPY_GCC_UNROLL_LOOPS int
 strided_copy_ucc_impl(const char *src, char *dst, npy_intp count) {
     while (count > 0) {
         std::memcpy(dst, src, N);
@@ -297,7 +297,7 @@ strided_copy_ucc_impl(const char *src, char *dst, npy_intp count) {
 
 /* Unaligned + Contiguous src + Strided dst */
 template<int N>
-inline NPY_GCC_OPT_3 NPY_GCC_UNROLL_LOWLEVEL_LOOPS int
+inline NPY_GCC_UNROLL_LOOPS int
 strided_copy_ucs_impl(const char *src, char *dst, npy_intp count, npy_intp dst_stride) {
     while (count > 0) {
         std::memcpy(dst, src, N);
@@ -310,7 +310,7 @@ strided_copy_ucs_impl(const char *src, char *dst, npy_intp count, npy_intp dst_s
 
 /* Unaligned + Strided src + Contiguous dst */
 template<int N>
-inline NPY_GCC_OPT_3 NPY_GCC_UNROLL_LOWLEVEL_LOOPS int
+inline NPY_GCC_UNROLL_LOOPS int
 strided_copy_usc_impl(const char *src, char *dst, npy_intp count, npy_intp src_stride) {
     while (count > 0) {
         std::memcpy(dst, src, N);
@@ -323,7 +323,7 @@ strided_copy_usc_impl(const char *src, char *dst, npy_intp count, npy_intp src_s
 
 /* Unaligned + Strided src + Strided dst */
 template<int N>
-inline NPY_GCC_OPT_3 NPY_GCC_UNROLL_LOWLEVEL_LOOPS int
+inline NPY_GCC_UNROLL_LOOPS int
 strided_copy_uss_impl(const char *src, char *dst, npy_intp count, npy_intp src_stride, npy_intp dst_stride) {
     while (count > 0) {
         std::memcpy(dst, src, N);
@@ -336,7 +336,7 @@ strided_copy_uss_impl(const char *src, char *dst, npy_intp count, npy_intp src_s
 
 /* 16-byte specializations for aligned cases */
 template<>
-inline NPY_GCC_OPT_3 NPY_GCC_UNROLL_LOWLEVEL_LOOPS int
+inline NPY_GCC_UNROLL_LOOPS int
 strided_copy_acc_impl<16>(const char *src, char *dst, npy_intp count) {
     while (count > 0) {
         ((npy_uint64*)dst)[0] = ((const npy_uint64*)src)[0];
@@ -349,7 +349,7 @@ strided_copy_acc_impl<16>(const char *src, char *dst, npy_intp count) {
 }
 
 template<>
-inline NPY_GCC_OPT_3 NPY_GCC_UNROLL_LOWLEVEL_LOOPS int
+inline NPY_GCC_UNROLL_LOOPS int
 strided_copy_acs_impl<16>(const char *src, char *dst, npy_intp count, npy_intp dst_stride) {
     while (count > 0) {
         ((npy_uint64*)dst)[0] = ((const npy_uint64*)src)[0];
@@ -362,7 +362,7 @@ strided_copy_acs_impl<16>(const char *src, char *dst, npy_intp count, npy_intp d
 }
 
 template<>
-inline NPY_GCC_OPT_3 NPY_GCC_UNROLL_LOWLEVEL_LOOPS int
+inline NPY_GCC_UNROLL_LOOPS int
 strided_copy_asc_impl<16>(const char *src, char *dst, npy_intp count, npy_intp src_stride) {
     while (count > 0) {
         ((npy_uint64*)dst)[0] = ((const npy_uint64*)src)[0];
@@ -375,7 +375,7 @@ strided_copy_asc_impl<16>(const char *src, char *dst, npy_intp count, npy_intp s
 }
 
 template<>
-inline NPY_GCC_OPT_3 NPY_GCC_UNROLL_LOWLEVEL_LOOPS int
+inline NPY_GCC_UNROLL_LOOPS int
 strided_copy_ass_impl<16>(const char *src, char *dst, npy_intp count, npy_intp src_stride, npy_intp dst_stride) {
     while (count > 0) {
         ((npy_uint64*)dst)[0] = ((const npy_uint64*)src)[0];

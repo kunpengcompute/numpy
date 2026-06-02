@@ -24,6 +24,8 @@
  */
 #mesondefine NPY_NO_SMP
 
+#mesondefine NPY_HAVE_HIGHWAY
+
 #mesondefine NPY_VISIBILITY_HIDDEN
 #mesondefine NPY_ABI_VERSION
 #mesondefine NPY_API_VERSION

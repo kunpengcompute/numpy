@@ -8,6 +8,8 @@ arr_place(PyObject *, PyObject *, PyObject *);
 NPY_NO_EXPORT PyObject *
 arr_bincount(PyObject *, PyObject *const *, Py_ssize_t, PyObject *);
 NPY_NO_EXPORT PyObject *
+arr_histogramdd_uniform2d(PyObject *, PyObject *const *, Py_ssize_t, PyObject *);
+NPY_NO_EXPORT PyObject *
 arr__monotonicity(PyObject *, PyObject *, PyObject *kwds);
 NPY_NO_EXPORT PyObject *
 arr_interp(PyObject *, PyObject *const *, Py_ssize_t, PyObject *);

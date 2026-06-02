@@ -32,7 +32,7 @@ extern "C" {
 
 /*
  * Availability check — returns 1 if Highway SIMD is available for the
- * given element size (4 for float, 8 for double).
+ * given element size (1, 2, 4, or 8 bytes for integer and FP types).
  */
 NPY_VISIBILITY_HIDDEN int
 npy_highway_minmax_available(int element_size);
@@ -53,6 +53,23 @@ npy_highway_minimum_f32_contig(char **args, npy_intp len);
 
 NPY_VISIBILITY_HIDDEN void
 npy_highway_minimum_f64_contig(char **args, npy_intp len);
+
+/*
+ * Float fmax/fmin wrappers (NaN-ignoring, C99 semantics)
+ * C99 fmax/fmin: if one operand is NaN, return the non-NaN operand.
+ * Highway's Max/Min uses vmaxnm/vminnm which already implement this.
+ */
+NPY_VISIBILITY_HIDDEN void
+npy_highway_fmax_f32_contig(char **args, npy_intp len);
+
+NPY_VISIBILITY_HIDDEN void
+npy_highway_fmax_f64_contig(char **args, npy_intp len);
+
+NPY_VISIBILITY_HIDDEN void
+npy_highway_fmin_f32_contig(char **args, npy_intp len);
+
+NPY_VISIBILITY_HIDDEN void
+npy_highway_fmin_f64_contig(char **args, npy_intp len);
 
 /*
  * Integer maximum/minimum wrappers (SVE-vectorized for ARM platforms)

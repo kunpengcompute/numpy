@@ -8,6 +8,7 @@ import warnings
 
 import numpy as np
 from numpy._core import overrides
+from numpy._core._multiarray_umath import _histogramdd_uniform2d
 
 __all__ = ['histogram', 'histogramdd', 'histogram_bin_edges']
 
@@ -1036,6 +1037,7 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
     nbin = np.empty(D, np.intp)
     edges = D * [None]
     dedges = D * [None]
+    uniform_bins = D * [False]
     if weights is not None:
         weights = np.asarray(weights)
 
@@ -1049,6 +1051,8 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
         # bins is an integer
         bins = D * [bins]
 
+    explicit_range = range is not None
+
     # normalize the range argument
     if range is None:
         range = (None,) * D
@@ -1058,6 +1062,7 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
     # Create edge arrays
     for i in _range(D):
         if np.ndim(bins[i]) == 0:
+            uniform_bins[i] = True
             if bins[i] < 1:
                 raise ValueError(
                     f'`bins[{i}]` must be positive, when an integer')
@@ -1082,6 +1087,15 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
 
         nbin[i] = len(edges[i]) + 1  # includes an outlier on each end
         dedges[i] = np.diff(edges[i])
+
+    if (D == 2 and weights is None and not density and explicit_range and
+            range[0] is not None and range[1] is not None and
+            uniform_bins[0] and uniform_bins[1] and
+            sample.dtype == np.float64 and sample.flags.c_contiguous):
+        hist = _histogramdd_uniform2d(
+            sample, nbin[0] - 2, nbin[1] - 2,
+            edges[0][0], edges[0][-1], edges[1][0], edges[1][-1])
+        return hist, edges
 
     # Compute the bin number each sample falls into.
     Ncount = tuple(

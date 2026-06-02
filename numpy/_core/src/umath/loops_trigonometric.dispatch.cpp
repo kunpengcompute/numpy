@@ -7,13 +7,15 @@
 #include "simd/simd.hpp" 
 #include <hwy/highway.h>
 #include <hwy/contrib/math/math-inl.h>
-extern "C" {
-#include "npy_svml.h"
-}
 #include <cstring>
 #include <fenv.h>
+#include "npy_svml.h"
 
 namespace hn = hwy::HWY_NAMESPACE;
+
+#if defined(__aarch64__) && NPY_SIMD_FMA3
+#define SIMD_ARM 1
+#endif
 
 /*
  * Vectorized approximate sine/cosine algorithms: The following code is a
@@ -241,8 +243,7 @@ struct TypeToInt<double> {
  * Inf/out-of-range: handled by Highway (produces NaN, triggers FP exception)
  * X86 platforms use scalar libm implementation
  */
-#if defined(__aarch64__) && HWY_HAVE_FLOAT64
-
+#if SIMD_ARM
 template <typename T>
 struct OpSin {
 static constexpr T c_inv_pi = 0x1.45f306dc9c883p-2;
@@ -785,7 +786,7 @@ NPY_CPU_DISPATCH_CURFX(FLOAT_cos)(char **args, npy_intp const *dimensions,
 #endif
 }
 
-#if NPY_SIMD_FMA3 && defined(__aarch64__)
+#if SIMD_ARM
 static void HWY_ATTR
 simd_sincos_f16_impl(const npy_half *src, npy_intp ssrc, npy_half *dst, npy_intp sdst,
                      npy_intp len, SIMD_TRIG_OP trig_op)
@@ -940,7 +941,7 @@ simd_sincos_f16_impl(const npy_half *src, npy_intp ssrc, npy_half *dst, npy_intp
 }
 #endif
 
-#if NPY_SIMD_FMA3 && defined(__aarch64__)
+#if SIMD_ARM
 namespace {
 using namespace np::simd;
 
@@ -1083,7 +1084,8 @@ HWY_INLINE hn::Vec<D> TanPolyFloat(D d, hn::Vec<D> x)
 
     auto y = hn::MulAdd(p, hn::Mul(z, z2), z);
 
-    auto inv_y = hn::Div(one, y);
+    auto safe_y = hn::IfThenElse(hn::Eq(y, zero), one, y);
+    auto inv_y = hn::Div(one, safe_y);
     auto result = hn::IfThenElse(odd, inv_y, y);
     
     result = hn::IfThenElse(is_zero, zero, result);
@@ -1094,7 +1096,7 @@ HWY_INLINE hn::Vec<D> TanPolyFloat(D d, hn::Vec<D> x)
 }
 #endif
 
-#if NPY_SIMD_FMA3 && defined(__aarch64__)
+#if SIMD_ARM
 static void HWY_ATTR
 simd_tan_f32_impl_contiguous(const npy_float *src, npy_float *dst, npy_intp len)
 {
@@ -1108,72 +1110,91 @@ simd_tan_f32_impl_contiguous(const npy_float *src, npy_float *dst, npy_intp len)
 
     float NPY_DECL_ALIGNED(NPY_SIMD_WIDTH) fallback_buf[STEP * 2];
 
+    feclearexcept(FE_ALL_EXCEPT);
+
     for (; len >= STEP; len -= STEP, src += STEP, dst += STEP) {
         __builtin_prefetch(src + STEP, 0, 3);
 
-        bool all_simd = true;
-        for (int j = 0; j < UNROLL; ++j) {
-            auto x_in = hn::LoadU(d, src + j * lanes);
-            auto abs_x = hn::Abs(x_in);
-            auto needs_fallback = hn::Ge(abs_x, range_limit_vec);
-            auto is_nan = hn::IsNaN(x_in);
-            auto is_inf = hn::Eq(abs_x, hn::Inf(d));
-            auto simd_mask = hn::Not(hn::Or(hn::Or(is_nan, is_inf), needs_fallback));
+        auto x0 = hn::LoadU(d, src);
+        auto x1 = hn::LoadU(d, src + lanes);
+        auto x2 = hn::LoadU(d, src + lanes * 2);
+        auto x3 = hn::LoadU(d, src + lanes * 3);
 
-            hn::Store(x_in, d, fallback_buf + j * lanes);
-            hn::StoreMaskBits(d, simd_mask, (uint8_t*)(fallback_buf + j * lanes + lanes));
+        auto is_nan0 = hn::IsNaN(x0);
+        auto x0_clean = hn::IfThenElse(is_nan0, hn::Zero(d), x0);
+        auto mask0 = hn::And(hn::Lt(hn::Abs(x0_clean), range_limit_vec), hn::Not(is_nan0));
 
-            if (!hn::AllTrue(d, simd_mask)) {
-                all_simd = false;
-            }
-        }
+        auto is_nan1 = hn::IsNaN(x1);
+        auto x1_clean = hn::IfThenElse(is_nan1, hn::Zero(d), x1);
+        auto mask1 = hn::And(hn::Lt(hn::Abs(x1_clean), range_limit_vec), hn::Not(is_nan1));
 
-        if (all_simd) {
-            feclearexcept(FE_ALL_EXCEPT);
-            for (int j = 0; j < UNROLL; ++j) {
-                hn::Store(TanPolyFloat(d, hn::LoadU(d, src + j * lanes)), d, dst + j * lanes);
-            }
-            feclearexcept(FE_ALL_EXCEPT);
+        auto is_nan2 = hn::IsNaN(x2);
+        auto x2_clean = hn::IfThenElse(is_nan2, hn::Zero(d), x2);
+        auto mask2 = hn::And(hn::Lt(hn::Abs(x2_clean), range_limit_vec), hn::Not(is_nan2));
+
+        auto is_nan3 = hn::IsNaN(x3);
+        auto x3_clean = hn::IfThenElse(is_nan3, hn::Zero(d), x3);
+        auto mask3 = hn::And(hn::Lt(hn::Abs(x3_clean), range_limit_vec), hn::Not(is_nan3));
+
+        bool all0 = hn::AllTrue(d, mask0);
+        bool all1 = hn::AllTrue(d, mask1);
+        bool all2 = hn::AllTrue(d, mask2);
+        bool all3 = hn::AllTrue(d, mask3);
+
+        if (__builtin_expect(all0 & all1 & all2 & all3, 1)) {
+            hn::Store(TanPolyFloat(d, x0), d, dst);
+            hn::Store(TanPolyFloat(d, x1), d, dst + lanes);
+            hn::Store(TanPolyFloat(d, x2), d, dst + lanes * 2);
+            hn::Store(TanPolyFloat(d, x3), d, dst + lanes * 3);
         } else {
-            feclearexcept(FE_ALL_EXCEPT);
-            for (int j = 0; j < UNROLL; ++j) {
-                for (int i = 0; i < lanes; ++i) {
-                    dst[j * lanes + i] = npy_tanf(fallback_buf[j * lanes + i]);
-                }
-            }
+            #define PROCESS_BATCH_F32(J, X_IN, MASK) do { \
+                if (all##J) { \
+                    hn::Store(TanPolyFloat(d, X_IN), d, dst + (J) * lanes); \
+                } else if (hn::AllFalse(d, MASK)) { \
+                    hn::Store(X_IN, d, fallback_buf); \
+                    for (int i = 0; i < lanes; ++i) { \
+                        dst[(J) * lanes + i] = std::isnan(fallback_buf[i]) ? fallback_buf[i] : npy_tanf(fallback_buf[i]); \
+                    } \
+                } else { \
+                    auto safe_x = hn::IfThenElse(MASK, X_IN, hn::Zero(d)); \
+                    auto y = TanPolyFloat(d, safe_x); \
+                    hn::Store(X_IN, d, fallback_buf); \
+                    npy_uint64 mask_bits; \
+                    hn::StoreMaskBits(d, MASK, (uint8_t*)&mask_bits); \
+                    for (int i = 0; i < lanes; ++i) { \
+                        dst[(J) * lanes + i] = ((mask_bits >> i) & 1) ? y.raw[i] : (std::isnan(fallback_buf[i]) ? fallback_buf[i] : npy_tanf(fallback_buf[i])); \
+                    } \
+                } \
+            } while(0)
+            PROCESS_BATCH_F32(0, x0, mask0);
+            PROCESS_BATCH_F32(1, x1, mask1);
+            PROCESS_BATCH_F32(2, x2, mask2);
+            PROCESS_BATCH_F32(3, x3, mask3);
+            #undef PROCESS_BATCH_F32
         }
     }
 
     for (; len > 0; len -= lanes, src += lanes, dst += lanes) {
         auto x_in = hn::LoadN(d, src, len);
-        auto abs_x = hn::Abs(x_in);
-        auto needs_fallback = hn::Ge(abs_x, range_limit_vec);
         auto is_nan = hn::IsNaN(x_in);
-        auto is_inf = hn::Eq(abs_x, hn::Inf(d));
-        auto simd_mask = hn::Not(hn::Or(hn::Or(is_nan, is_inf), needs_fallback));
+        auto x_clean = hn::IfThenElse(is_nan, hn::Zero(d), x_in);
+        auto simd_mask = hn::And(hn::Lt(hn::Abs(x_clean), range_limit_vec), hn::Not(is_nan));
 
         if (hn::AllTrue(d, simd_mask)) {
-            feclearexcept(FE_ALL_EXCEPT);
             hn::StoreN(TanPolyFloat(d, x_in), d, dst, len);
-            feclearexcept(FE_ALL_EXCEPT);
         } else if (hn::AllFalse(d, simd_mask)) {
-            feclearexcept(FE_ALL_EXCEPT);
             hn::Store(x_in, d, fallback_buf);
             for (int i = 0; i < lanes && i < len; ++i) {
-                dst[i] = npy_tanf(fallback_buf[i]);
+                dst[i] = std::isnan(fallback_buf[i]) ? fallback_buf[i] : npy_tanf(fallback_buf[i]);
             }
         } else {
-            auto y = TanPolyFloat(d, x_in);
+            auto safe_x = hn::IfThenElse(simd_mask, x_in, hn::Zero(d));
+            auto y = TanPolyFloat(d, safe_x);
             hn::Store(x_in, d, fallback_buf);
             npy_uint64 mask_bits;
             hn::StoreMaskBits(d, simd_mask, (uint8_t*)&mask_bits);
-            feclearexcept(FE_ALL_EXCEPT);
             for (int i = 0; i < lanes && i < len; ++i) {
-                if ((mask_bits >> i) & 1) {
-                    dst[i] = y.raw[i];
-                } else {
-                    dst[i] = npy_tanf(fallback_buf[i]);
-                }
+                dst[i] = ((mask_bits >> i) & 1) ? y.raw[i] : (std::isnan(fallback_buf[i]) ? fallback_buf[i] : npy_tanf(fallback_buf[i]));
             }
         }
     }
@@ -1185,47 +1206,40 @@ simd_tan_f32_impl_strided(const npy_float *src, npy_intp ssrc, npy_float *dst, n
 {
     const hn::ScalableTag<float> d;
     const hn::ScalableTag<int32_t> ind_tag_t;
-    
+
     const float range_limit = 0x1p15f;
     const auto range_limit_vec = hn::Set(d, range_limit);
-    
+
     HWY_LANES_CONSTEXPR int lanes = Lanes<float>();
     const auto src_index = hn::Mul(hn::Iota(ind_tag_t, 0), hn::Set(ind_tag_t, ssrc));
-    
-    float NPY_DECL_ALIGNED(NPY_SIMD_WIDTH) ip_fback[hn::MaxLanes(d)];
-    
+    const auto dst_index = hn::Mul(hn::Iota(ind_tag_t, 0), hn::Set(ind_tag_t, sdst));
+
+    float NPY_DECL_ALIGNED(NPY_SIMD_WIDTH) ip_fback[hn::MaxLanes(d) * 2];
+
+    feclearexcept(FE_ALL_EXCEPT);
+
     for (; len > 0; len -= lanes, src += ssrc * lanes, dst += sdst * lanes) {
         auto x_in = hn::GatherIndexN(d, src, src_index, len);
-        
-        auto abs_x = hn::Abs(x_in);
-        auto needs_fallback = hn::Ge(abs_x, range_limit_vec);
         auto is_nan = hn::IsNaN(x_in);
-        auto is_inf = hn::Eq(abs_x, hn::Inf(d));
-        auto simd_mask = hn::Not(hn::Or(hn::Or(is_nan, is_inf), needs_fallback));
-        
+        auto x_clean = hn::IfThenElse(is_nan, hn::Zero(d), x_in);
+        auto simd_mask = hn::And(hn::Lt(hn::Abs(x_clean), range_limit_vec), hn::Not(is_nan));
+
         if (hn::AllTrue(d, simd_mask)) {
-            auto y = TanPolyFloat(d, x_in);
-            for (int i = 0; i < lanes && i < len; ++i) {
-                dst[i * sdst] = y.raw[i];
-            }
+            hn::ScatterIndexN(TanPolyFloat(d, x_in), d, dst, dst_index, len);
         } else if (hn::AllFalse(d, simd_mask)) {
-            feclearexcept(FE_ALL_EXCEPT);
             hn::Store(x_in, d, ip_fback);
             for (int i = 0; i < lanes && i < len; ++i) {
-                dst[i * sdst] = npy_tanf(ip_fback[i]);
+                dst[i * sdst] = std::isnan(ip_fback[i]) ? ip_fback[i] : npy_tanf(ip_fback[i]);
             }
         } else {
-            auto y = TanPolyFloat(d, x_in);
+            auto safe_x = hn::IfThenElse(simd_mask, x_in, hn::Zero(d));
+            auto y = TanPolyFloat(d, safe_x);
             hn::Store(x_in, d, ip_fback);
+            hn::Store(y, d, ip_fback + lanes);
             npy_uint64 mask_bits;
             hn::StoreMaskBits(d, simd_mask, (uint8_t*)&mask_bits);
-            feclearexcept(FE_ALL_EXCEPT);
             for (int i = 0; i < lanes && i < len; ++i) {
-                if ((mask_bits >> i) & 1) {
-                    dst[i * sdst] = y.raw[i];
-                } else {
-                    dst[i * sdst] = npy_tanf(ip_fback[i]);
-                }
+                dst[i * sdst] = ((mask_bits >> i) & 1) ? ip_fback[lanes + i] : (std::isnan(ip_fback[i]) ? ip_fback[i] : npy_tanf(ip_fback[i]));
             }
         }
     }
@@ -1243,13 +1257,12 @@ simd_tan_f32_impl(const npy_float *src, npy_intp ssrc, npy_float *dst, npy_intp 
 }
 #endif
 
-#if NPY_SIMD_FMA3 && defined(__aarch64__)
+#if SIMD_ARM
 static void HWY_ATTR
 simd_tan_f16_impl(const npy_half *src, npy_intp ssrc, npy_half *dst, npy_intp sdst, npy_intp len)
 {
     const ::hwy::float16_t* src16 = (const ::hwy::float16_t*)src;
     ::hwy::float16_t* dst16 = (::hwy::float16_t*)dst;
-
     constexpr hn::ScalableTag<npy_float> f32_tag_t;
     constexpr hn::ScalableTag<::hwy::float16_t> f16_tag_t;
     HWY_LANES_CONSTEXPR int lanes = Lanes<::hwy::float16_t>();
@@ -1258,6 +1271,8 @@ simd_tan_f16_impl(const npy_half *src, npy_intp ssrc, npy_half *dst, npy_intp sd
     const auto range_limit_vec = hn::Set(f32_tag_t, range_limit_f16);
 
     npy_half NPY_DECL_ALIGNED(NPY_SIMD_WIDTH) fallback_buf[lanes * 2];
+
+    feclearexcept(FE_ALL_EXCEPT);
 
     for (; len > 0; len -= lanes, src16 += ssrc * lanes, dst16 += sdst * lanes) {
         hn::Vec<decltype(f16_tag_t)> x16_in;
@@ -1276,34 +1291,25 @@ simd_tan_f16_impl(const npy_half *src, npy_intp ssrc, npy_half *dst, npy_intp sd
         auto x32_in0 = hn::PromoteLowerTo(f32_tag_t, x16_in);
         auto x32_in1 = hn::PromoteUpperTo(f32_tag_t, x16_in);
 
-        auto abs_x0 = hn::Abs(x32_in0);
-        auto abs_x1 = hn::Abs(x32_in1);
-
-        auto is_large0 = hn::Ge(abs_x0, range_limit_vec);
-        auto is_large1 = hn::Ge(abs_x1, range_limit_vec);
         auto is_nan0 = hn::IsNaN(x32_in0);
+        auto x32_clean0 = hn::IfThenElse(is_nan0, hn::Zero(f32_tag_t), x32_in0);
+        auto simd_mask0 = hn::And(hn::Lt(hn::Abs(x32_clean0), range_limit_vec), hn::Not(is_nan0));
+
         auto is_nan1 = hn::IsNaN(x32_in1);
-        auto is_inf0 = hn::Eq(abs_x0, hn::Inf(f32_tag_t));
-        auto is_inf1 = hn::Eq(abs_x1, hn::Inf(f32_tag_t));
+        auto x32_clean1 = hn::IfThenElse(is_nan1, hn::Zero(f32_tag_t), x32_in1);
+        auto simd_mask1 = hn::And(hn::Lt(hn::Abs(x32_clean1), range_limit_vec), hn::Not(is_nan1));
 
-        auto needs_fallback0 = hn::Or(is_large0, hn::Or(is_nan0, is_inf0));
-        auto needs_fallback1 = hn::Or(is_large1, hn::Or(is_nan1, is_inf1));
-
-        bool all_simd0 = hn::AllTrue(f32_tag_t, hn::Not(needs_fallback0));
-        bool all_simd1 = hn::AllTrue(f32_tag_t, hn::Not(needs_fallback1));
-        bool none_simd0 = hn::AllFalse(f32_tag_t, hn::Not(needs_fallback0));
-        bool none_simd1 = hn::AllFalse(f32_tag_t, hn::Not(needs_fallback1));
-
-        feclearexcept(FE_ALL_EXCEPT);
-        auto y32_out0 = TanPolyFloat(f32_tag_t, x32_in0);
-        auto y32_out1 = TanPolyFloat(f32_tag_t, x32_in1);
-        feclearexcept(FE_ALL_EXCEPT);
-
-        auto y16_out0 = hn::DemoteTo(f16_tag_t, y32_out0);
-        auto y16_out1 = hn::DemoteTo(f16_tag_t, y32_out1);
-        auto y16_out = hn::Combine(f16_tag_t, y16_out1, y16_out0);
+        bool all_simd0 = hn::AllTrue(f32_tag_t, simd_mask0);
+        bool all_simd1 = hn::AllTrue(f32_tag_t, simd_mask1);
+        bool none_simd0 = hn::AllFalse(f32_tag_t, simd_mask0);
+        bool none_simd1 = hn::AllFalse(f32_tag_t, simd_mask1);
 
         if (all_simd0 && all_simd1) {
+            auto y32_out0 = TanPolyFloat(f32_tag_t, x32_in0);
+            auto y32_out1 = TanPolyFloat(f32_tag_t, x32_in1);
+            auto y16_out0 = hn::DemoteTo(f16_tag_t, y32_out0);
+            auto y16_out1 = hn::DemoteTo(f16_tag_t, y32_out1);
+            auto y16_out = hn::Combine(f16_tag_t, y16_out1, y16_out0);
             if (sdst == 1) {
                 hn::StoreN(y16_out, f16_tag_t, dst16, len);
             } else {
@@ -1316,7 +1322,7 @@ simd_tan_f16_impl(const npy_half *src, npy_intp ssrc, npy_half *dst, npy_intp sd
         } else if (none_simd0 && none_simd1) {
             for (int j = 0; j < lanes && j < len; ++j) {
                 npy_float in1 = npy_half_to_float(fallback_buf[j]);
-                npy_half out = npy_float_to_half(npy_tanf(in1));
+                npy_half out = std::isnan(in1) ? fallback_buf[j] : npy_float_to_half(npy_tanf(in1));
                 if (sdst == 1) {
                     dst16[j] = ::hwy::float16_t::FromBits(out);
                 } else {
@@ -1324,17 +1330,24 @@ simd_tan_f16_impl(const npy_half *src, npy_intp ssrc, npy_half *dst, npy_intp sd
                 }
             }
         } else {
+            auto safe_x32_0 = hn::IfThenElse(simd_mask0, x32_in0, hn::Zero(f32_tag_t));
+            auto safe_x32_1 = hn::IfThenElse(simd_mask1, x32_in1, hn::Zero(f32_tag_t));
+            auto y32_out0 = TanPolyFloat(f32_tag_t, safe_x32_0);
+            auto y32_out1 = TanPolyFloat(f32_tag_t, safe_x32_1);
+            auto y16_out0 = hn::DemoteTo(f16_tag_t, y32_out0);
+            auto y16_out1 = hn::DemoteTo(f16_tag_t, y32_out1);
+            auto y16_out = hn::Combine(f16_tag_t, y16_out1, y16_out0);
             hn::Store(y16_out, f16_tag_t, (::hwy::float16_t*)fallback_buf + lanes);
             npy_uint64 mask_bits0, mask_bits1;
-            hn::StoreMaskBits(f32_tag_t, hn::Not(needs_fallback0), (uint8_t*)&mask_bits0);
-            hn::StoreMaskBits(f32_tag_t, hn::Not(needs_fallback1), (uint8_t*)&mask_bits1);
+            hn::StoreMaskBits(f32_tag_t, simd_mask0, (uint8_t*)&mask_bits0);
+            hn::StoreMaskBits(f32_tag_t, simd_mask1, (uint8_t*)&mask_bits1);
             for (int j = 0; j < lanes / 2 && j < len; ++j) {
                 npy_half out;
                 if ((mask_bits0 >> j) & 1) {
                     out = *((npy_half*)(fallback_buf + lanes) + j);
                 } else {
                     npy_float in1 = npy_half_to_float(fallback_buf[j]);
-                    out = npy_float_to_half(npy_tanf(in1));
+                    out = std::isnan(in1) ? fallback_buf[j] : npy_float_to_half(npy_tanf(in1));
                 }
                 if (sdst == 1) {
                     dst16[j] = ::hwy::float16_t::FromBits(out);
@@ -1348,7 +1361,7 @@ simd_tan_f16_impl(const npy_half *src, npy_intp ssrc, npy_half *dst, npy_intp sd
                     out = *((npy_half*)(fallback_buf + lanes) + lanes / 2 + j);
                 } else {
                     npy_float in1 = npy_half_to_float(fallback_buf[lanes / 2 + j]);
-                    out = npy_float_to_half(npy_tanf(in1));
+                    out = std::isnan(in1) ? fallback_buf[lanes / 2 + j] : npy_float_to_half(npy_tanf(in1));
                 }
                 if (sdst == 1) {
                     dst16[lanes / 2 + j] = ::hwy::float16_t::FromBits(out);
@@ -1362,7 +1375,7 @@ simd_tan_f16_impl(const npy_half *src, npy_intp ssrc, npy_half *dst, npy_intp sd
 }
 #endif
 
-#if NPY_SIMD_FMA3 && defined(__aarch64__)
+#if SIMD_ARM
 static void HWY_ATTR
 simd_tan_f64_impl_contiguous(const npy_double *src, npy_double *dst, npy_intp len)
 {
@@ -1376,71 +1389,91 @@ simd_tan_f64_impl_contiguous(const npy_double *src, npy_double *dst, npy_intp le
 
     double NPY_DECL_ALIGNED(NPY_SIMD_WIDTH) fallback_buf[STEP * 2];
 
+    feclearexcept(FE_ALL_EXCEPT);
+
     for (; len >= STEP; len -= STEP, src += STEP, dst += STEP) {
         __builtin_prefetch(src + STEP, 0, 3);
 
-        bool all_simd = true;
-        for (int j = 0; j < UNROLL; ++j) {
-            auto x_in = hn::LoadU(d, src + j * lanes);
-            auto abs_x = hn::Abs(x_in);
-            auto needs_fallback = hn::Ge(abs_x, range_limit_vec);
-            auto is_nan = hn::IsNaN(x_in);
-            auto is_inf = hn::Eq(abs_x, hn::Inf(d));
-            auto simd_mask = hn::Not(hn::Or(hn::Or(is_nan, is_inf), needs_fallback));
+        auto x0 = hn::LoadU(d, src);
+        auto x1 = hn::LoadU(d, src + lanes);
+        auto x2 = hn::LoadU(d, src + lanes * 2);
+        auto x3 = hn::LoadU(d, src + lanes * 3);
 
-            hn::Store(x_in, d, fallback_buf + j * lanes);
-            hn::StoreMaskBits(d, simd_mask, (uint8_t*)(fallback_buf + j * lanes + lanes));
+        auto is_nan0 = hn::IsNaN(x0);
+        auto x0_clean = hn::IfThenElse(is_nan0, hn::Zero(d), x0);
+        auto mask0 = hn::And(hn::Lt(hn::Abs(x0_clean), range_limit_vec), hn::Not(is_nan0));
 
-            if (!hn::AllTrue(d, simd_mask)) {
-                all_simd = false;
-            }
-        }
+        auto is_nan1 = hn::IsNaN(x1);
+        auto x1_clean = hn::IfThenElse(is_nan1, hn::Zero(d), x1);
+        auto mask1 = hn::And(hn::Lt(hn::Abs(x1_clean), range_limit_vec), hn::Not(is_nan1));
 
-        if (all_simd) {
-            feclearexcept(FE_ALL_EXCEPT);
-            for (int j = 0; j < UNROLL; ++j) {
-                hn::Store(TanPolyDouble(d, hn::LoadU(d, src + j * lanes)), d, dst + j * lanes);
-            }
+        auto is_nan2 = hn::IsNaN(x2);
+        auto x2_clean = hn::IfThenElse(is_nan2, hn::Zero(d), x2);
+        auto mask2 = hn::And(hn::Lt(hn::Abs(x2_clean), range_limit_vec), hn::Not(is_nan2));
+
+        auto is_nan3 = hn::IsNaN(x3);
+        auto x3_clean = hn::IfThenElse(is_nan3, hn::Zero(d), x3);
+        auto mask3 = hn::And(hn::Lt(hn::Abs(x3_clean), range_limit_vec), hn::Not(is_nan3));
+
+        bool all0 = hn::AllTrue(d, mask0);
+        bool all1 = hn::AllTrue(d, mask1);
+        bool all2 = hn::AllTrue(d, mask2);
+        bool all3 = hn::AllTrue(d, mask3);
+
+        if (__builtin_expect(all0 & all1 & all2 & all3, 1)) {
+            hn::Store(TanPolyDouble(d, x0), d, dst);
+            hn::Store(TanPolyDouble(d, x1), d, dst + lanes);
+            hn::Store(TanPolyDouble(d, x2), d, dst + lanes * 2);
+            hn::Store(TanPolyDouble(d, x3), d, dst + lanes * 3);
         } else {
-            feclearexcept(FE_ALL_EXCEPT);
-            for (int j = 0; j < UNROLL; ++j) {
-                for (int i = 0; i < lanes; ++i) {
-                    dst[j * lanes + i] = npy_tan(fallback_buf[j * lanes + i]);
-                }
-            }
+            #define PROCESS_BATCH_F64(J, X_IN, MASK) do { \
+                if (all##J) { \
+                    hn::Store(TanPolyDouble(d, X_IN), d, dst + (J) * lanes); \
+                } else if (hn::AllFalse(d, MASK)) { \
+                    hn::Store(X_IN, d, fallback_buf); \
+                    for (int i = 0; i < lanes; ++i) { \
+                        dst[(J) * lanes + i] = std::isnan(fallback_buf[i]) ? fallback_buf[i] : npy_tan(fallback_buf[i]); \
+                    } \
+                } else { \
+                    auto safe_x = hn::IfThenElse(MASK, X_IN, hn::Zero(d)); \
+                    auto y = TanPolyDouble(d, safe_x); \
+                    hn::Store(X_IN, d, fallback_buf); \
+                    npy_uint64 mask_bits; \
+                    hn::StoreMaskBits(d, MASK, (uint8_t*)&mask_bits); \
+                    for (int i = 0; i < lanes; ++i) { \
+                        dst[(J) * lanes + i] = ((mask_bits >> i) & 1) ? y.raw[i] : (std::isnan(fallback_buf[i]) ? fallback_buf[i] : npy_tan(fallback_buf[i])); \
+                    } \
+                } \
+            } while(0)
+            PROCESS_BATCH_F64(0, x0, mask0);
+            PROCESS_BATCH_F64(1, x1, mask1);
+            PROCESS_BATCH_F64(2, x2, mask2);
+            PROCESS_BATCH_F64(3, x3, mask3);
+            #undef PROCESS_BATCH_F64
         }
     }
 
     for (; len > 0; len -= lanes, src += lanes, dst += lanes) {
         auto x_in = hn::LoadN(d, src, len);
-        auto abs_x = hn::Abs(x_in);
-        auto needs_fallback = hn::Ge(abs_x, range_limit_vec);
         auto is_nan = hn::IsNaN(x_in);
-        auto is_inf = hn::Eq(abs_x, hn::Inf(d));
-        auto simd_mask = hn::Not(hn::Or(hn::Or(is_nan, is_inf), needs_fallback));
+        auto x_clean = hn::IfThenElse(is_nan, hn::Zero(d), x_in);
+        auto simd_mask = hn::And(hn::Lt(hn::Abs(x_clean), range_limit_vec), hn::Not(is_nan));
 
         if (hn::AllTrue(d, simd_mask)) {
-            feclearexcept(FE_ALL_EXCEPT);
             hn::StoreN(TanPolyDouble(d, x_in), d, dst, len);
-            feclearexcept(FE_ALL_EXCEPT);
         } else if (hn::AllFalse(d, simd_mask)) {
-            feclearexcept(FE_ALL_EXCEPT);
             hn::Store(x_in, d, fallback_buf);
             for (int i = 0; i < lanes && i < len; ++i) {
-                dst[i] = npy_tan(fallback_buf[i]);
+                dst[i] = std::isnan(fallback_buf[i]) ? fallback_buf[i] : npy_tan(fallback_buf[i]);
             }
         } else {
-            auto y = TanPolyDouble(d, x_in);
+            auto safe_x = hn::IfThenElse(simd_mask, x_in, hn::Zero(d));
+            auto y = TanPolyDouble(d, safe_x);
             hn::Store(x_in, d, fallback_buf);
             npy_uint64 mask_bits;
             hn::StoreMaskBits(d, simd_mask, (uint8_t*)&mask_bits);
-            feclearexcept(FE_ALL_EXCEPT);
             for (int i = 0; i < lanes && i < len; ++i) {
-                if ((mask_bits >> i) & 1) {
-                    dst[i] = y.raw[i];
-                } else {
-                    dst[i] = npy_tan(fallback_buf[i]);
-                }
+                dst[i] = ((mask_bits >> i) & 1) ? y.raw[i] : (std::isnan(fallback_buf[i]) ? fallback_buf[i] : npy_tan(fallback_buf[i]));
             }
         }
     }
@@ -1458,41 +1491,34 @@ simd_tan_f64_impl_strided(const npy_double *src, npy_intp ssrc, npy_double *dst,
 
     HWY_LANES_CONSTEXPR int lanes = Lanes<double>();
     const auto src_index = hn::Mul(hn::Iota(ind_tag_t, 0), hn::Set(ind_tag_t, ssrc));
+    const auto dst_index = hn::Mul(hn::Iota(ind_tag_t, 0), hn::Set(ind_tag_t, sdst));
 
-    double NPY_DECL_ALIGNED(NPY_SIMD_WIDTH) ip_fback[hn::MaxLanes(d)];
+    double NPY_DECL_ALIGNED(NPY_SIMD_WIDTH) ip_fback[hn::MaxLanes(d) * 2];
+
+    feclearexcept(FE_ALL_EXCEPT);
 
     for (; len > 0; len -= lanes, src += ssrc * lanes, dst += sdst * lanes) {
         auto x_in = hn::GatherIndexN(d, src, src_index, len);
-
-        auto abs_x = hn::Abs(x_in);
-        auto needs_fallback = hn::Ge(abs_x, range_limit_vec);
         auto is_nan = hn::IsNaN(x_in);
-        auto is_inf = hn::Eq(abs_x, hn::Inf(d));
-        auto simd_mask = hn::Not(hn::Or(hn::Or(is_nan, is_inf), needs_fallback));
+        auto x_clean = hn::IfThenElse(is_nan, hn::Zero(d), x_in);
+        auto simd_mask = hn::And(hn::Lt(hn::Abs(x_clean), range_limit_vec), hn::Not(is_nan));
 
         if (hn::AllTrue(d, simd_mask)) {
-            hn::Vec<decltype(d)> y = TanPolyDouble(d, x_in);
-            for (int i = 0; i < lanes && i < len; ++i) {
-                dst[i * sdst] = y.raw[i];
-            }
+            hn::ScatterIndexN(TanPolyDouble(d, x_in), d, dst, dst_index, len);
         } else if (hn::AllFalse(d, simd_mask)) {
-            feclearexcept(FE_ALL_EXCEPT);
             hn::Store(x_in, d, ip_fback);
             for (int i = 0; i < lanes && i < len; ++i) {
-                dst[i * sdst] = npy_tan(ip_fback[i]);
+                dst[i * sdst] = std::isnan(ip_fback[i]) ? ip_fback[i] : npy_tan(ip_fback[i]);
             }
         } else {
-            auto y = TanPolyDouble(d, x_in);
+            auto safe_x = hn::IfThenElse(simd_mask, x_in, hn::Zero(d));
+            auto y = TanPolyDouble(d, safe_x);
             hn::Store(x_in, d, ip_fback);
+            hn::Store(y, d, ip_fback + lanes);
             npy_uint64 mask_bits;
             hn::StoreMaskBits(d, simd_mask, (uint8_t*)&mask_bits);
-            feclearexcept(FE_ALL_EXCEPT);
             for (int i = 0; i < lanes && i < len; ++i) {
-                if ((mask_bits >> i) & 1) {
-                    dst[i * sdst] = y.raw[i];
-                } else {
-                    dst[i * sdst] = npy_tan(ip_fback[i]);
-                }
+                dst[i * sdst] = ((mask_bits >> i) & 1) ? ip_fback[lanes + i] : (std::isnan(ip_fback[i]) ? ip_fback[i] : npy_tan(ip_fback[i]));
             }
         }
     }
@@ -1572,7 +1598,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_tan)
         simd_svml_tan_f64(src, ssrc, dst, sdst, len);
         return;
     }
-#elif NPY_SIMD_FMA3 && defined(__aarch64__)
+#elif SIMD_ARM
     const npy_double *src = (npy_double*)args[0];
           npy_double *dst = (npy_double*)args[1];
     const npy_intp len = dimensions[0];
@@ -1609,7 +1635,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_tan)
         simd_svml_tan_f32(src, ssrc, dst, sdst, len);
         return;
     }
-#elif NPY_SIMD_FMA3 && defined(__aarch64__)
+#elif SIMD_ARM
     const npy_float *src = (npy_float*)args[0];
           npy_float *dst = (npy_float*)args[1];
     const npy_intp len = dimensions[0];
@@ -1641,8 +1667,12 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_tan)
 typedef __m256i npyvh_f16;
 #define npyv_cvt_f16_f32 _mm512_cvtph_ps
 #define npyv_cvt_f32_f16 _mm512_cvtps_ph
-#define npyvh_load_f16(PTR) _mm256_loadu_si256((const __m256i*)(PTR))
-#define npyvh_store_f16(PTR, data) _mm256_storeu_si256((__m256i*)PTR, data)
+NPY_FINLINE npyvh_f16 npyvh_load_f16(const void *ptr) {
+    return _mm256_loadu_si256((const __m256i*)(ptr));
+}
+NPY_FINLINE void npyvh_store_f16(void *ptr, npyvh_f16 data) {
+    _mm256_storeu_si256((__m256i*)ptr, data);
+}
 NPY_FINLINE npyvh_f16 npyvh_load_till_f16(const npy_half *ptr, npy_uintp nlane, npy_half fill)
 {
     assert(nlane > 0);
@@ -1717,7 +1747,7 @@ NPY_CPU_DISPATCH_CURFX(HALF_sin)(char **args, npy_intp const *dimensions,
     #endif
         return;
     }
-#elif NPY_SIMD_FMA3 && defined(__aarch64__)
+#elif SIMD_ARM
     const npy_half *src = (npy_half*)args[0];
           npy_half *dst = (npy_half*)args[1];
     const npy_intp len = dimensions[0];
@@ -1756,7 +1786,7 @@ NPY_CPU_DISPATCH_CURFX(HALF_cos)(char **args, npy_intp const *dimensions,
     #endif
         return;
     }
-#elif NPY_SIMD_FMA3 && defined(__aarch64__)
+#elif SIMD_ARM
     const npy_half *src = (npy_half*)args[0];
           npy_half *dst = (npy_half*)args[1];
     const npy_intp len = dimensions[0];
@@ -1793,7 +1823,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_tan)
     #endif
         return;
     }
-#elif NPY_SIMD_FMA3 && defined(__aarch64__)
+#elif SIMD_ARM
     const npy_half *src = (npy_half*)args[0];
           npy_half *dst = (npy_half*)args[1];
     const npy_intp len = dimensions[0];

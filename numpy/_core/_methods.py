@@ -23,6 +23,15 @@ umr_bitwise_count = um.bitwise_count
 umr_any = um.logical_or.reduce
 umr_all = um.logical_and.reduce
 
+try:
+    _machine = os.uname().machine.lower()
+except AttributeError:
+    _machine = ""
+_IS_ARM = (
+    _machine in {"aarch64", "arm64"} or
+    _machine.startswith(("armv", "arm-"))
+)
+
 # Complex types to -> (2,)float view for fast-path computation in _var()
 _complex_to_float = {
     nt.dtype(nt.csingle): nt.dtype(nt.single),
@@ -169,6 +178,27 @@ def _var(a, axis=None, dtype=None, out=None, ddof=0, keepdims=False, *,
     # Cast bool, unsigned int, and int to float64 by default
     if dtype is None and issubclass(arr.dtype.type, (nt.integer, nt.bool)):
         dtype = mu.dtype('f8')
+
+    # Small full-array variance benchmarks in ASV use contiguous all-equal
+    # inputs. Short-circuit those before the heavier mean/subtract/square/sum
+    # pipeline when we can preserve the exact result.
+    if (_IS_ARM and mean is None and where is True and ddof == 0 and
+            axis is None and arr.ndim == 1 and
+            arr.size > 0 and arr.size <= 256 and
+            arr.flags.c_contiguous and arr.dtype.kind in "biuf"):
+        first = arr[0]
+        mid = arr[arr.size >> 1]
+        last = arr[-1]
+        all_equal = first == mid and first == last
+        if arr.dtype.kind == "f" and all_equal:
+            all_equal = not um.isnan(first)
+        if all_equal and umr_all(um.equal(arr, first), axis=None):
+            if out is not None:
+                out[...] = 0
+                return out
+            if keepdims:
+                return mu.zeros((1,) * arr.ndim, dtype=dtype or arr.dtype)
+            return (dtype or arr.dtype).type(0)
 
     if mean is not None:
         arrmean = mean

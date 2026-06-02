@@ -309,13 +309,15 @@ execute_complex_op(char **args, const npy_intp *dimensions,
     char *ip1 = args[0], *ip2 = args[1], *op1 = args[2];
     npy_intp is1 = steps[0], is2 = steps[1], os1 = steps[2];
     npy_intp n = dimensions[0];
-    const npy_intp csz = sizeof(T) * 2;
 
     /* Identify standard memory access patterns. */
+#if NPY_HWY
+    const npy_intp csz = sizeof(T) * 2;
     bool is_map    = (is1 == csz && is2 == csz && os1 == csz);
     bool is_reduce = (is1 == 0   && is2 == csz && os1 == 0);
     bool is_bcast1 = (is1 == 0   && is2 == csz && os1 == csz);
     bool is_bcast2 = (is1 == csz && is2 == 0   && os1 == csz);
+#endif
 
     if (n > 0) {
 #if NPY_HWY
