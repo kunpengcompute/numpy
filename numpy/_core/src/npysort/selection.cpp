@@ -808,8 +808,8 @@ NPY_NO_EXPORT int
 introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
              npy_intp *pivots, npy_intp *npiv)
 {
-    constexpr npy_intp edge_heap_select_limit =
-            (NPY_ARM_SELECTION_TUNING && !arg) ? 1024 : 128;
+    const npy_intp edge_heap_select_limit =
+            (NPY_ARM_SELECTION_TUNING && !arg && num >= 4096) ? 1024 : 128;
     constexpr npy_intp bad_split_ratio = 16;
     constexpr npy_intp partition_highway_max_bytes = 32768;
     constexpr npy_intp ninther_bad_split_threshold = 2;
@@ -853,6 +853,9 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
     }
 
     if (NPY_ARM_SELECTION_TUNING &&
+            !arg &&
+            std::is_same_v<type, npy_float> &&
+            num >= 4096 &&
             !sampled_sorted_block &&
             !skip_arm_ordered_partition_check_<Tag>(v, num, idx) &&
             ordered_span_<Tag>(v, low, high, idx)) {
@@ -862,8 +865,9 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
 
     const bool skip_edge_heap_select =
             NPY_ARM_SELECTION_TUNING && !arg &&
-            ((std::is_same_v<type, npy_int64> ||
-              std::is_same_v<type, npy_double>) ||
+            ((num >= 4096 &&
+              (std::is_same_v<type, npy_int64> ||
+               std::is_same_v<type, npy_double>)) ||
              (sampled_sorted_block == 100 &&
               kth - low + 1 == 1001 &&
               (std::is_same_v<type, npy_int16> ||
