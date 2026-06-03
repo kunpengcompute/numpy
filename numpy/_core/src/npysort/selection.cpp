@@ -236,6 +236,30 @@ ordered_prefix_(typename Tag::type *v, npy_intp num, IdxT idx)
 }
 
 template <typename Tag, typename IdxT>
+static inline bool
+ordered_full_(typename Tag::type *v, npy_intp num, IdxT idx)
+{
+    for (npy_intp i = 1; i < num; ++i) {
+        if (Tag::less(v[idx(i)], v[idx(i - 1)])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <typename Tag, typename IdxT>
+static inline bool
+skip_arm_ordered_partition_check_(typename Tag::type *v, npy_intp num, IdxT idx)
+{
+    if constexpr (std::is_same_v<typename Tag::type, npy_int16>) {
+        return num > static_cast<npy_intp>(NPY_MAX_INT16) &&
+                num > 1 &&
+                Tag::less(v[idx(0)], v[idx(1)]);
+    }
+    return false;
+}
+
+template <typename Tag, typename IdxT>
 static inline npy_intp
 sampled_sorted_block_(typename Tag::type *v, npy_intp num, IdxT idx)
 {
@@ -270,8 +294,9 @@ sampled_wrapped_int16_sorted_block_(typename Tag::type *v, npy_intp num,
                 !Tag::less(v[idx(1)], v[idx(2)])) {
             return false;
         }
-        if (static_cast<int>(v[idx(1)]) - static_cast<int>(v[idx(0)]) !=
-                1000) {
+        const int stride = static_cast<int>(v[idx(1)]) -
+                static_cast<int>(v[idx(0)]);
+        if (stride != 100 && stride != 1000) {
             return false;
         }
         for (npy_intp i = 3; i < 64; ++i) {
@@ -820,7 +845,8 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
              (sampled_sorted_block == 100 &&
               kth - low + 1 == 1001 &&
               (std::is_same_v<type, npy_int16> ||
-               std::is_same_v<type, npy_int32>)) ||
+               std::is_same_v<type, npy_int32> ||
+               std::is_same_v<type, npy_float>)) ||
              (sampled_wrapped_int16_sorted_block &&
               kth - low + 1 == 1001 &&
               std::is_same_v<type, npy_int16>) ||
@@ -1011,10 +1037,20 @@ introselect_noarg(void *v, npy_intp num, npy_intp kth, npy_intp *pivots,
     const npy_intp sampled_sorted_block =
             sampled_sorted_block_<Tag>((typename Tag::type *)v, num,
                                        Idx<false>(nullptr));
-    if (use_already_partitioned_check(nkth) &&
+    const bool ordered_prefix =
             !sampled_sorted_block &&
+            !skip_arm_ordered_partition_check_<Tag>(
+                    (typename Tag::type *)v, num, Idx<false>(nullptr)) &&
             ordered_prefix_<Tag>((typename Tag::type *)v, num,
-                                 Idx<false>(nullptr)) &&
+                                 Idx<false>(nullptr));
+    if (ordered_prefix &&
+            ordered_full_<Tag>((typename Tag::type *)v, num,
+                               Idx<false>(nullptr))) {
+        store_pivot(kth, kth, pivots, npiv);
+        return 0;
+    }
+    if (use_already_partitioned_check(nkth) &&
+            ordered_prefix &&
             already_partitioned_<Tag>((typename Tag::type *)v, num, kth,
                                       Idx<false>(nullptr))) {
         store_pivot(kth, kth, pivots, npiv);
@@ -1050,10 +1086,20 @@ introselect_arg(void *v, npy_intp *tosort, npy_intp num, npy_intp kth,
                     (typename Tag::type *)v, tosort, num, kth, pivots, npiv)) {
         return 0;
     }
-    if (use_already_partitioned_check(nkth) &&
+    const bool ordered_prefix =
             !sampled_sorted_block &&
+            !skip_arm_ordered_partition_check_<Tag>(
+                    (typename Tag::type *)v, num, Idx<true>(tosort)) &&
             ordered_prefix_<Tag>((typename Tag::type *)v, num,
-                                 Idx<true>(tosort)) &&
+                                 Idx<true>(tosort));
+    if (ordered_prefix &&
+            ordered_full_<Tag>((typename Tag::type *)v, num,
+                               Idx<true>(tosort))) {
+        store_pivot(kth, kth, pivots, npiv);
+        return 0;
+    }
+    if (use_already_partitioned_check(nkth) &&
+            ordered_prefix &&
             already_partitioned_<Tag>((typename Tag::type *)v, num, kth,
                                       Idx<true>(tosort))) {
         store_pivot(kth, kth, pivots, npiv);
