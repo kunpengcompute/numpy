@@ -249,6 +249,18 @@ ordered_full_(typename Tag::type *v, npy_intp num, IdxT idx)
 
 template <typename Tag, typename IdxT>
 static inline bool
+ordered_span_(typename Tag::type *v, npy_intp low, npy_intp high, IdxT idx)
+{
+    for (npy_intp i = low + 1; i <= high; ++i) {
+        if (Tag::less(v[idx(i)], v[idx(i - 1)])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <typename Tag, typename IdxT>
+static inline bool
 skip_arm_ordered_partition_check_(typename Tag::type *v, npy_intp num, IdxT idx)
 {
     if constexpr (std::is_same_v<typename Tag::type, npy_int16>) {
@@ -299,7 +311,9 @@ sampled_wrapped_int16_sorted_block_(typename Tag::type *v, npy_intp num,
         if (stride != 100 && stride != 1000) {
             return false;
         }
-        for (npy_intp i = 3; i < 64; ++i) {
+        const npy_intp limit = std::min<npy_intp>(num,
+                stride == 100 ? 512 : 64);
+        for (npy_intp i = 3; i < limit; ++i) {
             if (Tag::less(v[idx(i)], v[idx(i - 1)])) {
                 return true;
             }
@@ -838,6 +852,14 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         *npiv -= 1;
     }
 
+    if (NPY_ARM_SELECTION_TUNING &&
+            !sampled_sorted_block &&
+            !skip_arm_ordered_partition_check_<Tag>(v, num, idx) &&
+            ordered_span_<Tag>(v, low, high, idx)) {
+        store_pivot(kth, kth, pivots, npiv);
+        return 0;
+    }
+
     const bool skip_edge_heap_select =
             NPY_ARM_SELECTION_TUNING && !arg &&
             ((std::is_same_v<type, npy_int64> ||
@@ -1038,12 +1060,14 @@ introselect_noarg(void *v, npy_intp num, npy_intp kth, npy_intp *pivots,
             sampled_sorted_block_<Tag>((typename Tag::type *)v, num,
                                        Idx<false>(nullptr));
     const bool ordered_prefix =
+            use_already_partitioned_check(nkth) &&
             !sampled_sorted_block &&
             !skip_arm_ordered_partition_check_<Tag>(
                     (typename Tag::type *)v, num, Idx<false>(nullptr)) &&
             ordered_prefix_<Tag>((typename Tag::type *)v, num,
                                  Idx<false>(nullptr));
-    if (ordered_prefix &&
+    if (use_already_partitioned_check(nkth) &&
+            ordered_prefix &&
             ordered_full_<Tag>((typename Tag::type *)v, num,
                                Idx<false>(nullptr))) {
         store_pivot(kth, kth, pivots, npiv);
@@ -1087,12 +1111,14 @@ introselect_arg(void *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         return 0;
     }
     const bool ordered_prefix =
+            use_already_partitioned_check(nkth) &&
             !sampled_sorted_block &&
             !skip_arm_ordered_partition_check_<Tag>(
                     (typename Tag::type *)v, num, Idx<true>(tosort)) &&
             ordered_prefix_<Tag>((typename Tag::type *)v, num,
                                  Idx<true>(tosort));
-    if (ordered_prefix &&
+    if (use_already_partitioned_check(nkth) &&
+            ordered_prefix &&
             ordered_full_<Tag>((typename Tag::type *)v, num,
                                Idx<true>(tosort))) {
         store_pivot(kth, kth, pivots, npiv);
