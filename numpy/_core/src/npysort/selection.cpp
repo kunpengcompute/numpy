@@ -725,6 +725,20 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         store_pivot(kth, kth, pivots, npiv);
         return 0;
     }
+    else if (!(NPY_ARM_SELECTION_TUNING && !arg) &&
+             (kth - low + 1 <= edge_heap_select_limit ||
+              high - kth + 1 <= edge_heap_select_limit) &&
+             !sampled_descending_<Tag, arg>(v, tosort, low, high)) {
+        edge_heap_select_<Tag, arg>(v, tosort, low, high, kth);
+        store_pivot(kth, kth, pivots, npiv);
+        return 0;
+    }
+    else if (sampled_descending_<Tag, arg>(v, tosort, low, high) &&
+             descending_sorted_and_reverse_<Tag, arg>(v, tosort, low, high)) {
+        store_pivot(kth, kth, pivots, npiv);
+        return 0;
+    }
+
     else if (inexact<type>() && kth == num - 1) {
         /* useful to check if NaN present via partition(d, (x, -1)) */
         npy_intp k;
@@ -739,19 +753,6 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         std::swap(sortee(kth), sortee(maxidx));
         return 0;
     }
-    else if (num >= 64 &&
-             (kth - low + 1 <= edge_heap_select_limit ||
-              high - kth + 1 <= edge_heap_select_limit) &&
-             !sampled_descending_<Tag, arg>(v, tosort, low, high)) {
-        edge_heap_select_<Tag, arg>(v, tosort, low, high, kth);
-        store_pivot(kth, kth, pivots, npiv);
-        return 0;
-    }
-    else if (sampled_descending_<Tag, arg>(v, tosort, low, high) &&
-             descending_sorted_and_reverse_<Tag, arg>(v, tosort, low, high)) {
-        store_pivot(kth, kth, pivots, npiv);
-        return 0;
-    }
 
     depth_limit = npy_get_msb(num) * 2;
 
@@ -760,18 +761,26 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         npy_intp ll = low + 1;
         npy_intp hh = high;
         const npy_intp span = high - low + 1;
-        const bool sampled_monotonic =
-                span >= ninther_min_span &&
-                sampled_monotonic_<Tag, arg>(v, tosort, low, high);
-        const bool use_ninther_pivot =
-                !sampled_monotonic &&
-                span >= ninther_min_span &&
-                bad_split_count >= ninther_bad_split_threshold;
-        const bool use_mom5_pivot =
-                !sampled_monotonic &&
-                span >= mom5_min_span &&
-                (bad_split_count >= mom5_bad_split_threshold ||
-                 depth_limit <= 0);
+        const bool use_legacy_arm_pivot = NPY_ARM_SELECTION_TUNING;
+        bool use_ninther_pivot = false;
+        bool use_mom5_pivot = false;
+        if (!use_legacy_arm_pivot) {
+            const bool sampled_monotonic =
+                    span >= ninther_min_span &&
+                    sampled_monotonic_<Tag, arg>(v, tosort, low, high);
+            use_ninther_pivot =
+                    !sampled_monotonic &&
+                    span >= ninther_min_span &&
+                    bad_split_count >= ninther_bad_split_threshold;
+            use_mom5_pivot =
+                    !sampled_monotonic &&
+                    span >= mom5_min_span &&
+                    (bad_split_count >= mom5_bad_split_threshold ||
+                     depth_limit <= 0);
+        }
+        else {
+            use_mom5_pivot = depth_limit <= 0 && hh - ll >= 5;
+        }
         const bool can_use_partition_highway =
                 !arg &&
                 (std::is_same_v<type, npy_int64> ||
@@ -880,12 +889,23 @@ introselect_noarg(void *v, npy_intp num, npy_intp kth, npy_intp *pivots,
                   npy_intp *npiv, npy_intp nkth, void *)
 {
     using T = typename std::conditional<std::is_same_v<Tag, npy::half_tag>, np::Half, typename Tag::type>::type;
+#if NPY_ARM_SELECTION_TUNING
+    if (use_already_partitioned_check(nkth) &&
+            ordered_prefix_<Tag>((typename Tag::type *)v, num,
+                                 Idx<false>(nullptr)) &&
+            already_partitioned_<Tag>((typename Tag::type *)v, num, kth,
+                                      Idx<false>(nullptr))) {
+        store_pivot(kth, kth, pivots, npiv);
+        return 0;
+    }
+#else
     if (use_already_partitioned_check(nkth) &&
             already_partitioned_<Tag>((typename Tag::type *)v, num, kth,
                                       Idx<false>(nullptr))) {
         store_pivot(kth, kth, pivots, npiv);
         return 0;
     }
+#endif
     if ((nkth == 1) && (quickselect_dispatch((T *)v, num, kth))) {
         return 0;
     }
