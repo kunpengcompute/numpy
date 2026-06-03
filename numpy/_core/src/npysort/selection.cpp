@@ -725,19 +725,6 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         store_pivot(kth, kth, pivots, npiv);
         return 0;
     }
-    else if ((kth - low + 1 <= edge_heap_select_limit ||
-              high - kth + 1 <= edge_heap_select_limit) &&
-             !sampled_descending_<Tag, arg>(v, tosort, low, high)) {
-        edge_heap_select_<Tag, arg>(v, tosort, low, high, kth);
-        store_pivot(kth, kth, pivots, npiv);
-        return 0;
-    }
-    else if (sampled_descending_<Tag, arg>(v, tosort, low, high) &&
-             descending_sorted_and_reverse_<Tag, arg>(v, tosort, low, high)) {
-        store_pivot(kth, kth, pivots, npiv);
-        return 0;
-    }
-
     else if (inexact<type>() && kth == num - 1) {
         /* useful to check if NaN present via partition(d, (x, -1)) */
         npy_intp k;
@@ -750,6 +737,19 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
             }
         }
         std::swap(sortee(kth), sortee(maxidx));
+        return 0;
+    }
+    else if (num >= 64 &&
+             (kth - low + 1 <= edge_heap_select_limit ||
+              high - kth + 1 <= edge_heap_select_limit) &&
+             !sampled_descending_<Tag, arg>(v, tosort, low, high)) {
+        edge_heap_select_<Tag, arg>(v, tosort, low, high, kth);
+        store_pivot(kth, kth, pivots, npiv);
+        return 0;
+    }
+    else if (sampled_descending_<Tag, arg>(v, tosort, low, high) &&
+             descending_sorted_and_reverse_<Tag, arg>(v, tosort, low, high)) {
+        store_pivot(kth, kth, pivots, npiv);
         return 0;
     }
 
