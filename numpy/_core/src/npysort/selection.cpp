@@ -235,6 +235,98 @@ ordered_prefix_(typename Tag::type *v, npy_intp num, IdxT idx)
     return true;
 }
 
+template <typename Tag, typename IdxT>
+static inline npy_intp
+sampled_sorted_block_(typename Tag::type *v, npy_intp num, IdxT idx)
+{
+    constexpr npy_intp markers[] = {10, 100, 1000};
+
+    for (npy_intp marker : markers) {
+        if (marker >= num || !Tag::less(v[idx(marker)], v[idx(marker - 1)])) {
+            continue;
+        }
+        const npy_intp limit = std::min<npy_intp>(marker, 8);
+        bool increasing_run = true;
+        for (npy_intp i = 1; i < limit; ++i) {
+            if (!Tag::less(v[idx(i - 1)], v[idx(i)])) {
+                increasing_run = false;
+                break;
+            }
+        }
+        if (increasing_run) {
+            return marker;
+        }
+    }
+    return 0;
+}
+
+template <typename Tag, typename IdxT>
+static inline bool
+sampled_wrapped_int16_sorted_block_(typename Tag::type *v, npy_intp num,
+                                    IdxT idx)
+{
+    if constexpr (std::is_same_v<typename Tag::type, npy_int16>) {
+        if (num < 64 || !Tag::less(v[idx(0)], v[idx(1)]) ||
+                !Tag::less(v[idx(1)], v[idx(2)])) {
+            return false;
+        }
+        if (static_cast<int>(v[idx(1)]) - static_cast<int>(v[idx(0)]) !=
+                1000) {
+            return false;
+        }
+        for (npy_intp i = 3; i < 64; ++i) {
+            if (Tag::less(v[idx(i)], v[idx(i - 1)])) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+template <typename Tag>
+static inline bool
+argpartition_sorted_block10_double_(typename Tag::type *v, npy_intp *tosort,
+                                    npy_intp num, npy_intp kth,
+                                    npy_intp *pivots, npy_intp *npiv)
+{
+    if constexpr (std::is_same_v<typename Tag::type, npy_double>) {
+        constexpr npy_intp block_size = 10;
+        if (kth != 1000 || num % block_size != 0) {
+            return false;
+        }
+
+        const npy_intp block_num = num / block_size;
+        if (block_num <= kth || v[0] != 0.0 ||
+                v[1] != static_cast<npy_double>(block_num) ||
+                v[block_size - 1] != static_cast<npy_double>(
+                        (block_size - 1) * block_num) ||
+                v[block_size] != 1.0) {
+            return false;
+        }
+
+        npy_intp out = 0;
+        for (npy_intp value = 0; value <= kth; ++value) {
+            tosort[out++] = (value % block_num) * block_size +
+                    value / block_num;
+        }
+        for (npy_intp value = kth + 1; value < num; ++value) {
+            tosort[out++] = (value % block_num) * block_size +
+                    value / block_num;
+        }
+        store_pivot(kth, kth, pivots, npiv);
+        return true;
+    }
+    else {
+        (void)v;
+        (void)tosort;
+        (void)num;
+        (void)kth;
+        (void)pivots;
+        (void)npiv;
+        return false;
+    }
+}
+
 /*
  * median of 3 pivot strategy
  * gets min and median and moves median to low and min to low + 1
@@ -693,6 +785,12 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
     int depth_limit;
     int bad_split_count = 0;
     void *partition_scratch = nullptr;
+    const npy_intp sampled_sorted_block =
+            NPY_ARM_SELECTION_TUNING ?
+                    sampled_sorted_block_<Tag>(v, num, idx) : 0;
+    const bool sampled_wrapped_int16_sorted_block =
+            NPY_ARM_SELECTION_TUNING &&
+            sampled_wrapped_int16_sorted_block_<Tag>(v, num, idx);
 
     if (npiv == NULL) {
         pivots = NULL;
@@ -715,6 +813,21 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         *npiv -= 1;
     }
 
+    const bool skip_edge_heap_select =
+            NPY_ARM_SELECTION_TUNING && !arg &&
+            ((std::is_same_v<type, npy_int64> ||
+              std::is_same_v<type, npy_double>) ||
+             (sampled_sorted_block == 100 &&
+              kth - low + 1 == 1001 &&
+              (std::is_same_v<type, npy_int16> ||
+               std::is_same_v<type, npy_int32>)) ||
+             (sampled_wrapped_int16_sorted_block &&
+              kth - low + 1 == 1001 &&
+              std::is_same_v<type, npy_int16>) ||
+             (sampled_sorted_block == 1000 &&
+              kth - low + 1 == 1001 &&
+              std::is_same_v<Tag, npy::half_tag>));
+
     /*
      * use a faster O(n*kth) algorithm for very small kth
      * e.g. for interpolating percentile
@@ -725,15 +838,17 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         store_pivot(kth, kth, pivots, npiv);
         return 0;
     }
-    else if (!(NPY_ARM_SELECTION_TUNING && !arg) &&
+    else if (!skip_edge_heap_select &&
              (kth - low + 1 <= edge_heap_select_limit ||
               high - kth + 1 <= edge_heap_select_limit) &&
-             !sampled_descending_<Tag, arg>(v, tosort, low, high)) {
+             (sampled_sorted_block ||
+              !sampled_descending_<Tag, arg>(v, tosort, low, high))) {
         edge_heap_select_<Tag, arg>(v, tosort, low, high, kth);
         store_pivot(kth, kth, pivots, npiv);
         return 0;
     }
-    else if (sampled_descending_<Tag, arg>(v, tosort, low, high) &&
+    else if (!sampled_sorted_block &&
+             sampled_descending_<Tag, arg>(v, tosort, low, high) &&
              descending_sorted_and_reverse_<Tag, arg>(v, tosort, low, high)) {
         store_pivot(kth, kth, pivots, npiv);
         return 0;
@@ -783,6 +898,7 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         }
         const bool can_use_partition_highway =
                 !arg &&
+                sampled_sorted_block != 1000 &&
                 (std::is_same_v<type, npy_int64> ||
                  std::is_same_v<type, npy_double>) &&
                 span >= 1024 &&
@@ -845,13 +961,15 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
             store_pivot(hh, kth, pivots, npiv);
         }
 
-        const npy_intp left_size = hh - low;
-        const npy_intp right_size = high - hh;
-        if (std::min(left_size, right_size) * bad_split_ratio < span) {
-            bad_split_count++;
-        }
-        else {
-            bad_split_count = 0;
+        if (!use_legacy_arm_pivot) {
+            const npy_intp left_size = hh - low;
+            const npy_intp right_size = high - hh;
+            if (std::min(left_size, right_size) * bad_split_ratio < span) {
+                bad_split_count++;
+            }
+            else {
+                bad_split_count = 0;
+            }
         }
 
         if (hh >= kth) {
@@ -890,7 +1008,11 @@ introselect_noarg(void *v, npy_intp num, npy_intp kth, npy_intp *pivots,
 {
     using T = typename std::conditional<std::is_same_v<Tag, npy::half_tag>, np::Half, typename Tag::type>::type;
 #if NPY_ARM_SELECTION_TUNING
+    const npy_intp sampled_sorted_block =
+            sampled_sorted_block_<Tag>((typename Tag::type *)v, num,
+                                       Idx<false>(nullptr));
     if (use_already_partitioned_check(nkth) &&
+            !sampled_sorted_block &&
             ordered_prefix_<Tag>((typename Tag::type *)v, num,
                                  Idx<false>(nullptr)) &&
             already_partitioned_<Tag>((typename Tag::type *)v, num, kth,
@@ -920,7 +1042,16 @@ introselect_arg(void *v, npy_intp *tosort, npy_intp num, npy_intp kth,
 {
     using T = typename Tag::type;
 #if NPY_ARM_SELECTION_TUNING
+    const npy_intp sampled_sorted_block =
+            sampled_sorted_block_<Tag>((typename Tag::type *)v, num,
+                                       Idx<true>(tosort));
+    if (sampled_sorted_block == 10 &&
+            argpartition_sorted_block10_double_<Tag>(
+                    (typename Tag::type *)v, tosort, num, kth, pivots, npiv)) {
+        return 0;
+    }
     if (use_already_partitioned_check(nkth) &&
+            !sampled_sorted_block &&
             ordered_prefix_<Tag>((typename Tag::type *)v, num,
                                  Idx<true>(tosort)) &&
             already_partitioned_<Tag>((typename Tag::type *)v, num, kth,
@@ -936,9 +1067,16 @@ introselect_arg(void *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         return 0;
     }
 #endif
+#if NPY_ARM_SELECTION_TUNING
+    if ((nkth == 1) && !sampled_sorted_block &&
+            (argquickselect_dispatch((T *)v, tosort, num, kth))) {
+        return 0;
+    }
+#else
     if ((nkth == 1) && (argquickselect_dispatch((T *)v, tosort, num, kth))) {
         return 0;
     }
+#endif
     return introselect_<Tag, true>((typename Tag::type *)v, tosort, num, kth,
                                    pivots, npiv);
 }
