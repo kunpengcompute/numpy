@@ -951,7 +951,7 @@ foreach gen_mtargets : [
       VXE, VX,
       LSX,
     ]
-  ],
+  ], 
   [
     'loops_arithmetic.dispatch.h',
     src_file.process('src/umath/loops_arithmetic.dispatch.c.src'),
@@ -1066,6 +1066,14 @@ foreach gen_mtargets : [
       VXE, VX,
       LSX,
     ]
+  ],
+  [
+    'loops_minmax_hwy.dispatch.h',
+    'src/umath/loops_minmax_hwy.dispatch.cpp',
+    use_highway ? [
+      X86_V4, X86_V3, X86_V2,
+      SVE, ASIMD, NEON
+    ] : []
   ],
   [
     'loops_arithm_sum_hwy.dispatch.h',
@@ -1270,7 +1278,6 @@ src_multiarray = multiarray_gen_headers + [
   'src/multiarray/iterators.c',
   'src/multiarray/legacy_dtype_implementation.c',
   src_file.process('src/multiarray/lowlevel_strided_loops.c.src'),
-  'src/multiarray/strided_copy_kernels.cpp',
   'src/multiarray/mapping.c',
   'src/multiarray/methods.c',
   'src/multiarray/multiarraymodule.c',
@@ -1316,6 +1323,16 @@ src_multiarray = multiarray_gen_headers + [
   'src/multiarray/fnv.c',
 ]
 
+if cpu_family == 'aarch64'
+  src_multiarray += [
+    # AArch64 optimized strided copy kernels.
+    # On aarch64, NEON and scalar load/store instructions natively support
+    # unaligned memory access, enabling optimized typed pointer access
+    # regardless of alignment.
+    'src/multiarray/strided_copy_kernels.cpp',
+  ]
+endif
+
 src_umath = umath_gen_headers + [
   src_file.process('src/umath/funcs.inc.src'),
   src_file.process('src/umath/loops.c.src'),
@@ -1338,8 +1355,11 @@ src_umath = umath_gen_headers + [
   'src/umath/wrapping_array_method.c',
   # Highway SIMD complex maximum/minimum
   'src/umath/loops_complex_maxmin.dispatch.cpp',
-   'src/umath/loops_complex_maxmin.h',
-   # Highway SIMD floor division
+  'src/umath/loops_complex_maxmin.h',
+  # Highway SIMD integer maximum/minimum
+  'src/umath/loops_minmax_hwy.h',
+  'src/umath/loops_minmax_hwy_avail.c',
+  # Highway SIMD floor division
   'src/umath/loops_arithmetic_floor_hwy.h',
   'src/umath/loops_arithmetic_floor_hwy_avail.c',
   # Highway SIMD half-float absolute
@@ -1365,6 +1385,9 @@ if cpu_family == 'aarch64'
     # AArch64 SVE logical_and scalar-input specialization
     'src/umath/loops_logical_and_sve.c',
     'src/umath/loops_logical_and_sve.h',
+    # AArch64 logical_not specializations
+    'src/umath/loops_logical_not_aarch64.c',
+    'src/umath/loops_logical_not_aarch64.h',
     # AArch64 SVE shift scalar-input specialization
     'src/umath/loops_shift_sve.c',
     'src/umath/loops_shift_sve.h',
