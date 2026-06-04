@@ -17,21 +17,24 @@
 
 #include "lowlevel_strided_loops.h"
 
-/*
- * x86 platform works with unaligned access but the compiler is allowed to
- * assume all data is aligned to its size by the C standard. This means it can
- * vectorize instructions peeling only by the size of the type, if the data is
- * not aligned to this size one ends up with data not correctly aligned for SSE
- * instructions (16 byte).
- * So this flag can only be enabled if autovectorization is disabled.
- */
-#define NPY_USE_UNALIGNED_ACCESS 0
+#if defined(__aarch64__)
 
-#ifdef __aarch64__
-#define NPY_GCC_UNROLL_LOWLEVEL_LOOPS NPY_GCC_UNROLL_LOOPS
-#else
-#define NPY_GCC_UNROLL_LOWLEVEL_LOOPS
-#endif
+/*
+ * NPY_USE_UNALIGNED_ACCESS controls whether the strided copy kernels use
+ * typed pointer access (e.g. *(uint64_t*)ptr) which the compiler may
+ * optimize assuming the data is aligned to its type size.
+ *
+ * On x86, the compiler may auto-vectorize using SSE instructions (e.g.
+ * movaps) that require 16-byte alignment. If the data is not properly
+ * aligned, this causes a fault. So on x86 this flag must be 0 to use
+ * the safe unaligned (memcpy-based) path when alignment is not guaranteed.
+ *
+ * On aarch64, NEON load/store instructions (ld1/st1) and scalar ldr/str
+ * natively support unaligned memory access without faulting. The compiler
+ * can safely use typed pointer access regardless of alignment, so we
+ * enable this flag to always use the optimized aligned kernels.
+ */
+#define NPY_USE_UNALIGNED_ACCESS 1
 
 namespace {
 /*
@@ -40,11 +43,13 @@ namespace {
 template<int N>
 struct uint_of_size;
 
+struct copyuint128 { npy_uint64 a; npy_uint64 b; };
+
 template<> struct uint_of_size<1>  { using type = npy_uint8; };
 template<> struct uint_of_size<2>  { using type = npy_uint16; };
 template<> struct uint_of_size<4>  { using type = npy_uint32; };
 template<> struct uint_of_size<8>  { using type = npy_uint64; };
-template<> struct uint_of_size<16> { using type = npy_uint64; };
+template<> struct uint_of_size<16> { using type = copyuint128; };
 
 template<int N>
 using uint_of_size_t = typename uint_of_size<N>::type;
@@ -61,7 +66,7 @@ using uint_of_size_t = typename uint_of_size<N>::type;
 
 /* Aligned + Contiguous destination */
 template<int N>
-NPY_GCC_OPT_3 NPY_GCC_UNROLL_LOWLEVEL_LOOPS int
+NPY_GCC_OPT_3 NPY_GCC_UNROLL_LOOPS int
 broadcast_copy_ac_impl(const char *src, char *dst, npy_intp count) {
     using T = uint_of_size_t<N>;
     T temp = *(const T*)src;
@@ -75,7 +80,7 @@ broadcast_copy_ac_impl(const char *src, char *dst, npy_intp count) {
 
 /* Aligned + Strided destination */
 template<int N>
-NPY_GCC_OPT_3 NPY_GCC_UNROLL_LOWLEVEL_LOOPS int
+NPY_GCC_OPT_3 NPY_GCC_UNROLL_LOOPS int
 broadcast_copy_as_impl(const char *src, char *dst, npy_intp count, npy_intp dst_stride) {
     using T = uint_of_size_t<N>;
     T temp = *(const T*)src;
@@ -87,9 +92,11 @@ broadcast_copy_as_impl(const char *src, char *dst, npy_intp count, npy_intp dst_
     return 0;
 }
 
+#if !NPY_USE_UNALIGNED_ACCESS
 /* Unaligned + Contiguous destination */
 template<int N>
-int broadcast_copy_uc_impl(const char *src, char *dst, npy_intp count) {
+NPY_GCC_UNROLL_LOOPS int
+broadcast_copy_uc_impl(const char *src, char *dst, npy_intp count) {
     char temp[N];
     std::memcpy(temp, src, N);
     while (count > 0) {
@@ -102,7 +109,8 @@ int broadcast_copy_uc_impl(const char *src, char *dst, npy_intp count) {
 
 /* Unaligned + Strided destination */
 template<int N>
-int broadcast_copy_us_impl(const char *src, char *dst, npy_intp count, npy_intp dst_stride) {
+NPY_GCC_UNROLL_LOOPS int
+broadcast_copy_us_impl(const char *src, char *dst, npy_intp count, npy_intp dst_stride) {
     char temp[N];
     std::memcpy(temp, src, N);
     while (count > 0) {
@@ -112,35 +120,7 @@ int broadcast_copy_us_impl(const char *src, char *dst, npy_intp count, npy_intp 
     }
     return 0;
 }
-
-/* 16-byte specializations for aligned cases */
-template<>
-NPY_GCC_OPT_3 NPY_GCC_UNROLL_LOWLEVEL_LOOPS int
-broadcast_copy_ac_impl<16>(const char *src, char *dst, npy_intp count) {
-    npy_uint64 temp0 = ((const npy_uint64*)src)[0];
-    npy_uint64 temp1 = ((const npy_uint64*)src)[1];
-    while (count > 0) {
-        ((npy_uint64*)dst)[0] = temp0;
-        ((npy_uint64*)dst)[1] = temp1;
-        dst += 16;
-        --count;
-    }
-    return 0;
-}
-
-template<>
-NPY_GCC_OPT_3 NPY_GCC_UNROLL_LOWLEVEL_LOOPS int
-broadcast_copy_as_impl<16>(const char *src, char *dst, npy_intp count, npy_intp dst_stride) {
-    npy_uint64 temp0 = ((const npy_uint64*)src)[0];
-    npy_uint64 temp1 = ((const npy_uint64*)src)[1];
-    while (count > 0) {
-        ((npy_uint64*)dst)[0] = temp0;
-        ((npy_uint64*)dst)[1] = temp1;
-        dst += dst_stride;
-        --count;
-    }
-    return 0;
-}
+#endif
 
 /*
  * Broadcast copy dispatch function.
@@ -160,7 +140,7 @@ int broadcast_copy_dispatch(
         return 0;
     }
 
-#if aligned
+#if aligned && !NPY_USE_UNALIGNED_ACCESS
     if (count > 0) {
         assert(npy_is_aligned(dst, NPY_ALIGNOF_UINT(uint_of_size_t<N>)));
         assert(npy_is_aligned(src, NPY_ALIGNOF_UINT(uint_of_size_t<N>)));
@@ -178,10 +158,12 @@ int broadcast_copy_dispatch(
         return broadcast_copy_ac_impl<N>(src, dst, count);
     } else if constexpr (aligned && !dst_contig) {
         return broadcast_copy_as_impl<N>(src, dst, count, strides[1]);
+#if !NPY_USE_UNALIGNED_ACCESS
     } else if constexpr (!aligned && dst_contig) {
         return broadcast_copy_uc_impl<N>(src, dst, count);
     } else {
         return broadcast_copy_us_impl<N>(src, dst, count, strides[1]);
+#endif
     }
 }
 
@@ -249,9 +231,11 @@ strided_copy_ass_impl(const char *src, char *dst, npy_intp count, npy_intp src_s
     return 0;
 }
 
+#if !NPY_USE_UNALIGNED_ACCESS
 /* Unaligned + Contiguous src + Contiguous dst */
 template<int N>
-int strided_copy_ucc_impl(const char *src, char *dst, npy_intp count) {
+NPY_GCC_UNROLL_LOOPS int
+strided_copy_ucc_impl(const char *src, char *dst, npy_intp count) {
     while (count > 0) {
         std::memcpy(dst, src, N);
         dst += N;
@@ -263,7 +247,8 @@ int strided_copy_ucc_impl(const char *src, char *dst, npy_intp count) {
 
 /* Unaligned + Contiguous src + Strided dst */
 template<int N>
-int strided_copy_ucs_impl(const char *src, char *dst, npy_intp count, npy_intp dst_stride) {
+NPY_GCC_UNROLL_LOOPS int
+strided_copy_ucs_impl(const char *src, char *dst, npy_intp count, npy_intp dst_stride) {
     while (count > 0) {
         std::memcpy(dst, src, N);
         dst += dst_stride;
@@ -275,7 +260,8 @@ int strided_copy_ucs_impl(const char *src, char *dst, npy_intp count, npy_intp d
 
 /* Unaligned + Strided src + Contiguous dst */
 template<int N>
-int strided_copy_usc_impl(const char *src, char *dst, npy_intp count, npy_intp src_stride) {
+NPY_GCC_UNROLL_LOOPS int
+strided_copy_usc_impl(const char *src, char *dst, npy_intp count, npy_intp src_stride) {
     while (count > 0) {
         std::memcpy(dst, src, N);
         dst += N;
@@ -287,7 +273,8 @@ int strided_copy_usc_impl(const char *src, char *dst, npy_intp count, npy_intp s
 
 /* Unaligned + Strided src + Strided dst */
 template<int N>
-int strided_copy_uss_impl(const char *src, char *dst, npy_intp count, npy_intp src_stride, npy_intp dst_stride) {
+NPY_GCC_UNROLL_LOOPS int
+strided_copy_uss_impl(const char *src, char *dst, npy_intp count, npy_intp src_stride, npy_intp dst_stride) {
     while (count > 0) {
         std::memcpy(dst, src, N);
         dst += dst_stride;
@@ -296,46 +283,7 @@ int strided_copy_uss_impl(const char *src, char *dst, npy_intp count, npy_intp s
     }
     return 0;
 }
-
-/* 16-byte specializations for aligned cases */
-template<>
-NPY_GCC_UNROLL_LOOPS int
-strided_copy_acs_impl<16>(const char *src, char *dst, npy_intp count, npy_intp dst_stride) {
-    while (count > 0) {
-        ((npy_uint64*)dst)[0] = ((const npy_uint64*)src)[0];
-        ((npy_uint64*)dst)[1] = ((const npy_uint64*)src)[1];
-        dst += dst_stride;
-        src += 16;
-        --count;
-    }
-    return 0;
-}
-
-template<>
-NPY_GCC_UNROLL_LOOPS int
-strided_copy_asc_impl<16>(const char *src, char *dst, npy_intp count, npy_intp src_stride) {
-    while (count > 0) {
-        ((npy_uint64*)dst)[0] = ((const npy_uint64*)src)[0];
-        ((npy_uint64*)dst)[1] = ((const npy_uint64*)src)[1];
-        dst += 16;
-        src += src_stride;
-        --count;
-    }
-    return 0;
-}
-
-template<>
-NPY_GCC_UNROLL_LOOPS int
-strided_copy_ass_impl<16>(const char *src, char *dst, npy_intp count, npy_intp src_stride, npy_intp dst_stride) {
-    while (count > 0) {
-        ((npy_uint64*)dst)[0] = ((const npy_uint64*)src)[0];
-        ((npy_uint64*)dst)[1] = ((const npy_uint64*)src)[1];
-        dst += dst_stride;
-        src += src_stride;
-        --count;
-    }
-    return 0;
-}
+#endif
 
 /*
  * Strided copy dispatch function.
@@ -350,7 +298,7 @@ int strided_copy_dispatch(
     const char *src = args[0];
     char *dst = args[1];
 
-#if aligned
+#if aligned && !NPY_USE_UNALIGNED_ACCESS
     if (count > 0) {
         assert(npy_is_aligned(dst, NPY_ALIGNOF_UINT(uint_of_size_t<N>)));
         assert(npy_is_aligned(src, NPY_ALIGNOF_UINT(uint_of_size_t<N>)));
@@ -364,6 +312,7 @@ int strided_copy_dispatch(
         return strided_copy_asc_impl<N>(src, dst, count, strides[0]);
     } else if constexpr (aligned && !src_contig && !dst_contig) {
         return strided_copy_ass_impl<N>(src, dst, count, strides[0], strides[1]);
+#if !NPY_USE_UNALIGNED_ACCESS
     } else if constexpr (!aligned && src_contig && dst_contig) {
         return strided_copy_ucc_impl<N>(src, dst, count);
     } else if constexpr (!aligned && src_contig && !dst_contig) {
@@ -372,6 +321,7 @@ int strided_copy_dispatch(
         return strided_copy_usc_impl<N>(src, dst, count, strides[0]);
     } else {
         return strided_copy_uss_impl<N>(src, dst, count, strides[0], strides[1]);
+#endif
     }
 }
 
@@ -548,3 +498,5 @@ PyArray_GetStridedCopyFn(int aligned, npy_intp src_stride,
 }
 
 }
+
+#endif

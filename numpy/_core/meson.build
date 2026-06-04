@@ -1278,7 +1278,6 @@ src_multiarray = multiarray_gen_headers + [
   'src/multiarray/iterators.c',
   'src/multiarray/legacy_dtype_implementation.c',
   src_file.process('src/multiarray/lowlevel_strided_loops.c.src'),
-  'src/multiarray/strided_copy_kernels.cpp',
   'src/multiarray/mapping.c',
   'src/multiarray/methods.c',
   'src/multiarray/multiarraymodule.c',
@@ -1323,6 +1322,16 @@ src_multiarray = multiarray_gen_headers + [
   'src/npymath/arm64_exports.c',
   'src/multiarray/fnv.c',
 ]
+
+if cpu_family == 'aarch64'
+  src_multiarray += [
+    # AArch64 optimized strided copy kernels.
+    # On aarch64, NEON and scalar load/store instructions natively support
+    # unaligned memory access, enabling optimized typed pointer access
+    # regardless of alignment.
+    'src/multiarray/strided_copy_kernels.cpp',
+  ]
+endif
 
 src_umath = umath_gen_headers + [
   src_file.process('src/umath/funcs.inc.src'),
