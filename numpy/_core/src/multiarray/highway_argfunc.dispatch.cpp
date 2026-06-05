@@ -85,7 +85,7 @@ bool ArrayAllSame(const T* HWY_RESTRICT arr, npy_intp len)
 }
 #endif
 
-int ComputeArgMinBool(const uint8_t* HWY_RESTRICT arr, npy_intp len)
+npy_intp ComputeArgMinBool(const uint8_t* HWY_RESTRICT arr, npy_intp len)
 {
     if (len <= 0) return 0;
 
@@ -95,12 +95,15 @@ int ComputeArgMinBool(const uint8_t* HWY_RESTRICT arr, npy_intp len)
     const size_t N = hn::Lanes(d);
     const size_t unroll_N = 4 * N;
 
-    const size_t block_size = std::max<size_t>(unroll_N, (BOOL_BLOCK_SIZE_BYTES / unroll_N) * unroll_N);
+    const size_t block_size = std::max<size_t>(
+            unroll_N, (BOOL_BLOCK_SIZE_BYTES / unroll_N) * unroll_N);
+    const npy_intp block_size_intp = static_cast<npy_intp>(block_size);
+    const npy_intp lanes = static_cast<npy_intp>(N);
 
-    int base = 0;
+    npy_intp base = 0;
     V v_zero = hn::Zero(d);
 
-    for (; base <= len - (int)block_size; base += block_size) {
+    for (; base <= len - block_size_intp; base += block_size_intp) {
         V acc = hn::Set(d, hwy::HighestValue<uint8_t>());
         for (size_t i = 0; i < block_size; i += unroll_N) {
             V v0 = hn::LoadU(d, arr + base + i);
@@ -130,7 +133,7 @@ int ComputeArgMinBool(const uint8_t* HWY_RESTRICT arr, npy_intp len)
         }
     }
 
-    for (; base <= len - (int)N; base += N) {
+    for (; base <= len - lanes; base += lanes) {
         V v = hn::LoadU(d, arr + base);
         auto mask_is_zero = hn::Eq(v, v_zero);
         if (BRANCH_UNLIKELY(!hn::AllFalse(d, mask_is_zero))) {
@@ -150,7 +153,7 @@ int ComputeArgMinBool(const uint8_t* HWY_RESTRICT arr, npy_intp len)
 }
 
 // Find the index of the first non-zero element (True). Returns 0 if all False.
-int ComputeArgMaxBool(const uint8_t* HWY_RESTRICT arr, npy_intp len)
+npy_intp ComputeArgMaxBool(const uint8_t* HWY_RESTRICT arr, npy_intp len)
 {
     if (len <= 0) return 0;
 
@@ -160,12 +163,15 @@ int ComputeArgMaxBool(const uint8_t* HWY_RESTRICT arr, npy_intp len)
     const size_t N = hn::Lanes(d);
     const size_t unroll_N = 4 * N;
 
-    const size_t block_size = std::max<size_t>(unroll_N, (BOOL_BLOCK_SIZE_BYTES / unroll_N) * unroll_N);
+    const size_t block_size = std::max<size_t>(
+            unroll_N, (BOOL_BLOCK_SIZE_BYTES / unroll_N) * unroll_N);
+    const npy_intp block_size_intp = static_cast<npy_intp>(block_size);
+    const npy_intp lanes = static_cast<npy_intp>(N);
 
-    int base = 0;
+    npy_intp base = 0;
     V v_zero = hn::Zero(d);
 
-    for (; base <= len - (int)block_size; base += block_size) {
+    for (; base <= len - block_size_intp; base += block_size_intp) {
         V acc = v_zero;
         for (size_t i = 0; i < block_size; i += unroll_N) {
 
@@ -193,7 +199,7 @@ int ComputeArgMaxBool(const uint8_t* HWY_RESTRICT arr, npy_intp len)
         }
     }
 
-    for (; base <= len - (int)N; base += N) {
+    for (; base <= len - lanes; base += lanes) {
         V v = hn::LoadU(d, arr + base);
         if (BRANCH_UNLIKELY(!hn::AllTrue(d, hn::Eq(v, v_zero)))) {
             for (size_t i = 0; i < N; ++i) {
@@ -211,7 +217,7 @@ int ComputeArgMaxBool(const uint8_t* HWY_RESTRICT arr, npy_intp len)
 }
 
 template <typename T, bool IsMax>
-int ComputeArgMinMaxFloating(const T* HWY_RESTRICT arr, npy_intp len)
+npy_intp ComputeArgMinMaxFloating(const T* HWY_RESTRICT arr, npy_intp len)
 {
     if (len <= 0) return -1;
 #if defined(__aarch64__) || defined(__arm__) || defined(_M_ARM64) || defined(_M_ARM)
@@ -237,12 +243,14 @@ int ComputeArgMinMaxFloating(const T* HWY_RESTRICT arr, npy_intp len)
     const size_t BLOCK_SIZE = unroll_N * ITERATIONS_PER_BLOCK;
 
     T global_best_val = arr[0];
-    int global_best_idx = 0;
+    npy_intp global_best_idx = 0;
     if (std::isnan(global_best_val)) return 0;
 
-    int base = 0;
+    npy_intp base = 0;
+    const npy_intp block_size = static_cast<npy_intp>(BLOCK_SIZE);
+    const npy_intp lanes = static_cast<npy_intp>(N);
 
-    for (; base <= len - (int)BLOCK_SIZE; base += BLOCK_SIZE) {
+    for (; base <= len - block_size; base += block_size) {
         // Independent accumulator registers for OoO execution
         V best0 = hn::Set(d, IsMax ? hwy::LowestValue<T>() : hwy::HighestValue<T>());
         V best1 = best0;
@@ -403,7 +411,7 @@ int ComputeArgMinMaxFloating(const T* HWY_RESTRICT arr, npy_intp len)
     }
 
     // --- Medium tail ---
-    for (; base <= len - (int)N; base += N) {
+    for (; base <= len - lanes; base += lanes) {
         V v = hn::LoadU(d, arr + base);
         if (BRANCH_UNLIKELY(!hn::AllTrue(d, hn::Eq(v, v)))) {
             for (size_t i = 0; i < N; ++i) {
@@ -444,7 +452,7 @@ int ComputeArgMinMaxFloating(const T* HWY_RESTRICT arr, npy_intp len)
 }
 
 template <typename T, bool IsMax>
-int ComputeArgMinMaxInteger(const T* HWY_RESTRICT arr, npy_intp len)
+npy_intp ComputeArgMinMaxInteger(const T* HWY_RESTRICT arr, npy_intp len)
 {
     if (len <= 0) return -1;
 
@@ -460,11 +468,13 @@ int ComputeArgMinMaxInteger(const T* HWY_RESTRICT arr, npy_intp len)
     const size_t BLOCK_SIZE = unroll_N * ITERATIONS_PER_BLOCK;
 
     T global_best_val = arr[0];
-    int global_best_idx = 0;
+    npy_intp global_best_idx = 0;
 
-    int base = 0;
+    npy_intp base = 0;
+    const npy_intp block_size = static_cast<npy_intp>(BLOCK_SIZE);
+    const npy_intp lanes = static_cast<npy_intp>(N);
 
-    for (; base <= len - (int)BLOCK_SIZE; base += BLOCK_SIZE) {
+    for (; base <= len - block_size; base += block_size) {
         V best0 = hn::Set(d, IsMax ? hwy::LowestValue<T>() : hwy::HighestValue<T>());
         V best1 = best0;
         V best2 = best0;
@@ -527,7 +537,7 @@ int ComputeArgMinMaxInteger(const T* HWY_RESTRICT arr, npy_intp len)
     }
 
     // Medium tail processing (less than BLOCK_SIZE)
-    for (; base <= len - (int)N; base += N) {
+    for (; base <= len - lanes; base += lanes) {
         V v = hn::LoadU(d, arr + base);
         T v_best;
         if constexpr (IsMax) {
@@ -562,7 +572,7 @@ int ComputeArgMinMaxInteger(const T* HWY_RESTRICT arr, npy_intp len)
 }
 
 template <typename T>
-int ComputeArgMaxWrapper(const T* HWY_RESTRICT arr, npy_intp len)
+npy_intp ComputeArgMaxWrapper(const T* HWY_RESTRICT arr, npy_intp len)
 {
     if constexpr (std::is_integral<T>::value) {
         return ComputeArgMinMaxInteger<T, true>(arr, len);
@@ -572,7 +582,7 @@ int ComputeArgMaxWrapper(const T* HWY_RESTRICT arr, npy_intp len)
 }
 
 template <typename T>
-int ComputeArgMinWrapper(const T* HWY_RESTRICT arr, npy_intp len)
+npy_intp ComputeArgMinWrapper(const T* HWY_RESTRICT arr, npy_intp len)
 {
     if constexpr (std::is_integral<T>::value) {
         return ComputeArgMinMaxInteger<T, false>(arr, len);

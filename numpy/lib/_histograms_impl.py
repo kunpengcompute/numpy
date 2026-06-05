@@ -1092,10 +1092,17 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
             range[0] is not None and range[1] is not None and
             uniform_bins[0] and uniform_bins[1] and
             sample.dtype == np.float64 and sample.flags.c_contiguous):
-        hist = _histogramdd_uniform2d(
-            sample, nbin[0] - 2, nbin[1] - 2,
-            edges[0][0], edges[0][-1], edges[1][0], edges[1][-1])
-        return hist, edges
+        nx = nbin[0] - 2
+        ny = nbin[1] - 2
+        xscale = float(nx) / float(edges[0][-1] - edges[0][0])
+        yscale = float(ny) / float(edges[1][-1] - edges[1][0])
+        # If the scale overflows for a tiny valid range, keep the original
+        # fallback semantics instead of casting inf/NaN bin positions in C.
+        if np.isfinite(xscale) and np.isfinite(yscale):
+            hist = _histogramdd_uniform2d(
+                sample, nx, ny,
+                edges[0][0], edges[0][-1], edges[1][0], edges[1][-1])
+            return hist, edges
 
     # Compute the bin number each sample falls into.
     Ncount = tuple(
