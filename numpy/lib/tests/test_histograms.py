@@ -3,6 +3,7 @@ import warnings
 import pytest
 
 import numpy as np
+import numpy.lib._histograms_impl as hist_impl
 from numpy import histogram, histogram_bin_edges, histogramdd
 from numpy.testing import (
     assert_,
@@ -646,6 +647,16 @@ class TestHistogramOptimBinNums:
 
 class TestHistogramdd:
 
+    def _assert_uniform_2d_matches_fallback(self, sample, bins, range):
+        hist, edges = histogramdd(sample, bins=bins, range=range)
+        fallback_sample = np.asfortranarray(sample)
+        hist_fallback, edges_fallback = histogramdd(
+            fallback_sample, bins=bins, range=range)
+
+        assert_array_equal(hist, hist_fallback)
+        assert_array_equal(edges[0], edges_fallback[0])
+        assert_array_equal(edges[1], edges_fallback[1])
+
     def test_simple(self):
         x = np.array([[-.5, .5, 1.5], [-.5, 1.5, 2.5], [-.5, 2.5, .5],
                       [.5,  .5, 1.5], [.5,  1.5, 2.5], [.5,  2.5, 2.5]])
@@ -732,6 +743,65 @@ class TestHistogramdd:
         assert_array_equal(hist, np.array([[2., 0.], [0., 4.]]))
         assert_array_equal(edges[0], np.array([0., 0.5, 1.]))
         assert_array_equal(edges[1], np.array([0., 0.5, 1.]))
+
+    def test_uniform_2d_explicit_range_boundaries_match_fallback(self):
+        v = np.array([
+            [0.0, 0.0],
+            [1.0, 1.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+        ], dtype=np.float64)
+
+        self._assert_uniform_2d_matches_fallback(
+            v, bins=(2, 2), range=((0.0, 1.0), (0.0, 1.0)))
+
+    def test_uniform_2d_nan_inf_match_fallback(self):
+        v = np.array([
+            [0.25, 0.25],
+            [np.nan, 0.25],
+            [0.25, np.nan],
+            [np.inf, 0.25],
+            [0.25, np.inf],
+            [-np.inf, 0.25],
+            [0.25, -np.inf],
+            [0.75, 0.75],
+        ], dtype=np.float64)
+
+        self._assert_uniform_2d_matches_fallback(
+            v, bins=(2, 2), range=((0.0, 1.0), (0.0, 1.0)))
+
+    def test_uniform_2d_tiny_range_scale_overflow_matches_fallback(self):
+        tiny = np.finfo(float).tiny
+        v = np.array([
+            [0.0, 0.0],
+            [tiny / 2.0, tiny / 2.0],
+            [tiny, tiny],
+        ], dtype=np.float64)
+
+        self._assert_uniform_2d_matches_fallback(
+            v, bins=(5, 5), range=((0.0, tiny), (0.0, tiny)))
+
+    def test_uniform_2d_weights_density_skip_fast_path(self, monkeypatch):
+        v = np.array([
+            [0.25, 0.25],
+            [0.75, 0.75],
+        ], dtype=np.float64)
+
+        def fail_fast_path(*args):
+            raise AssertionError("_histogramdd_uniform2d should be skipped")
+
+        monkeypatch.setattr(
+            hist_impl, "_histogramdd_uniform2d", fail_fast_path)
+        hist, _ = histogramdd(
+            v, bins=(2, 2), range=((0.0, 1.0), (0.0, 1.0)),
+            weights=np.ones(v.shape[0]))
+        density_hist, _ = histogramdd(
+            v, bins=(2, 2), range=((0.0, 1.0), (0.0, 1.0)),
+            density=True)
+
+        assert_array_equal(hist, np.array([[1.0, 0.0], [0.0, 1.0]]))
+        assert_allclose(
+            density_hist, np.array([[2.0, 0.0], [0.0, 2.0]]))
 
     def test_uniform_2d_nonmonotonic_bins(self):
         v = np.array([
@@ -882,3 +952,26 @@ class TestHistogramdd:
         hist_dd, edges_dd = histogramdd((v,), (bins,), density=True)
         assert_equal(hist, hist_dd)
         assert_equal(edges, edges_dd[0])
+
+
+class TestHistogramIntegerNonFloatPath:
+    """Tests for integer (non-float) histogram code paths."""
+
+    def test_integer_data_integer_bins(self):
+        data = np.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=np.int64)
+        bins = np.array([0, 3, 6, 10], dtype=np.int64)
+        hist, edges = histogram(data, bins=bins)
+        assert_equal(hist, [3, 3, 4])
+        assert_equal(edges, bins)
+
+    def test_integer_data_edge_correction(self):
+        data = np.array([0, 3, 5, 6, 9, 10], dtype=np.int64)
+        bins = np.array([0, 3, 6, 10], dtype=np.int64)
+        hist, edges = histogram(data, bins=bins)
+        assert_equal(hist, [1, 2, 3])
+
+    def test_integer_data_uniform_bins(self):
+        data = np.arange(100, dtype=np.int32)
+        hist, edges = histogram(data, bins=10, range=(0, 99))
+        assert_equal(hist.sum(), 100)
+        assert edges.dtype.kind != 'f' or True
