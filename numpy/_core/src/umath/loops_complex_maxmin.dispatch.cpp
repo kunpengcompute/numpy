@@ -108,13 +108,13 @@ simd_map(const T *src1, const T *src2, T *dst, npy_intp n)
             M r_eq = hn::Eq(v1r, v2r);
             M i_ge = hn::Ge(v1i, v2i);
             M cge_mask = hn::Or(r_gt, hn::And(r_eq, i_ge));
-            keep_in1 = hn::Or(nan_in1, hn::AndNot(cge_mask, nan_in2));
+            keep_in1 = hn::Or(nan_in1, hn::And(cge_mask, hn::Not(nan_in2)));
         } else {
             M r_lt = hn::Lt(v1r, v2r);
             M r_eq = hn::Eq(v1r, v2r);
             M i_le = hn::Le(v1i, v2i);
             M cle_mask = hn::Or(r_lt, hn::And(r_eq, i_le));
-            keep_in1 = hn::Or(nan_in1, hn::AndNot(cle_mask, nan_in2));
+            keep_in1 = hn::Or(nan_in1, hn::And(cle_mask, hn::Not(nan_in2)));
         }
 
         V vr = hn::IfThenElse(keep_in1, v1r, v2r);
@@ -158,13 +158,13 @@ simd_reduce(const T *src1, const T *src2, T *dst, npy_intp n)
             M r_eq = hn::Eq(acc_r, v2r);
             M i_ge = hn::Ge(acc_i, v2i);
             M cge_mask = hn::Or(r_gt, hn::And(r_eq, i_ge));
-            keep_acc = hn::Or(nan_acc, hn::AndNot(cge_mask, nan_in2));
+            keep_acc = hn::Or(nan_acc, hn::And(cge_mask, hn::Not(nan_in2)));
         } else {
             M r_lt = hn::Lt(acc_r, v2r);
             M r_eq = hn::Eq(acc_r, v2r);
             M i_le = hn::Le(acc_i, v2i);
             M cle_mask = hn::Or(r_lt, hn::And(r_eq, i_le));
-            keep_acc = hn::Or(nan_acc, hn::AndNot(cle_mask, nan_in2));
+            keep_acc = hn::Or(nan_acc, hn::And(cle_mask, hn::Not(nan_in2)));
         }
 
         acc_r = hn::IfThenElse(keep_acc, acc_r, v2r);
@@ -228,13 +228,13 @@ simd_bcast1(const T *src1, const T *src2, T *dst, npy_intp n)
             M r_eq = hn::Eq(v1r, v2r);
             M i_ge = hn::Ge(v1i, v2i);
             M cge_mask = hn::Or(r_gt, hn::And(r_eq, i_ge));
-            keep_in1 = hn::Or(nan_1, hn::AndNot(cge_mask, nan_2));
+            keep_in1 = hn::Or(nan_1, hn::And(cge_mask, hn::Not(nan_2)));
         } else {
             M r_lt = hn::Lt(v1r, v2r);
             M r_eq = hn::Eq(v1r, v2r);
             M i_le = hn::Le(v1i, v2i);
             M cle_mask = hn::Or(r_lt, hn::And(r_eq, i_le));
-            keep_in1 = hn::Or(nan_1, hn::AndNot(cle_mask, nan_2));
+            keep_in1 = hn::Or(nan_1, hn::And(cle_mask, hn::Not(nan_2)));
         }
         hn::StoreInterleaved2(
                 hn::IfThenElse(keep_in1, v1r, v2r),
@@ -272,13 +272,13 @@ simd_bcast2(const T *src1, const T *src2, T *dst, npy_intp n)
             M r_eq = hn::Eq(v1r, v2r);
             M i_ge = hn::Ge(v1i, v2i);
             M cge_mask = hn::Or(r_gt, hn::And(r_eq, i_ge));
-            keep_in1 = hn::Or(nan_in1, hn::AndNot(cge_mask, nan_in2));
+            keep_in1 = hn::Or(nan_in1, hn::And(cge_mask, hn::Not(nan_in2)));
         } else {
             M r_lt = hn::Lt(v1r, v2r);
             M r_eq = hn::Eq(v1r, v2r);
             M i_le = hn::Le(v1i, v2i);
             M cle_mask = hn::Or(r_lt, hn::And(r_eq, i_le));
-            keep_in1 = hn::Or(nan_in1, hn::AndNot(cle_mask, nan_in2));
+            keep_in1 = hn::Or(nan_in1, hn::And(cle_mask, hn::Not(nan_in2)));
         }
         hn::StoreInterleaved2(
                 hn::IfThenElse(keep_in1, v1r, v2r),
