@@ -44,221 +44,18 @@ comp_name(COMP comp) {
     }
 }
 
-#ifndef NPY_STRING_CMP_NOINLINE
-#if defined(_MSC_VER)
-#define NPY_STRING_CMP_NOINLINE __declspec(noinline)
-#elif defined(__GNUC__) || defined(__clang__)
-#define NPY_STRING_CMP_NOINLINE __attribute__((noinline))
-#else
-#define NPY_STRING_CMP_NOINLINE
-#endif
-#endif
-
-template <COMP comp>
-static inline npy_bool comparison_result_from_cmp(int cmp)
-{
-    switch (comp) {
-        case COMP::EQ:
-            return cmp == 0;
-        case COMP::NE:
-            return cmp != 0;
-        case COMP::LT:
-            return cmp < 0;
-        case COMP::LE:
-            return cmp <= 0;
-        case COMP::GT:
-            return cmp > 0;
-        case COMP::GE:
-            return cmp >= 0;
-    }
-
-    return 0;
-}
-
-static inline bool is_rstrip_codepoint(npy_ucs4 ch)
-{
-    /*
-     * Match Buffer::rstrip semantics:
-     * it strips trailing NUL and ASCII whitespace.
-     */
-    return ch == 0 || (ch <= 0x7f && NumPyOS_ascii_isspace((char)ch));
-}
-
-template <ENCODING enc>
-static inline npy_ucs4 load_first_codepoint(const char *p)
-{
-    switch (enc) {
-        case ENCODING::ASCII:
-            return (npy_ucs4)(unsigned char)p[0];
-
-        case ENCODING::UTF32: {
-            npy_ucs4 ch;
-            memcpy(&ch, p, sizeof(npy_ucs4));
-            return ch;
-        }
-
-        case ENCODING::UTF8:
-            /*
-             * Do not optimize UTF8 here.  UTF8 lexicographical comparison
-             * has more details than fixed-width S/U.
-             */
-            return 0;
-    }
-
-    return 0;
-}
-
-template <bool rstrip>
-static inline bool first_codepoint_decides(npy_ucs4 c1, npy_ucs4 c2)
-{
-    if (c1 == c2) {
-        return false;
-    }
-
-    /*
-     * If rstrip is enabled and either side starts with a strip character,
-     * first-codepoint comparison may be unsafe.
-     *
-     * Example:
-     *     b"   " vs b""
-     *
-     * They may compare equal after rstrip, so fallback to Buffer::strcmp.
-     */
-    if (rstrip && (is_rstrip_codepoint(c1) || is_rstrip_codepoint(c2))) {
-        return false;
-    }
-
-    return true;
-}
-
-static inline bool is_unit_input_stride(
-    npy_intp stride1, npy_intp stride2,
-    int elsize1, int elsize2)
-{
-    return stride1 == (npy_intp)elsize1 && stride2 == (npy_intp)elsize2;
-}
-
-template <bool rstrip, ENCODING enc>
-static NPY_STRING_CMP_NOINLINE bool should_use_first_codepoint_fastpath(
-    char *in1, char *in2,
-    npy_intp N,
-    npy_intp stride1,
-    npy_intp stride2,
-    int elsize1,
-    int elsize2)
-{
-    /*
-     * shape=100 是 ns 级 benchmark。
-     * 这种场景即使只是多一次 helper 调用和采样，也可能劣化。
-     */
-    const npy_intp min_n =
-        enc == ENCODING::ASCII ? 64 : 1024;
-
-    if (N < min_n) {
-        return false;
-    }
-
-    /*
-     * 只优化固定宽度 S / U。
-     * UTF8 继续走原来的 Buffer::strcmp。
-     */
-    if (!(enc == ENCODING::ASCII || enc == ENCODING::UTF32)) {
-        return false;
-    }
-
-    if (elsize1 <= 0 || elsize2 <= 0) {
-        return false;
-    }
-
-    /*
-     * 你的 ASV 结果说明：
-     *
-     *     (1000, 20), 'U', contig=True
-     *
-     * 会劣化 10% 左右。
-     *
-     * 所以 UTF32 连续输入不走 first-codepoint fast path，
-     * 直接回到原始 Buffer::strcmp。
-     *
-     * UTF32 非连续输入仍然允许 fast path，因为你这里有收益。
-     */
-    if (enc == ENCODING::UTF32) {
-        if (elsize1 < (int)sizeof(npy_ucs4) ||
-                elsize2 < (int)sizeof(npy_ucs4)) {
-            return false;
-        }
-
-        if (is_unit_input_stride(stride1, stride2, elsize1, elsize2)) {
-            return false;
-        }
-    }
-
-    /*
-     * 采样判断是否大量元素可以由首字符直接决定。
-     * 如果不是这种模式，就不要进入 fast path，避免拖慢 identical / same-prefix。
-     */
-    const npy_intp sample_n = N < 16 ? N : 16;
-    npy_intp decisive = 0;
-
-    char *p1 = in1;
-    char *p2 = in2;
-
-    for (npy_intp i = 0; i < sample_n; i++) {
-        npy_ucs4 c1 = load_first_codepoint<enc>(p1);
-        npy_ucs4 c2 = load_first_codepoint<enc>(p2);
-        if (first_codepoint_decides<rstrip>(c1, c2)) {
-            decisive++;
-        }
-
-        p1 += stride1;
-        p2 += stride2;
-    }
-
-    /*
-     * 至少一半采样元素首字符可判定，才启用 fast path。
-     */
-    return decisive * 2 >= sample_n;
-}
 
 template <bool rstrip, COMP comp, ENCODING enc>
-static NPY_STRING_CMP_NOINLINE int string_comparison_first_codepoint_loop(
-        char *in1,
-        char *in2,
-        char *out,
-        npy_intp N,
-        npy_intp stride1,
-        npy_intp stride2,
-        npy_intp stride_out,
-        int elsize1,
-        int elsize2)
+static int
+string_comparison_loop(PyArrayMethod_Context *context,
+        char *const data[], npy_intp const dimensions[],
+        npy_intp const strides[], NpyAuxData *NPY_UNUSED(auxdata))
 {
-    while (N--) {
-        npy_ucs4 c1 = load_first_codepoint<enc>(in1);
-        npy_ucs4 c2 = load_first_codepoint<enc>(in2);
-        if (first_codepoint_decides<rstrip>(c1, c2)) {
-            int cmp = c1 < c2 ? -1 : 1;
-            *(npy_bool *)out = comparison_result_from_cmp<comp>(cmp);
-        } else {
-            Buffer<enc> buf1(in1, elsize1);
-            Buffer<enc> buf2(in2, elsize2);
-
-            int cmp = buf1.strcmp(buf2, rstrip);
-            *(npy_bool *)out = comparison_result_from_cmp<comp>(cmp);
-        }
-
-        in1 += stride1;
-        in2 += stride2;
-        out += stride_out;
-    }
-
-    return 0;
-}
-
-template <bool rstrip, COMP comp, ENCODING enc>
-static int string_comparison_loop(PyArrayMethod_Context *context,
-    char *const data[], npy_intp const dimensions[],
-    npy_intp const strides[], NpyAuxData *NPY_UNUSED(auxdata))
-{
+    /*
+     * Note, fetching `elsize` from the descriptor is OK even without the GIL,
+     * however it may be that this should be moved into `auxdata` eventually,
+     * which may also be slightly faster/cleaner (but more involved).
+     */
     int elsize1 = context->descriptors[0]->elsize;
     int elsize2 = context->descriptors[1]->elsize;
 
@@ -268,38 +65,10 @@ static int string_comparison_loop(PyArrayMethod_Context *context,
 
     npy_intp N = dimensions[0];
 
-    /*
-     * Small arrays are very sensitive.  For N=100, even the fast-path
-     * checking overhead can show up in ns-level ASV results.
-     *
-     * Keep the check itself tiny, and keep the actual fast loop out-of-line.
-     */
-    const npy_intp min_n =
-        enc == ENCODING::ASCII ? 256 : 1024;
-
-    if (NPY_UNLIKELY(N >= min_n) &&
-            should_use_first_codepoint_fastpath<rstrip, enc>(
-                in1, in2, N,
-                strides[0], strides[1],
-                elsize1, elsize2)) {
-        return string_comparison_first_codepoint_loop<rstrip, comp, enc>(
-            in1, in2, out, N,
-            strides[0], strides[1], strides[2],
-            elsize1, elsize2);
-    }
-
-    /*
-     * Original implementation.
-     *
-     * Keep this path as close as possible to baseline, because small-N cases
-     * such as shape=100 are dominated by loop overhead.
-     */
     while (N--) {
         Buffer<enc> buf1(in1, elsize1);
         Buffer<enc> buf2(in2, elsize2);
-
         int cmp = buf1.strcmp(buf2, rstrip);
-
         npy_bool res;
         switch (comp) {
             case COMP::EQ:
@@ -321,58 +90,15 @@ static int string_comparison_loop(PyArrayMethod_Context *context,
                 res = cmp >= 0;
                 break;
         }
-
         *(npy_bool *)out = res;
 
         in1 += strides[0];
         in2 += strides[1];
         out += strides[2];
     }
-
     return 0;
 }
 
-template <bool rstrip>
-static int
-string_comparison_ascii_ge_loop(PyArrayMethod_Context *context,
-        char *const data[], npy_intp const dimensions[],
-        npy_intp const strides[], NpyAuxData *NPY_UNUSED(auxdata))
-{
-    int elsize1 = context->descriptors[0]->elsize;
-    int elsize2 = context->descriptors[1]->elsize;
-
-    char *in1 = data[0];
-    char *in2 = data[1];
-    char *out = data[2];
-
-    npy_intp N = dimensions[0];
-
-    if (NPY_UNLIKELY(N >= 64) &&
-            should_use_first_codepoint_fastpath<rstrip, ENCODING::ASCII>(
-                in1, in2, N,
-                strides[0], strides[1],
-                elsize1, elsize2)) {
-        return string_comparison_first_codepoint_loop<
-            rstrip, COMP::GE, ENCODING::ASCII>(
-                in1, in2, out, N,
-                strides[0], strides[1], strides[2],
-                elsize1, elsize2);
-    }
-
-    while (N--) {
-        Buffer<ENCODING::ASCII> buf1(in1, elsize1);
-        Buffer<ENCODING::ASCII> buf2(in2, elsize2);
-
-        int cmp = buf1.strcmp(buf2, rstrip);
-        *(npy_bool *)out = cmp >= 0;
-
-        in1 += strides[0];
-        in2 += strides[1];
-        out += strides[2];
-    }
-
-    return 0;
-}
 
 template <ENCODING enc>
 static int
@@ -1537,9 +1263,6 @@ template<bool rstrip, ENCODING enc, COMP comp, COMP... comps>
 struct add_loops<rstrip, enc, comp, comps...> {
     int operator()(PyObject* umath, PyArrayMethod_Spec* spec) {
         PyArrayMethod_StridedLoop* loop = string_comparison_loop<rstrip, comp, enc>;
-        if constexpr (enc == ENCODING::ASCII && comp == COMP::GE) {
-            loop = string_comparison_ascii_ge_loop<rstrip>;
-        }
 
         if (add_loop(umath, comp_name(comp), spec, loop) < 0) {
             return -1;
@@ -2199,9 +1922,6 @@ get_strided_loop(int comp)
         case Py_GT:
             return string_comparison_loop<rstrip, COMP::GT, enc>;
         case Py_GE:
-            if constexpr (enc == ENCODING::ASCII) {
-                return string_comparison_ascii_ge_loop<rstrip>;
-            }
             return string_comparison_loop<rstrip, COMP::GE, enc>;
         default:
             assert(false);  /* caller ensures this */
