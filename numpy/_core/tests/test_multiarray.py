@@ -6841,6 +6841,19 @@ class TestStats:
         with pytest.warns(RuntimeWarning) as w:
             assert_equal(np.var(a, where=False), np.nan)
 
+    def test_var_all_equal_with_out(self):
+        a = np.full(64, 5, dtype=np.int64)
+        out = np.empty((), dtype=np.float64)
+        result = np.var(a, out=out)
+        assert result is out
+        assert_equal(out, 0.0)
+
+    def test_var_all_equal_keepdims(self):
+        a = np.full(64, 3.0, dtype=np.float64)
+        result = np.var(a, keepdims=True)
+        assert result.shape == (1,)
+        assert_equal(result, 0.0)
+
     def test_std_values(self):
         rmat, cmat, omat = self._create_data()
         for mat in [rmat, cmat, omat]:
