@@ -237,7 +237,9 @@ NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@kind@,
  **                             FLOAT LOOPS                                 **
  *****************************************************************************
  */
+#ifdef __aarch64__
 #include "loops_unary_fp_ops.dispatch.h"
+#endif
 /**begin repeat
  *  #TYPE = HALF, CFLOAT, CDOUBLE#
  */
@@ -245,6 +247,7 @@ NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@kind@,
     (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data)))
 /**end repeat**/
 
+#ifdef __aarch64__
 /**begin repeat
  *  #TYPE = HALF#
  */
@@ -266,6 +269,7 @@ NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@kind@,
     (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data)))
 /**end repeat1**/
 /**end repeat**/
+#endif
 
 #include "loops_unary_fp.dispatch.h"
 /**begin repeat
