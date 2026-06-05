@@ -1092,7 +1092,7 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
             range[0] is not None and range[1] is not None and
             uniform_bins[0] and uniform_bins[1] and
             sample.dtype == np.float64 and sample.flags.c_contiguous):
-         nx = nbin[0] - 2
+        nx = nbin[0] - 2
         ny = nbin[1] - 2
         xscale = float(nx) / float(edges[0][-1] - edges[0][0])
         yscale = float(ny) / float(edges[1][-1] - edges[1][0])
