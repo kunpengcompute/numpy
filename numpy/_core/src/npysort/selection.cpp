@@ -808,6 +808,7 @@ NPY_NO_EXPORT int
 introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
              npy_intp *pivots, npy_intp *npiv)
 {
+#if NPY_ARM_SELECTION_TUNING
     const npy_intp edge_heap_select_limit =
             (NPY_ARM_SELECTION_TUNING && !arg && num >= 4096) ? 1024 : 128;
     constexpr npy_intp bad_split_ratio = 16;
@@ -816,20 +817,21 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
     constexpr npy_intp mom5_bad_split_threshold = 5;
     constexpr npy_intp ninther_min_span = 1024;
     constexpr npy_intp mom5_min_span = 4096;
+#endif
     Idx<arg> idx(tosort);
     Sortee<type, arg> sortee(v, tosort);
 
     npy_intp low = 0;
     npy_intp high = num - 1;
     int depth_limit;
+#if NPY_ARM_SELECTION_TUNING
     int bad_split_count = 0;
     void *partition_scratch = nullptr;
     const npy_intp sampled_sorted_block =
-            NPY_ARM_SELECTION_TUNING ?
-                    sampled_sorted_block_<Tag>(v, num, idx) : 0;
+            sampled_sorted_block_<Tag>(v, num, idx);
     const bool sampled_wrapped_int16_sorted_block =
-            NPY_ARM_SELECTION_TUNING &&
             sampled_wrapped_int16_sorted_block_<Tag>(v, num, idx);
+#endif
 
     if (npiv == NULL) {
         pivots = NULL;
@@ -852,8 +854,8 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         *npiv -= 1;
     }
 
-    if (NPY_ARM_SELECTION_TUNING &&
-            !arg &&
+#if NPY_ARM_SELECTION_TUNING
+    if (!arg &&
             std::is_same_v<type, npy_float> &&
             num >= 4096 &&
             !sampled_sorted_block &&
@@ -864,7 +866,7 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
     }
 
     const bool skip_edge_heap_select =
-            NPY_ARM_SELECTION_TUNING && !arg &&
+            !arg &&
             ((num >= 4096 &&
               (std::is_same_v<type, npy_int64> ||
                std::is_same_v<type, npy_double>)) ||
@@ -879,6 +881,7 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
              (sampled_sorted_block == 1000 &&
               kth - low + 1 == 1001 &&
               std::is_same_v<Tag, npy::half_tag>));
+#endif
 
     /*
      * use a faster O(n*kth) algorithm for very small kth
@@ -904,10 +907,79 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         std::swap(sortee(kth), sortee(maxidx));
         return 0;
     }
-    else if (num >= 64 &&
-             !skip_edge_heap_select &&
+
+#if !NPY_ARM_SELECTION_TUNING
+    depth_limit = npy_get_msb(num) * 2;
+
+    /* guarantee three elements */
+    for (; low + 1 < high;) {
+        npy_intp ll = low + 1;
+        npy_intp hh = high;
+
+        /*
+         * if we aren't making sufficient progress with median of 3
+         * fall back to median-of-median5 pivot for linear worst case
+         * med3 for small sizes is required to do unguarded partition
+         */
+        if (depth_limit > 0 || hh - ll < 5) {
+            const npy_intp mid = low + (high - low) / 2;
+            /* median of 3 pivot strategy,
+             * swapping for efficient partition */
+            median3_swap_<Tag, arg>(v, tosort, low, mid, high);
+        }
+        else {
+            npy_intp mid;
+            /* FIXME: always use pivots to optimize this iterative partition */
+            mid = ll + median_of_median5_<Tag, arg>(
+                    v + (arg ? 0 : ll), tosort + (arg ? ll : 0),
+                    hh - ll, NULL, NULL);
+            std::swap(sortee(mid), sortee(low));
+            /* adapt for the larger partition than med3 pivot */
+            ll--;
+            hh++;
+        }
+
+        depth_limit--;
+
+        /*
+         * find place to put pivot (in low):
+         * previous swapping removes need for bound checks
+         * pivot 3-lowest [x x x] 3-highest
+         */
+        unguarded_partition_<Tag, arg>(v, tosort, v[idx(low)], &ll, &hh,
+                                       nullptr);
+
+        /* move pivot into position */
+        std::swap(sortee(low), sortee(hh));
+
+        /* kth pivot stored later */
+        if (hh != kth) {
+            store_pivot(hh, kth, pivots, npiv);
+        }
+
+        if (hh >= kth) {
+            high = hh - 1;
+        }
+        if (hh <= kth) {
+            low = ll;
+        }
+    }
+
+    /* two elements */
+    if (high == low + 1) {
+        if (Tag::less(v[idx(high)], v[idx(low)])) {
+            std::swap(sortee(high), sortee(low));
+        }
+    }
+    store_pivot(kth, kth, pivots, npiv);
+    return 0;
+#else
+
+    if (num >= 64 &&
              (kth - low + 1 <= edge_heap_select_limit ||
               high - kth + 1 <= edge_heap_select_limit) &&
+             NPY_ARM_SELECTION_TUNING &&
+             !skip_edge_heap_select &&
              (sampled_sorted_block ||
               !sampled_descending_<Tag, arg>(v, tosort, low, high))) {
         edge_heap_select_<Tag, arg>(v, tosort, low, high, kth);
@@ -915,6 +987,7 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         return 0;
     }
     else if (!sampled_sorted_block &&
+             (NPY_ARM_SELECTION_TUNING || !arg) &&
              sampled_descending_<Tag, arg>(v, tosort, low, high) &&
              descending_sorted_and_reverse_<Tag, arg>(v, tosort, low, high)) {
         store_pivot(kth, kth, pivots, npiv);
@@ -928,7 +1001,7 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         npy_intp ll = low + 1;
         npy_intp hh = high;
         const npy_intp span = high - low + 1;
-        const bool use_legacy_arm_pivot = NPY_ARM_SELECTION_TUNING;
+        const bool use_legacy_arm_pivot = true;
         bool use_ninther_pivot = false;
         bool use_mom5_pivot = false;
         if (!use_legacy_arm_pivot) {
@@ -949,6 +1022,8 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
             use_mom5_pivot = depth_limit <= 0 && hh - ll >= 5;
         }
         const bool can_use_partition_highway =
+                NPY_ARM_SELECTION_TUNING &&
+                NPY_HAVE_PARTITION_HIGHWAY &&
                 !arg &&
                 sampled_sorted_block != 1000 &&
                 (std::is_same_v<type, npy_int64> ||
@@ -984,7 +1059,8 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
             hh++;
         }
 
-        if (!use_ninther_pivot && !use_mom5_pivot) {
+        if (!NPY_ARM_SELECTION_TUNING ||
+                (!use_ninther_pivot && !use_mom5_pivot)) {
             depth_limit--;
         }
         else {
@@ -1045,6 +1121,7 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
     }
 
     return 0;
+#endif
 }
 
 /*
@@ -1079,13 +1156,6 @@ introselect_noarg(void *v, npy_intp num, npy_intp kth, npy_intp *pivots,
     }
     if (use_already_partitioned_check(nkth) &&
             ordered_prefix &&
-            already_partitioned_<Tag>((typename Tag::type *)v, num, kth,
-                                      Idx<false>(nullptr))) {
-        store_pivot(kth, kth, pivots, npiv);
-        return 0;
-    }
-#else
-    if (use_already_partitioned_check(nkth) &&
             already_partitioned_<Tag>((typename Tag::type *)v, num, kth,
                                       Idx<false>(nullptr))) {
         store_pivot(kth, kth, pivots, npiv);
@@ -1130,13 +1200,6 @@ introselect_arg(void *v, npy_intp *tosort, npy_intp num, npy_intp kth,
     }
     if (use_already_partitioned_check(nkth) &&
             ordered_prefix &&
-            already_partitioned_<Tag>((typename Tag::type *)v, num, kth,
-                                      Idx<true>(tosort))) {
-        store_pivot(kth, kth, pivots, npiv);
-        return 0;
-    }
-#else
-    if (use_already_partitioned_check(nkth) &&
             already_partitioned_<Tag>((typename Tag::type *)v, num, kth,
                                       Idx<true>(tosort))) {
         store_pivot(kth, kth, pivots, npiv);
