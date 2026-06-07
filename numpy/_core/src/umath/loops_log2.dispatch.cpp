@@ -489,7 +489,7 @@ simd_log2_neon_FLOAT(const npy_float *src, npy_intp ssrc,
   const float32x4_t c4 = vdupq_n_f32(0x1.27a0b8p-2f);
   const float32x4_t c6 = vdupq_n_f32(0x1.9d8ecap-3f);
   const float32x4_t c8 = vdupq_n_f32(0x1.9e495p-3f);
-  static const float c1357_arr[4] __attribute__((aligned(16))) = {
+  static const float c1357_arr[4] = {
     -0x1.715458p-1f, -0x1.7171a4p-2f, -0x1.e5143ep-3f, -0x1.c675bp-3f
   };
   const uint32x4_t off = vdupq_n_u32(0x3f2aaaab);
@@ -658,7 +658,7 @@ simd_log2_neon_HALF_stride1(const npy_half *src, npy_half *dst, npy_intp len)
   const float32x4_t c4 = vdupq_n_f32(0x1.27a0b8p-2f);
   const float32x4_t c6 = vdupq_n_f32(0x1.9d8ecap-3f);
   const float32x4_t c8 = vdupq_n_f32(0x1.9e495p-3f);
-  static const float c1357_arr[4] __attribute__((aligned(16))) = {
+  static const float c1357_arr[4] = {
     -0x1.715458p-1f, -0x1.7171a4p-2f, -0x1.e5143ep-3f, -0x1.c675bp-3f
   };
   const float32x4_t c1357 = vld1q_f32(c1357_arr);
@@ -974,8 +974,8 @@ simd_log2_svml_f64(const npyv_lanetype_f64 *src, npy_intp ssrc,
     }
     npyv_cleanup();
 }
-
 #endif
+
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_log2)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
 {
@@ -1012,39 +1012,24 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_log2)
         simd_log2_svml_f32(src, ssrc, dst, sdst, len);
         return;
     }
-    #if defined(SIMD_AVX2_FMA3) || defined(SIMD_AVX512F)
-    if (IS_OUTPUT_BLOCKABLE_UNARY(sizeof(npy_float), sizeof(npy_float), 64)) {
-        simd_log2_FLOAT((npy_float*)args[1], (npy_float*)args[0], dimensions[0], steps[0]);
-    }
-    else {
-        UNARY_LOOP {
-            simd_log2_FLOAT((npy_float *)op1, (npy_float *)ip1, 1, steps[0]);
-        }
-    }
-    #else
-    UNARY_LOOP {
-        const npy_float in1 = *(npy_float *)ip1;
-        *(npy_float *)op1 = npy_log2f(in1);
-    }
-    #endif
-#else
-    #if defined(SIMD_AVX2_FMA3) || defined(SIMD_AVX512F)
-    if (IS_OUTPUT_BLOCKABLE_UNARY(sizeof(npy_float), sizeof(npy_float), 64)) {
-        simd_log2_FLOAT((npy_float*)args[1], (npy_float*)args[0], dimensions[0], steps[0]);
-    }
-    else {
-        UNARY_LOOP {
-            simd_log2_FLOAT((npy_float *)op1, (npy_float *)ip1, 1, steps[0]);
-        }
-    }
-    #else
-    UNARY_LOOP {
-        const npy_float in1 = *(npy_float *)ip1;
-        *(npy_float *)op1 = npy_log2f(in1);
-    }
-    #endif
 #endif
+    #if defined(SIMD_AVX2_FMA3) || defined(SIMD_AVX512F)
+    if (IS_OUTPUT_BLOCKABLE_UNARY(sizeof(npy_float), sizeof(npy_float), 64)) {
+        simd_log2_FLOAT((npy_float*)args[1], (npy_float*)args[0], dimensions[0], steps[0]);
+    }
+    else {
+        UNARY_LOOP {
+            simd_log2_FLOAT((npy_float *)op1, (npy_float *)ip1, 1, steps[0]);
+        }
+    }
+    #else
+    UNARY_LOOP {
+        const npy_float in1 = *(npy_float *)ip1;
+        *(npy_float *)op1 = npy_log2f(in1);
+    }
+    #endif
 }
+
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_log2)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
 {
@@ -1082,17 +1067,13 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_log2)
         simd_log2_svml_f64(src, ssrc, dst, sdst, len);
         return;
     }
-    UNARY_LOOP {
-        const npy_double in1 = *(npy_double *)ip1;
-        *(npy_double *)op1 = npy_log2(in1);
-    }
-#else
-    UNARY_LOOP {
-        const npy_double in1 = *(npy_double *)ip1;
-        *(npy_double *)op1 = npy_log2(in1);
-    }
 #endif
+    UNARY_LOOP {
+        const npy_double in1 = *(npy_double *)ip1;
+        *(npy_double *)op1 = npy_log2(in1);
+    }
 }
+
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_log2)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
