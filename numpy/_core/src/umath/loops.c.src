@@ -1365,29 +1365,6 @@ NPY_NO_EXPORT void
 NPY_NO_EXPORT void
 @TYPE@_positive(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
-#if @fd@ && !defined(__aarch64__) && !defined(__arm__) && !defined(_M_ARM64) && !defined(_M_ARM)
-    npy_intp positive_n = dimensions[0];
-    if (args[0] == args[1] && steps[0] == steps[1]) {
-        return;
-    }
-    if (steps[0] == (npy_intp)sizeof(@type@) &&
-            steps[1] == (npy_intp)sizeof(@type@)) {
-        memmove(args[1], args[0], positive_n * sizeof(@type@));
-        return;
-    }
-    if (steps[0] % (npy_intp)sizeof(@type@) == 0 &&
-            steps[1] % (npy_intp)sizeof(@type@) == 0) {
-        const @type@ *ip = (const @type@ *)args[0];
-        @type@ *op = (@type@ *)args[1];
-        const npy_intp is = steps[0] / (npy_intp)sizeof(@type@);
-        const npy_intp os = steps[1] / (npy_intp)sizeof(@type@);
-
-        for (npy_intp i = 0; i < positive_n; i++, ip += is, op += os) {
-            *op = *ip;
-        }
-        return;
-    }
-#endif
     UNARY_LOOP {
         const @type@ in1 = *(@type@ *)ip1;
         *((@type@ *)op1) = +in1;

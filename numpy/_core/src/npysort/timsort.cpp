@@ -47,12 +47,6 @@
  * Align function to 64-byte boundaries to improve
  * instruction fetch and frontend efficiency on x86.
  */
-#if defined(__GNUC__) && (defined(NPY_CPU_AMD64) || defined(NPY_CPU_X86))
-#define FUNC_ALIGN64 __attribute__((aligned(64)))
-#else
-#define FUNC_ALIGN64
-#endif
-
 static npy_intp
 compute_min_run(npy_intp num)
 {
@@ -133,7 +127,7 @@ resize_buffer_(buffer_<Tag> *buffer, npy_intp new_size)
 }
 
 template <typename Tag, typename type>
-FUNC_ALIGN64 static npy_intp
+static npy_intp
 count_run_(type *arr, npy_intp l, npy_intp num, npy_intp minrun)
 {
     npy_intp sz;
@@ -235,7 +229,7 @@ count_run_(type *arr, npy_intp l, npy_intp num, npy_intp minrun)
  * and merge from left to right
  */
 template <typename Tag, typename type>
-FUNC_ALIGN64 static void
+static void
 merge_left_(type *p1, npy_intp l1, type *p2, npy_intp l2, type *p3)
 {
     type *end = p2 + l2;
@@ -286,7 +280,7 @@ merge_left_(type *p1, npy_intp l1, type *p2, npy_intp l2, type *p3)
  * and merge from right to left
  */
 template <typename Tag, typename type>
-FUNC_ALIGN64 static void
+static void
 merge_right_(type *p1, npy_intp l1, type *p2, npy_intp l2, type *p3)
 {
     npy_intp ofs;
@@ -620,7 +614,7 @@ cleanup:
 /* argsort */
 
 template <typename Tag, typename type>
-FUNC_ALIGN64 static npy_intp
+static npy_intp
 acount_run_(type *arr, npy_intp *tosort, npy_intp l, npy_intp num,
             npy_intp minrun)
 {
@@ -818,7 +812,7 @@ agallop_left_(const type *arr, const npy_intp *tosort, const npy_intp size,
 }
 
 template <typename Tag, typename type>
-FUNC_ALIGN64 static void
+static void
 amerge_left_(type *arr, npy_intp *p1, npy_intp l1, npy_intp *p2, npy_intp l2,
              npy_intp *p3)
 {
@@ -867,7 +861,7 @@ amerge_left_(type *arr, npy_intp *p1, npy_intp l1, npy_intp *p2, npy_intp l2,
 }
 
 template <typename Tag, typename type>
-FUNC_ALIGN64 static void
+static void
 amerge_right_(type *arr, npy_intp *p1, npy_intp l1, npy_intp *p2, npy_intp l2,
               npy_intp *p3)
 {
