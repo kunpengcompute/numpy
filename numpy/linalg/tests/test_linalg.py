@@ -955,10 +955,11 @@ class TestDet(DetCases):
     @pytest.mark.parametrize('dtype', [single, double, csingle, cdouble])
     def test_types(self, dtype):
         x = np.array([[1, 0.5], [0.5, 1]], dtype=dtype)
-        assert_equal(np.linalg.det(x).dtype, dtype)
-        ph, s = np.linalg.slogdet(x)
-        assert_equal(s.dtype, get_real_dtype(dtype))
-        assert_equal(ph.dtype, dtype)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            assert_equal(np.linalg.det(x).dtype, dtype)
+            ph, s = np.linalg.slogdet(x)
+            assert_equal(s.dtype, get_real_dtype(dtype))
+            assert_equal(ph.dtype, dtype)
 
     def test_0_size(self):
         a = np.zeros((0, 0), dtype=np.complex64)

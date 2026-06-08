@@ -9,7 +9,7 @@ source "${SCRIPT_DIR}/common.sh"
 ci_enter_repo_root
 
 : "${VENV_DIR:=.venv-internal-ci/incremental_coverage}"
-: "${COMPARE_BRANCH:=origin/main}"
+: "${COMPARE_BRANCH:=53550c38fd85767ff4ba53b8252fdfddc98070a0}"
 : "${DIFF_COVER_FAIL_UNDER:=0}"
 : "${DIFF_COVER_SHOW_FILES:=0}"
 : "${INCREMENTAL_COVERAGE_REPORT_DIR:=build/incremental_coverage}"
@@ -48,6 +48,30 @@ ci_install_python_packages diff-cover
 if ! ci_should_install_python_deps; then
     ci_require_command diff-cover
 fi
+
+ci_log "Remapping build-install paths in Python coverage XML to source paths."
+python - "${python_coverage_xml}" <<'REMAP_PY'
+import re
+import sys
+from pathlib import Path
+
+xml_path = Path(sys.argv[1])
+content = xml_path.read_text(encoding="utf-8")
+
+prefix_match = re.search(
+    r'filename="(build-install/.+?/site-packages/)', content
+)
+if not prefix_match:
+    print("No build-install prefix in coverage XML, skipping remap.", file=sys.stderr)
+    sys.exit(0)
+
+build_prefix = prefix_match.group(1)
+
+content = content.replace(f'filename="{build_prefix}', 'filename="')
+
+xml_path.write_text(content, encoding="utf-8")
+print(f"Remapped {build_prefix!r} -> '' in {xml_path}")
+REMAP_PY
 
 if git rev-parse --verify "${COMPARE_BRANCH}" >/dev/null 2>&1; then
     ci_log "Using compare branch ${COMPARE_BRANCH}."

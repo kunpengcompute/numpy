@@ -8,8 +8,6 @@
 #include "lowlevel_strided_loops.h"
 // Provides the various *_LOOP macros
 #include "fast_loop_macros.h"
-// Highway SIMD maximum/minimum wrappers (callable from C)
-#include "loops_minmax_hwy.h"
 
 /*******************************************************************************
  ** Scalar intrinsics
