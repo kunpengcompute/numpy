@@ -289,6 +289,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_bitwise_count)
  * #TYPE = UBYTE, USHORT, UINT, ULONG, ULONGLONG#
  * #type = npy_ubyte, npy_ushort, npy_uint, npy_ulong, npy_ulonglong#
  * #c    = u,u,u,ul,ull#
+ * #use_sve_logical_xor = 1, 0, 0, 0, 0#
  */
 NPY_GCC_UNROLL_LOOPS
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_absolute)
@@ -409,7 +410,7 @@ NPY_FINLINE npy_bool @TYPE@_logical_xor_(@type@ in1, @type@ in2)
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_logical_xor)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
-#if defined(__aarch64__)
+#if defined(__aarch64__) && @use_sve_logical_xor@
     if (IS_BINARY_CONT(@type@, npy_bool) &&
             (abs_ptrdiff(args[2], args[0]) == 0 ||
              abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE) &&
@@ -482,15 +483,26 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_sign)
     UNARY_LOOP_FAST(@type@, @type@, *out = in > 0 ? 1 : (in < 0 ? -1 : 0));
 }
 
+#if defined(__aarch64__)
+NPY_FINLINE npy_bool @TYPE@_logical_xor_(@type@ in1, @type@ in2)
+{ return (!!in1) != (!!in2); }
+#endif
+
 /**begin repeat1
  * #kind = conjugate, invert, isnan, isinf, isfinite,
  *         logical_and, logical_or, logical_xor, logical_not,
  *         bitwise_and, bitwise_or, bitwise_xor#
+ * #use_aarch64_local_logical_xor = 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0#
  **/
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *func)
 {
+#if defined(__aarch64__) && @use_aarch64_local_logical_xor@
+    (void)func;
+    BINARY_LOOP_FAST(@type@, npy_bool, *out = @TYPE@_logical_xor_(in1, in2));
+#else
     NPY_CPU_DISPATCH_CURFX(U@TYPE@_@kind@)(args, dimensions, steps, func);
+#endif
 }
 /**end repeat1**/
 /**end repeat**/
