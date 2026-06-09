@@ -78,6 +78,46 @@ broadcast_copy_ac_impl(const char *src, char *dst, npy_intp count) {
     return 0;
 }
 
+/*
+ * Specialization for N=8 (64-bit broadcast, aligned + contiguous dst).
+ *
+ * The generic template's while-loop with pointer increment (dst += N)
+ * causes the compiler to generate suboptimal auto-vectorized code on
+ * aarch64: each store uses a separate lsl+add offset calculation with
+ * individual str q0, resulting in ~80% of cycles spent in prologue
+ * (ldr + cmp) before the first store.
+ *
+ * Explicit 8-way unrolling with array indexing (arr[0]..arr[7]) gives
+ * the compiler a clear view of the contiguous memory pattern, enabling
+ * efficient stp q0,q0 paired stores (32 bytes per instruction) with a
+ * single add to advance the pointer. This shifts the bottleneck from
+ * prologue overhead to actual store throughput.
+ */
+template<>
+int broadcast_copy_ac_impl<8>(const char *src, char *dst, npy_intp count) {
+    using T = uint_of_size_t<8>;
+    T temp = *(const T*)src;
+    T* arr = (T*)dst;
+
+    constexpr npy_intp UNROLL = 8;
+    for (; count >= UNROLL; count -= UNROLL, arr += UNROLL) {
+        arr[0] = temp;
+        arr[1] = temp;
+        arr[2] = temp;
+        arr[3] = temp;
+        arr[4] = temp;
+        arr[5] = temp;
+        arr[6] = temp;
+        arr[7] = temp;
+    }
+
+    for (; count > 0; --count, ++arr) {
+        *arr = temp;
+    }
+
+    return 0;
+}
+
 /* Aligned + Strided destination */
 template<int N>
 NPY_GCC_OPT_3 NPY_GCC_UNROLL_LOOPS int
