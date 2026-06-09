@@ -975,12 +975,7 @@ foreach gen_mtargets : [
     'loops_autovec_abs_hwy.dispatch.h',
     'src/umath/loops_autovec_abs_hwy.dispatch.cpp',
     use_highway ? [
-      ASIMD, NEON, SVE,
-      X86_V4, X86_V3, X86_V2,
-      VSX2,
-      VX,
-      LSX,
-      RVV,
+      SVE, ASIMD, NEON,
     ] : []
   ],
   [

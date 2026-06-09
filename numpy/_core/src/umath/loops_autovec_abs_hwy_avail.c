@@ -14,7 +14,7 @@
 int
 npy_highway_absolute_half_available(void)
 {
-#ifdef NPY_HAVE_HIGHWAY
+#if defined(NPY_HAVE_HIGHWAY) && defined(__aarch64__)
     return 1;
 #else
     return 0;
