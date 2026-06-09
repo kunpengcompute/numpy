@@ -62,7 +62,8 @@ def _raw_fft(a, n, axis, is_real, is_forward, norm, out=None):
         new_shape = list(a.shape)
         new_shape[axis] = n_out
         out = empty_like(a, shape=new_shape, dtype=out_dtype)
-    elif getattr(out, "ndim", 0) != a.ndim or out.shape[axis] != n_out:
+    elif ((shape := getattr(out, "shape", None)) is not None
+          and (len(shape) != a.ndim or shape[axis] != n_out)):
         raise ValueError("output array has wrong shape.")
 
     return ufunc(a, fct, axes=[(axis,), (), (axis,)], out=out)
