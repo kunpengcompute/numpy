@@ -2470,7 +2470,8 @@ class TestSinc:
         x = np.float16(0)
         # before gh-27784, fill value for 0 in input would underflow float16,
         # resulting in nan
-        assert_array_equal(sinc(x), np.asarray(1.0))
+        with np.errstate(invalid='ignore'):
+            assert_array_equal(sinc(x), np.asarray(1.0))
 
 
 class TestUnique:

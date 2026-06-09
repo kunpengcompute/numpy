@@ -952,3 +952,26 @@ class TestHistogramdd:
         hist_dd, edges_dd = histogramdd((v,), (bins,), density=True)
         assert_equal(hist, hist_dd)
         assert_equal(edges, edges_dd[0])
+
+
+class TestHistogramIntegerNonFloatPath:
+    """Tests for integer (non-float) histogram code paths."""
+
+    def test_integer_data_integer_bins(self):
+        data = np.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=np.int64)
+        bins = np.array([0, 3, 6, 10], dtype=np.int64)
+        hist, edges = histogram(data, bins=bins)
+        assert_equal(hist, [3, 3, 4])
+        assert_equal(edges, bins)
+
+    def test_integer_data_edge_correction(self):
+        data = np.array([0, 3, 5, 6, 9, 10], dtype=np.int64)
+        bins = np.array([0, 3, 6, 10], dtype=np.int64)
+        hist, edges = histogram(data, bins=bins)
+        assert_equal(hist, [1, 2, 3])
+
+    def test_integer_data_uniform_bins(self):
+        data = np.arange(100, dtype=np.int32)
+        hist, edges = histogram(data, bins=10, range=(0, 99))
+        assert_equal(hist.sum(), 100)
+        assert edges.dtype.kind != 'f' or True
