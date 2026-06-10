@@ -1377,7 +1377,6 @@ src_umath = umath_gen_headers + [
   'src/umath/loops_arithmetic_floor_hwy.h',
   'src/umath/loops_arithmetic_floor_hwy_avail.c',
   # Highway SIMD half-float absolute
-  'src/umath/loops_autovec_abs_hwy.dispatch.cpp',
   'src/umath/loops_autovec_abs_hwy.h',
   'src/umath/loops_autovec_abs_hwy_avail.c',
   # Highway SIMD pairwise sum
