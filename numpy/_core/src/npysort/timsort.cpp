@@ -633,48 +633,54 @@ acount_run_(type *arr, npy_intp *tosort, npy_intp l, npy_intp num,
 
     /* (not strictly) ascending sequence */
     if (!Tag::less(arr[*(pl + 1)], arr[*pl])) {
-        /* unroll loop */
-        while (pi + 4 <= end) {
-            if (Tag::less(arr[*(pi + 1)], arr[*pi])) {
-                break;
+        /* npy_double performance regression on bench_lib.unique */
+        if constexpr (!std::is_same_v<type, npy_double>) {
+            /* unroll loop */
+            while (pi + 4 <= end) {
+                if (Tag::less(arr[*(pi + 1)], arr[*pi])) {
+                    break;
+                }
+                ++pi;
+                if (Tag::less(arr[*(pi + 1)], arr[*pi])) {
+                    break;
+                }
+                ++pi;
+                if (Tag::less(arr[*(pi + 1)], arr[*pi])) {
+                    break;
+                }
+                ++pi;
+                if (Tag::less(arr[*(pi + 1)], arr[*pi])) {
+                    break;
+                }
+                ++pi;
             }
-            ++pi;
-            if (Tag::less(arr[*(pi + 1)], arr[*pi])) {
-                break;
-            }
-            ++pi;
-            if (Tag::less(arr[*(pi + 1)], arr[*pi])) {
-                break;
-            }
-            ++pi;
-            if (Tag::less(arr[*(pi + 1)], arr[*pi])) {
-                break;
-            }
-            ++pi;
         }
 
         for (; pi < end && !Tag::less(arr[*(pi + 1)], arr[*pi]); ++pi) {
         }
     }
     else { /* (strictly) descending sequence */
-        /* unroll loop */
-        while (pi + 4 <= end) {
-            if (!Tag::less(arr[*(pi + 1)], arr[*pi])) {
-                break;
+        /* npy_double performance regression on bench_lib.unique */
+        if constexpr (!std::is_same_v<type, npy_double>) {
+            /* unroll loop */
+            while (pi + 4 <= end) {
+                if (!Tag::less(arr[*(pi + 1)], arr[*pi])) {
+                    break;
+                }
+                ++pi;
+                if (!Tag::less(arr[*(pi + 1)], arr[*pi])) {
+                    break;
+                }
+                ++pi;
+                if (!Tag::less(arr[*(pi + 1)], arr[*pi])) {
+                    break;
+                }
+                ++pi;
+                if (!Tag::less(arr[*(pi + 1)], arr[*pi])) {
+                    break;
+                }
+                ++pi;
             }
-            ++pi;
-            if (!Tag::less(arr[*(pi + 1)], arr[*pi])) {
-                break;
-            }
-            ++pi;
-            if (!Tag::less(arr[*(pi + 1)], arr[*pi])) {
-                break;
-            }
-            ++pi;
-            if (!Tag::less(arr[*(pi + 1)], arr[*pi])) {
-                break;
-            }
-            ++pi;
         }
 
         for (; pi < end && Tag::less(arr[*(pi + 1)], arr[*pi]); ++pi) {
