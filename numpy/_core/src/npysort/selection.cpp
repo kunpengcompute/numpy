@@ -556,6 +556,49 @@ unguarded_partition_(type *v, npy_intp *tosort, const type pivot, npy_intp *ll,
     Idx<arg> idx(tosort);
     Sortee<type, arg> sortee(v, tosort);
 
+    /*
+     * Fast path for real floating-point types when pivot is not NaN.
+     *
+     * DOUBLE_LT(element, pivot) = element < pivot || (pivot NaN && element not NaN)
+     * When pivot is known non-NaN, this simplifies to just `element < pivot`,
+     * which IEEE 754 already handles correctly: NaN element returns FALSE,
+     * stopping the left scan and placing NaN on the right side.
+     *
+     * DOUBLE_LT(pivot, element) = pivot < element || (element NaN && pivot not NaN)
+     * When pivot is known non-NaN, this simplifies to `!(pivot >= element)`:
+     *   pivot < element  → !(>=) TRUE  → continue retreating
+     *   element NaN      → !(>=) TRUE  → continue retreating (NaN stays right)
+     *   pivot >= element → !(≥) FALSE → stop retreating
+     *
+     * This eliminates the 3-instruction NaN handling per comparison
+     * (fcmp + fccmp + conditional branch) that the compiler generates for
+     * DOUBLE_LT. Each comparison drops from potentially 5 instructions
+     * (fcmpe + b.gt/b.mi + fcmp + fccmp + b.eq/b.ne) to just 2
+     * (fcmpe + b.gt or fcmpe + b.lt).
+     *
+     * Only enabled for real floating-point types (float, double, long double).
+     * Complex types lack operator<, operator>=, and npy_isnan.
+     */
+    if constexpr (std::is_floating_point_v<type>) {
+        if (!npy_isnan(pivot)) {
+            for (;;) {
+                do {
+                    (*ll)++;
+                } while (v[idx(*ll)] < pivot);
+                do {
+                    (*hh)--;
+                } while (!(pivot >= v[idx(*hh)]));
+
+                if (*hh < *ll) {
+                    break;
+                }
+
+                std::swap(sortee(*ll), sortee(*hh));
+            }
+            return;
+        }
+    }
+
     for (;;) {
         do {
             (*ll)++;
@@ -827,10 +870,19 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
 #if NPY_ARM_SELECTION_TUNING
     int bad_split_count = 0;
     void *partition_scratch = nullptr;
-    const npy_intp sampled_sorted_block =
-            sampled_sorted_block_<Tag>(v, num, idx);
-    const bool sampled_wrapped_int16_sorted_block =
-            sampled_wrapped_int16_sorted_block_<Tag>(v, num, idx);
+    /*
+     * sampled_sorted_block_ / sampled_wrapped_int16_sorted_block_ are
+     * only consumed downstream by paths already guarded by num >= 64
+     * (edge_heap_select_, sampled_descending_), or by larger thresholds
+     * (npy_float ordered_span_ at num >= 4096, partition_highway at
+     * span >= 1024).  For small arrays, computing them adds measurable
+     * overhead across tens of thousands of calls (e.g. the tall/wide
+     * median benchmark: 10000 x 20, 30000 introselect invocations).
+     */
+    const npy_intp sampled_sorted_block = (num >= 64) ?
+            sampled_sorted_block_<Tag>(v, num, idx) : 0;
+    const bool sampled_wrapped_int16_sorted_block = (num >= 64) ?
+            sampled_wrapped_int16_sorted_block_<Tag>(v, num, idx) : false;
 #endif
 
     if (npiv == NULL) {
@@ -865,7 +917,13 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         return 0;
     }
 
-    const bool skip_edge_heap_select =
+    /*
+     * skip_edge_heap_select is only consumed by the edge_heap_select_
+     * branch below (guarded by num >= 64).  Defer the computation so
+     * small arrays can short-circuit without paying for sampled_sorted_block
+     * / sampled_wrapped_int16_sorted_block lookups.
+     */
+    const bool skip_edge_heap_select = num >= 64 &&
             !arg &&
             ((num >= 4096 &&
               (std::is_same_v<type, npy_int64> ||
@@ -987,6 +1045,7 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         return 0;
     }
     else if (!sampled_sorted_block &&
+             num >= 64 &&
              (NPY_ARM_SELECTION_TUNING || !arg) &&
              sampled_descending_<Tag, arg>(v, tosort, low, high) &&
              descending_sorted_and_reverse_<Tag, arg>(v, tosort, low, high)) {
@@ -1137,29 +1196,36 @@ introselect_noarg(void *v, npy_intp num, npy_intp kth, npy_intp *pivots,
 {
     using T = typename std::conditional<std::is_same_v<Tag, npy::half_tag>, np::Half, typename Tag::type>::type;
 #if NPY_ARM_SELECTION_TUNING
-    const npy_intp sampled_sorted_block =
-            sampled_sorted_block_<Tag>((typename Tag::type *)v, num,
-                                       Idx<false>(nullptr));
-    const bool ordered_prefix =
-            use_already_partitioned_check(nkth) &&
-            !sampled_sorted_block &&
-            !skip_arm_ordered_partition_check_<Tag>(
-                    (typename Tag::type *)v, num, Idx<false>(nullptr)) &&
-            ordered_prefix_<Tag>((typename Tag::type *)v, num,
-                                 Idx<false>(nullptr));
-    if (use_already_partitioned_check(nkth) &&
-            ordered_prefix &&
-            ordered_full_<Tag>((typename Tag::type *)v, num,
-                               Idx<false>(nullptr))) {
-        store_pivot(kth, kth, pivots, npiv);
-        return 0;
-    }
-    if (use_already_partitioned_check(nkth) &&
-            ordered_prefix &&
-            already_partitioned_<Tag>((typename Tag::type *)v, num, kth,
-                                      Idx<false>(nullptr))) {
-        store_pivot(kth, kth, pivots, npiv);
-        return 0;
+    /*
+     * For single-kth calls (nkth == 1), check if the array is already
+     * ordered / partitioned — a fast win for patterned inputs.
+     * For multi-kth calls (e.g. median's [szh-1, szh, -1]), skip this
+     * check entirely: the pivot-stack state across calls makes the
+     * assumption unsafe (see use_already_partitioned_check), and for
+     * small arrays like the tall/wide median benchmark (10000 × 20),
+     * even the cheap sampled_sorted_block_ probe adds measurable
+     * overhead when called tens of thousands of times.
+     */
+    if (use_already_partitioned_check(nkth)) {
+        const npy_intp sampled_sorted_block =
+                sampled_sorted_block_<Tag>((typename Tag::type *)v, num,
+                                           Idx<false>(nullptr));
+        if (!sampled_sorted_block &&
+                !skip_arm_ordered_partition_check_<Tag>(
+                        (typename Tag::type *)v, num, Idx<false>(nullptr)) &&
+                ordered_prefix_<Tag>((typename Tag::type *)v, num,
+                                     Idx<false>(nullptr))) {
+            if (ordered_full_<Tag>((typename Tag::type *)v, num,
+                                   Idx<false>(nullptr))) {
+                store_pivot(kth, kth, pivots, npiv);
+                return 0;
+            }
+            if (already_partitioned_<Tag>((typename Tag::type *)v, num, kth,
+                                          Idx<false>(nullptr))) {
+                store_pivot(kth, kth, pivots, npiv);
+                return 0;
+            }
+        }
     }
 #endif
     if ((nkth == 1) && (quickselect_dispatch((T *)v, num, kth))) {
@@ -1184,26 +1250,23 @@ introselect_arg(void *v, npy_intp *tosort, npy_intp num, npy_intp kth,
                     (typename Tag::type *)v, tosort, num, kth, pivots, npiv)) {
         return 0;
     }
-    const bool ordered_prefix =
-            use_already_partitioned_check(nkth) &&
-            !sampled_sorted_block &&
-            !skip_arm_ordered_partition_check_<Tag>(
-                    (typename Tag::type *)v, num, Idx<true>(tosort)) &&
-            ordered_prefix_<Tag>((typename Tag::type *)v, num,
-                                 Idx<true>(tosort));
-    if (use_already_partitioned_check(nkth) &&
-            ordered_prefix &&
-            ordered_full_<Tag>((typename Tag::type *)v, num,
-                               Idx<true>(tosort))) {
-        store_pivot(kth, kth, pivots, npiv);
-        return 0;
-    }
-    if (use_already_partitioned_check(nkth) &&
-            ordered_prefix &&
-            already_partitioned_<Tag>((typename Tag::type *)v, num, kth,
-                                      Idx<true>(tosort))) {
-        store_pivot(kth, kth, pivots, npiv);
-        return 0;
+    if (use_already_partitioned_check(nkth)) {
+        if (!sampled_sorted_block &&
+                !skip_arm_ordered_partition_check_<Tag>(
+                        (typename Tag::type *)v, num, Idx<true>(tosort)) &&
+                ordered_prefix_<Tag>((typename Tag::type *)v, num,
+                                     Idx<true>(tosort))) {
+            if (ordered_full_<Tag>((typename Tag::type *)v, num,
+                                   Idx<true>(tosort))) {
+                store_pivot(kth, kth, pivots, npiv);
+                return 0;
+            }
+            if (already_partitioned_<Tag>((typename Tag::type *)v, num, kth,
+                                          Idx<true>(tosort))) {
+                store_pivot(kth, kth, pivots, npiv);
+                return 0;
+            }
+        }
     }
 #endif
 #if NPY_ARM_SELECTION_TUNING
