@@ -979,6 +979,14 @@ foreach gen_mtargets : [
     ] : []
   ],
   [
+    'loops_complex_maxmin.dispatch.h',
+    'src/umath/loops_complex_maxmin.dispatch.cpp',
+    use_highway ? [
+      X86_V4, X86_V3, X86_V2,
+      SVE, ASIMD, NEON
+    ] : []
+  ],
+  [
     'loops_comparison.dispatch.h',
     src_file.process('src/umath/loops_comparison.dispatch.c.src'),
     [
@@ -1370,8 +1378,7 @@ src_umath = umath_gen_headers + [
   'src/umath/string_ufuncs.cpp',
   'src/umath/stringdtype_ufuncs.cpp',
   'src/umath/wrapping_array_method.c',
-  # Highway SIMD complex maximum/minimum
-  'src/umath/loops_complex_maxmin.dispatch.cpp',
+  # Highway SIMD complex maximum/minimum (dispatched via multi_targets below)
    'src/umath/loops_complex_maxmin.h',
    # Highway SIMD floor division
   'src/umath/loops_arithmetic_floor_hwy.h',
