@@ -904,4 +904,4 @@ class TestHistogramIntegerNonFloatPath:
         data = np.arange(100, dtype=np.int32)
         hist, edges = histogram(data, bins=10, range=(0, 99))
         assert_equal(hist.sum(), 100)
-        assert edges.dtype.kind != 'f' or True
+        assert edges.dtype.kind == 'f'

@@ -375,7 +375,7 @@ class TestPocketFFTBackendDirect:
         assert backend.name == "pocketfft"
         data = np.array([1.0, 2.0, 3.0, 4.0])
         result = backend._raw_fft(data, 4, 0, False, True, None)
-        expected = np.fft.fft(data)
+        expected = np.array([10+0j, -2+2j, -2+0j, -2-2j])
         np.testing.assert_allclose(result, expected)
 
     def test_raw_fftnd_direct(self):
@@ -384,7 +384,7 @@ class TestPocketFFTBackendDirect:
         backend = PocketFFTBackend()
         data = np.array([[1.0, 2.0], [3.0, 4.0]])
         result = backend._raw_fftnd(data, function=_fft)
-        expected = np.fft.fft2(data)
+        expected = np.array([[10+0j, -2+0j], [-4+0j, 0+0j]])
         np.testing.assert_allclose(result, expected)
 
 
@@ -401,7 +401,7 @@ class TestBackendContextPocketFFT:
             assert np.fft.get_backend() == "pocketfft"
             data = np.array([1.0, 2.0, 3.0, 4.0])
             result = np.fft.fft(data)
-            expected = np.fft.fft(data)
+            expected = np.array([10+0j, -2+2j, -2+0j, -2-2j])
             np.testing.assert_allclose(result, expected)
         assert np.fft.get_backend() == "pocketfft"
 
@@ -449,9 +449,9 @@ class TestGlobalBackendPocketFFT:
     def test_global_backend_fft_computation(self):
         np.fft.set_global_backend("pocketfft")
         try:
-            data = np.random.default_rng(42).standard_normal(64)
+            data = np.array([1.0, 2.0, 3.0, 4.0])
             result = np.fft.fft(data)
-            expected = np.fft.fft(data)
+            expected = np.array([10+0j, -2+2j, -2+0j, -2-2j])
             np.testing.assert_allclose(result, expected)
         finally:
             np.fft.reset_backend()
