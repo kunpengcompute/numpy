@@ -975,15 +975,12 @@ foreach gen_mtargets : [
     'loops_autovec_abs_hwy.dispatch.h',
     'src/umath/loops_autovec_abs_hwy.dispatch.cpp',
     use_highway ? [
-      SVE, ASIMD, NEON,
-    ] : []
-  ],
-  [
-    'loops_complex_maxmin.dispatch.h',
-    'src/umath/loops_complex_maxmin.dispatch.cpp',
-    use_highway ? [
+      ASIMD, NEON, SVE,
       X86_V4, X86_V3, X86_V2,
-      SVE, ASIMD, NEON
+      VSX2,
+      VX,
+      LSX,
+      RVV,
     ] : []
   ],
   [
@@ -1127,6 +1124,13 @@ foreach gen_mtargets : [
     ]
   ],
   [
+    'loops_unary_fp_ops.dispatch.h',
+    'src/umath/loops_unary_fp_ops.dispatch.cpp',
+    [
+      ASIMDHP, NEON,
+    ]
+  ],
+  [
     'loops_unary_fp.dispatch.h',
     src_file.process('src/umath/loops_unary_fp.dispatch.c.src'),
     [
@@ -1200,43 +1204,6 @@ foreach gen_mtargets : [
   endif
 endforeach
 
-# Build aarch64-only dispatch-able sources
-# These targets only have aarch64 implementations, so skip them entirely
-# on other platforms to avoid compiling empty baseline fallbacks.
-# -----------------------------------------
-if cpu_family == 'aarch64'
-  foreach gen_mtargets : [
-    [
-      'loops_unary_fp_ops.dispatch.h',
-      'src/umath/loops_unary_fp_ops.dispatch.cpp',
-      [ASIMDHP, NEON],
-    ],
-  ]
-    mtargets = mod_features.multi_targets(
-      gen_mtargets[0], umath_gen_headers + gen_mtargets[1],
-      dispatch: gen_mtargets[2],
-      baseline: CPU_BASELINE,
-      prefix: 'NPY_',
-      dependencies: [py_dep, np_core_dep],
-      c_args: c_args_common + max_opt,
-      cpp_args: cpp_args_common + max_opt,
-      include_directories: [
-        'include',
-        'src/common',
-        'src/multiarray',
-        'src/npymath',
-        'src/umath',
-        'src/highway',
-      ]
-    )
-    if not is_variable('multiarray_umath_mtargets')
-      multiarray_umath_mtargets = mtargets
-    else
-      multiarray_umath_mtargets.extend(mtargets)
-    endif
-  endforeach
-endif
-
 # Build _multiarray_umath module
 # ------------------------------
 src_multiarray_umath_common = [
@@ -1303,6 +1270,7 @@ src_multiarray = multiarray_gen_headers + [
   'src/multiarray/iterators.c',
   'src/multiarray/legacy_dtype_implementation.c',
   src_file.process('src/multiarray/lowlevel_strided_loops.c.src'),
+  'src/multiarray/strided_copy_kernels.cpp',
   'src/multiarray/mapping.c',
   'src/multiarray/methods.c',
   'src/multiarray/multiarraymodule.c',
@@ -1348,16 +1316,6 @@ src_multiarray = multiarray_gen_headers + [
   'src/multiarray/fnv.c',
 ]
 
-if cpu_family == 'aarch64'
-  src_multiarray += [
-    # AArch64 optimized strided copy kernels.
-    # On aarch64, NEON and scalar load/store instructions natively support
-    # unaligned memory access, enabling optimized typed pointer access
-    # regardless of alignment.
-    'src/multiarray/strided_copy_kernels.cpp',
-  ]
-endif
-
 src_umath = umath_gen_headers + [
   src_file.process('src/umath/funcs.inc.src'),
   src_file.process('src/umath/loops.c.src'),
@@ -1378,12 +1336,14 @@ src_umath = umath_gen_headers + [
   'src/umath/string_ufuncs.cpp',
   'src/umath/stringdtype_ufuncs.cpp',
   'src/umath/wrapping_array_method.c',
-  # Highway SIMD complex maximum/minimum (dispatched via multi_targets below)
+  # Highway SIMD complex maximum/minimum
+  'src/umath/loops_complex_maxmin.dispatch.cpp',
    'src/umath/loops_complex_maxmin.h',
    # Highway SIMD floor division
   'src/umath/loops_arithmetic_floor_hwy.h',
   'src/umath/loops_arithmetic_floor_hwy_avail.c',
   # Highway SIMD half-float absolute
+  'src/umath/loops_autovec_abs_hwy.dispatch.cpp',
   'src/umath/loops_autovec_abs_hwy.h',
   'src/umath/loops_autovec_abs_hwy_avail.c',
   # Highway SIMD pairwise sum
@@ -1405,9 +1365,6 @@ if cpu_family == 'aarch64'
     # AArch64 SVE logical_and scalar-input specialization
     'src/umath/loops_logical_and_sve.c',
     'src/umath/loops_logical_and_sve.h',
-    # AArch64 logical_not specializations
-    'src/umath/loops_logical_not_aarch64.c',
-    'src/umath/loops_logical_not_aarch64.h',
     # AArch64 SVE shift scalar-input specialization
     'src/umath/loops_shift_sve.c',
     'src/umath/loops_shift_sve.h',
