@@ -260,7 +260,7 @@ fft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
         complex_t *pout = (complex_t *)(op + i * so);
         plan_t p = traits::plan_dft_1d((int)nout, pin, pout,
             direction, FFT_ESTIMATE);
-        if (!p) continue;
+        if (!p) throw std::runtime_error("plan_dft_1d creation failed");
 
         if (contiguous_in && contiguous_out && pin != pout && nin >= nout) {
             traits::execute_dft(p, pin, pout);
@@ -308,7 +308,7 @@ rfft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
             complex_t *pout = (complex_t *)(op + i * so);
             plan_t p = traits::plan_dft_r2c_1d((int)npts,
                 pin, pout, FFT_ESTIMATE);
-            if (!p) continue;
+            if (!p) throw std::runtime_error("plan_dft_r2c_1d creation failed");
             traits::execute_dft_r2c(p, pin, pout);
             traits::destroy_plan(p);
             apply_fct_complex((std::complex<T> *)pout, nout, fct);
@@ -320,7 +320,7 @@ rfft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
             plan_t p = traits::plan_dft_r2c_1d((int)npts,
                 rbuf.data(), (complex_t *)cbuf.data(),
                 FFT_ESTIMATE);
-            if (!p) continue;
+            if (!p) throw std::runtime_error("plan_dft_r2c_1d creation failed");
             traits::execute_dft_r2c(p, rbuf.data(),
                 (complex_t *)cbuf.data());
             traits::destroy_plan(p);
@@ -373,7 +373,7 @@ irfft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
             real_t *pout = (real_t *)(op + i * so);
             plan_t p = traits::plan_dft_c2r_1d((int)nout,
                 pin, pout, FFT_ESTIMATE);
-            if (!p) continue;
+            if (!p) throw std::runtime_error("plan_dft_c2r_1d creation failed");
             traits::execute_dft_c2r(p, pin, pout);
             traits::destroy_plan(p);
             apply_fct(pout, nout, fct);
@@ -386,7 +386,7 @@ irfft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
             plan_t p = traits::plan_dft_c2r_1d((int)nout,
                 (complex_t *)cbuf.data(), rbuf.data(),
                 FFT_ESTIMATE);
-            if (!p) continue;
+            if (!p) throw std::runtime_error("plan_dft_c2r_1d creation failed");
             traits::execute_dft_c2r(p,
                 (complex_t *)cbuf.data(), rbuf.data());
             traits::destroy_plan(p);

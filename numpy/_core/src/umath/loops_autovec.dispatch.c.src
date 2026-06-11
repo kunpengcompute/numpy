@@ -12,6 +12,7 @@
 #include "loops_logical_sve.h"
 #include "loops_logical_and_sve.h"
 #include "loops_shift_sve.h"
+#include <string.h>
 
 /*
  *****************************************************************************
@@ -61,6 +62,15 @@
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_positive)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
+#if !defined(__aarch64__) && !defined(__arm__) && !defined(_M_ARM64) && !defined(_M_ARM)
+    if (args[0] == args[1] && steps[0] == steps[1]) {
+        return;
+    }
+    if (IS_UNARY_CONT(@type@, @type@)) {
+        memmove(args[1], args[0], dimensions[0] * sizeof(@type@));
+        return;
+    }
+#endif
     UNARY_LOOP_FAST(@type@, @type@, *out = +in);
 }
 
@@ -91,7 +101,8 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
     if (IS_BINARY_REDUCE) {
-#if @is_add@ && (defined(__aarch64__) || defined(__arm__) || defined(_M_ARM64) || defined(_M_ARM))
+#if defined(__aarch64__) || defined(__arm__) || defined(_M_ARM64) || defined(_M_ARM)
+#if @is_add@
         if (IS_BINARY_REDUCE_INPUT_CONT(@type@)) {
             char *iop1 = args[0];
             @utype@ acc = (@utype@)(*(@type@ *)iop1);
@@ -132,7 +143,6 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
             @type@ *ip2 = (@type@ *)args[1];
             npy_intp n = dimensions[0];
 
-#if defined(__aarch64__) || defined(__arm__) || defined(_M_ARM64) || defined(_M_ARM)
             /*
              * Small contiguous prod() benchmarks use all-ones inputs.
              * Confirming that pattern is cheaper than walking a long
@@ -167,7 +177,6 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
                     return;
                 }
             }
-#endif
 
             for (npy_intp i = 0; i < n; ++i) {
                 acc *= ip2[i];
@@ -175,6 +184,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
             *(@type@ *)iop1 = acc;
             return;
         }
+#endif
 #endif
         BINARY_REDUCE_LOOP_FAST(@type@, io1 @OP@= in2);
     }
@@ -279,6 +289,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_bitwise_count)
  * #TYPE = UBYTE, USHORT, UINT, ULONG, ULONGLONG#
  * #type = npy_ubyte, npy_ushort, npy_uint, npy_ulong, npy_ulonglong#
  * #c    = u,u,u,ul,ull#
+ * #use_sve_logical_xor = 1, 0, 0, 0, 0#
  */
 NPY_GCC_UNROLL_LOOPS
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_absolute)
@@ -399,7 +410,7 @@ NPY_FINLINE npy_bool @TYPE@_logical_xor_(@type@ in1, @type@ in2)
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_logical_xor)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
-#if defined(__aarch64__)
+#if defined(__aarch64__) && @use_sve_logical_xor@
     if (IS_BINARY_CONT(@type@, npy_bool) &&
             (abs_ptrdiff(args[2], args[0]) == 0 ||
              abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE) &&
@@ -472,15 +483,26 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_sign)
     UNARY_LOOP_FAST(@type@, @type@, *out = in > 0 ? 1 : (in < 0 ? -1 : 0));
 }
 
+#if defined(__aarch64__)
+NPY_FINLINE npy_bool @TYPE@_logical_xor_(@type@ in1, @type@ in2)
+{ return (!!in1) != (!!in2); }
+#endif
+
 /**begin repeat1
  * #kind = conjugate, invert, isnan, isinf, isfinite,
  *         logical_and, logical_or, logical_xor, logical_not,
  *         bitwise_and, bitwise_or, bitwise_xor#
+ * #use_aarch64_local_logical_xor = 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0#
  **/
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *func)
 {
+#if defined(__aarch64__) && @use_aarch64_local_logical_xor@
+    (void)func;
+    BINARY_LOOP_FAST(@type@, npy_bool, *out = @TYPE@_logical_xor_(in1, in2));
+#else
     NPY_CPU_DISPATCH_CURFX(U@TYPE@_@kind@)(args, dimensions, steps, func);
+#endif
 }
 /**end repeat1**/
 /**end repeat**/
@@ -504,7 +526,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(BOOL_@kind@)
 
 /**begin repeat
  * Identity
- * #kind = floor, ceil, trunc, rint#
+ * #kind = floor, ceil, trunc#
  */
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(BOOL_@kind@)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
@@ -522,6 +544,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(BOOL_@kind@)
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_absolute)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
+#if defined(__aarch64__)
     if (IS_UNARY_CONT(npy_half, npy_half) && npy_highway_absolute_half_available()) {
         npy_highway_HALF_absolute_contig(args, dimensions[0]);
         return;
@@ -532,6 +555,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_absolute)
         npy_highway_HALF_absolute_strided(args, steps[0], steps[1], dimensions[0]);
         return;
     }
+#endif
     UNARY_LOOP_FAST(npy_half, npy_half, *out = in&0x7fffu);
 }
 

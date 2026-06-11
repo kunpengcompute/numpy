@@ -273,7 +273,7 @@ def _std(a, axis=None, dtype=None, out=None, ddof=0, keepdims=False, *,
     if isinstance(ret, mu.ndarray):
         ret = um.sqrt(ret, out=ret)
     elif hasattr(ret, 'dtype'):
-        ret = ret ** 0.5
+        ret = ret.dtype.type(um.sqrt(ret))
     else:
         ret = um.sqrt(ret)
 

@@ -551,13 +551,13 @@ simd_exp2_neon_HALF(const npy_half *src, npy_intp ssrc,
   const npy_intp SMALL_BLOCK = 256;
   const npy_intp VEC_SIZE = 8;
   const npy_intp UNROLL = 4;
-
+  
   npy_float tmp_src_small[SMALL_BLOCK];
   npy_float tmp_dst_small[SMALL_BLOCK];
-
+  
   npy_float *tmp_src = NULL;
   npy_float *tmp_dst = NULL;
-
+  
   if (len > SMALL_BLOCK) {
     tmp_src = (npy_float *)malloc(LARGE_BLOCK * sizeof(npy_float));
     tmp_dst = (npy_float *)malloc(LARGE_BLOCK * sizeof(npy_float));
@@ -572,7 +572,7 @@ simd_exp2_neon_HALF(const npy_half *src, npy_intp ssrc,
       return;
     }
   }
-
+  
   const npy_intp BLOCK_SIZE = (len > SMALL_BLOCK) ? LARGE_BLOCK : SMALL_BLOCK;
   npy_float *src_buf = (len > SMALL_BLOCK) ? tmp_src : tmp_src_small;
   npy_float *dst_buf = (len > SMALL_BLOCK) ? tmp_dst : tmp_dst_small;
@@ -581,7 +581,7 @@ simd_exp2_neon_HALF(const npy_half *src, npy_intp ssrc,
     npy_intp block_len = (len - offset > BLOCK_SIZE) ? BLOCK_SIZE : (len - offset);
     const npy_half *block_src = src + offset * ssrc;
     npy_half *block_dst = dst + offset * sdst;
-
+    
     npy_intp i = 0;
     if (ssrc == 1) {
       for (; i + UNROLL * VEC_SIZE <= block_len; i += UNROLL * VEC_SIZE) {
@@ -610,9 +610,9 @@ simd_exp2_neon_HALF(const npy_half *src, npy_intp ssrc,
     for (; i < block_len; i++) {
       src_buf[i] = npy_half_to_float(block_src[i * ssrc]);
     }
-
+    
     simd_exp2_neon_FLOAT(src_buf, 1, dst_buf, 1, block_len);
-
+    
     i = 0;
     if (sdst == 1) {
       for (; i + UNROLL * VEC_SIZE <= block_len; i += UNROLL * VEC_SIZE) {
@@ -639,7 +639,7 @@ simd_exp2_neon_HALF(const npy_half *src, npy_intp ssrc,
       block_dst[i * sdst] = npy_float_to_half(dst_buf[i]);
     }
   }
-
+  
   if (len > SMALL_BLOCK) {
     free(tmp_src);
     free(tmp_dst);
@@ -732,12 +732,12 @@ static void avx512_exponent_f16(const npy_half *src, npy_half *dst, npy_intp len
     const int num_lanes = npyv_nlanes_f32;
     npyvh_f16 x, out;
     npyv_f32 x_ps, out_ps;
-
+    
     for (; len > 0; len -= num_lanes, src += num_lanes, dst += num_lanes) {
         if (len >= num_lanes) {
             x       = npyvh_load_f16(src);
             x_ps    = npyv_cvt_f16_f32(x);
-            out_ps  = math_func(x_ps);
+            out_ps  = math_func(x_ps); 
             out     = npyv_cvt_f32_f16(out_ps, 0);
             npyvh_store_f16(dst, out);
         }
