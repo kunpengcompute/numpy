@@ -174,6 +174,21 @@ ci_install_system_packages \
 ci_log "Preparing scipy-openblas pkg-config metadata."
 ci_prepare_openblas32
 
+ci_log "Patching scipy-openblas.pc to include Libs for shared linking."
+_pc_file=".openblas/scipy-openblas.pc"
+if [[ -f "${_pc_file}" ]]; then
+    if grep -q '^Libs:$' "${_pc_file}" || grep -q '^Libs: *$' "${_pc_file}"; then
+        _libdir="$(grep '^libdir=' "${_pc_file}" | cut -d= -f2-)"
+        sed -i "s|^Libs: *$|Libs: -L${_libdir} -lscipy_openblas|" "${_pc_file}"
+        ci_log "Fixed empty Libs field in ${_pc_file}."
+    fi
+    _libdir="$(grep '^libdir=' "${_pc_file}" | cut -d= -f2-)"
+    if [[ -n "${_libdir}" && -d "${_libdir}" ]]; then
+        export LD_LIBRARY_PATH="${_libdir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+        ci_log "Added ${_libdir} to LD_LIBRARY_PATH."
+    fi
+fi
+
 ci_log "Running full unit test suite with Python and C/C++ coverage."
 case " ${FULL_PYTEST_ARGS} " in
     *" --cov "*|*" --cov="*|*" --cov-report "*|*" --cov-report="*)
@@ -226,7 +241,8 @@ exclude = build/.*
 exclude = numpy/_core/src/highway/.*
 exclude = numpy/_core/src/npysort/.*
 
-# Tolerate GCC coverage parse issues: warn once per file instead of failing.
+# Only ignore negative hit-count anomalies from optimized code; surface all
+# other gcov parse failures so incomplete XML does not silently pass thresholds.
 gcov-ignore-parse-errors = negative_hits.warn_once_per_file
 EOF
 
@@ -262,10 +278,15 @@ COVERAGE_FILE="${coverage_data}" python -m coverage html --omit="${python_covera
 ci_log "Generating Python XML coverage artifact."
 COVERAGE_FILE="${coverage_data}" python -m coverage xml --omit="${python_coverage_omit}" -o "${coverage_xml}"
 
-if [[ "${gcov_format}" != "xml" && ! -f "${c_coverage_xml}" ]]; then
-    ci_log "Generating C/C++ XML coverage artifact for threshold checks."
-    ninja -C "${build_dir}" coverage-xml
+ci_log "Regenerating C/C++ XML coverage with multi-target merge."
+rm -f "${c_coverage_xml}"
+gcovr_stderr_file="$(mktemp)"
+python "${SCRIPT_DIR}/../../merge_coverage.py" "${build_dir}" "${c_coverage_xml}" 2>"${gcovr_stderr_file}"
+if [[ -s "${gcovr_stderr_file}" ]]; then
+    ci_log "WARNING: gcovr reported parse errors (see below). Coverage XML may be incomplete."
+    cat "${gcovr_stderr_file}" >&2
 fi
+rm -f "${gcovr_stderr_file}"
 
 ci_log "Checking Python and C/C++ coverage thresholds."
 python - "${coverage_xml}" "${c_coverage_xml}" \

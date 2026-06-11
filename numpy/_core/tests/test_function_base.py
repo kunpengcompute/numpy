@@ -317,6 +317,17 @@ class TestGeomspace:
         assert_raises(ValueError, geomspace, 10, 0)
         assert_raises(ValueError, geomspace, 0, 0)
 
+    def test_complex_array_num_zero(self):
+        start = array([1 + 1j, 2 + 2j])
+        stop = array([10 + 10j, 20 + 20j])
+        result = geomspace(start, stop, num=0)
+        assert result.shape == (0, 2)
+
+    def test_complex_array_num_negative(self):
+        start = array([1 + 1j, 2 + 2j])
+        stop = array([10 + 10j, 20 + 20j])
+        assert_raises(ValueError, geomspace, start, stop, -1)
+
 
 class TestLinspace:
 

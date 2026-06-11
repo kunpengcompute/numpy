@@ -1332,6 +1332,12 @@ class TestNanFunctions_Quantile:
         assert_equal(np.nanquantile(x, 1), 3.5)
         assert_equal(np.nanquantile(x, 0.5), 1.75)
 
+    def test_dense_nan_with_weights(self):
+        arr = np.array([np.nan, np.nan, np.nan, 1.0])
+        weights = np.array([1.0, 1.0, 1.0, 1.0])
+        result = np.nanquantile(arr, 0.5, weights=weights, method="inverted_cdf")
+        assert_equal(result, 1.0)
+
     def test_complex(self):
         arr_c = np.array([0.5 + 3.0j, 2.1 + 0.5j, 1.6 + 2.3j], dtype='G')
         assert_raises(TypeError, np.nanquantile, arr_c, 0.5)

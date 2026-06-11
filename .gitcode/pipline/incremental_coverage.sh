@@ -49,6 +49,30 @@ if ! ci_should_install_python_deps; then
     ci_require_command diff-cover
 fi
 
+ci_log "Remapping build-install paths in Python coverage XML to source paths."
+python - "${python_coverage_xml}" <<'REMAP_PY'
+import re
+import sys
+from pathlib import Path
+
+xml_path = Path(sys.argv[1])
+content = xml_path.read_text(encoding="utf-8")
+
+prefix_match = re.search(
+    r'filename="(build-install/.+?/site-packages/)', content
+)
+if not prefix_match:
+    print("No build-install prefix in coverage XML, skipping remap.", file=sys.stderr)
+    sys.exit(0)
+
+build_prefix = prefix_match.group(1)
+
+content = content.replace(f'filename="{build_prefix}', 'filename="')
+
+xml_path.write_text(content, encoding="utf-8")
+print(f"Remapped {build_prefix!r} -> '' in {xml_path}")
+REMAP_PY
+
 if git rev-parse --verify "${COMPARE_BRANCH}" >/dev/null 2>&1; then
     ci_log "Using compare branch ${COMPARE_BRANCH}."
 else
@@ -169,3 +193,4 @@ set -e
 if ((python_diff_status != 0 || c_diff_status != 0 || summary_status != 0)); then
     exit 1
 fi
+

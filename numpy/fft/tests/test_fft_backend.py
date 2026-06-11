@@ -320,3 +320,207 @@ class TestEnvVarBackend:
         finally:
             if kml_backend is not None:
                 _BACKEND_MANAGER._backends["kmlfft"] = kml_backend
+
+
+# ---------------------------------------------------------------------------
+# Abstract base class
+# ---------------------------------------------------------------------------
+
+class TestFFTBackendAbstract:
+    """Tests for FFTBackend abstract base class methods."""
+
+    def test_name_raises_not_implemented(self):
+        from numpy.fft._backend import FFTBackend
+        backend = FFTBackend()
+        with pytest.raises(NotImplementedError):
+            _ = backend.name
+
+    def test_raw_fft_raises_not_implemented(self):
+        from numpy.fft._backend import FFTBackend
+        backend = FFTBackend()
+        with pytest.raises(NotImplementedError):
+            backend._raw_fft(None, 0, 0, False, True, None)
+
+    def test_raw_fftnd_raises_not_implemented(self):
+        from numpy.fft._backend import FFTBackend
+        backend = FFTBackend()
+        with pytest.raises(NotImplementedError):
+            backend._raw_fftnd(None)
+
+    def test_supports_norm_valid(self):
+        from numpy.fft._backend import FFTBackend
+        backend = FFTBackend()
+        assert backend.supports_norm(None) is True
+        assert backend.supports_norm("backward") is True
+        assert backend.supports_norm("ortho") is True
+        assert backend.supports_norm("forward") is True
+        assert backend.supports_norm("invalid") is False
+
+    def test_supports_type_default(self):
+        from numpy.fft._backend import FFTBackend
+        backend = FFTBackend()
+        assert backend.supports_type(np.float64) is True
+
+
+# ---------------------------------------------------------------------------
+# PocketFFT backend direct calls
+# ---------------------------------------------------------------------------
+
+class TestPocketFFTBackendDirect:
+    """Tests for PocketFFTBackend methods called directly."""
+
+    def test_raw_fft_direct(self):
+        from numpy.fft._backend import PocketFFTBackend
+        backend = PocketFFTBackend()
+        assert backend.name == "pocketfft"
+        data = np.array([1.0, 2.0, 3.0, 4.0])
+        result = backend._raw_fft(data, 4, 0, False, True, None)
+        expected = np.array([10+0j, -2+2j, -2+0j, -2-2j])
+        np.testing.assert_allclose(result, expected)
+
+    def test_raw_fftnd_direct(self):
+        from numpy.fft._backend import PocketFFTBackend
+        from numpy.fft._pocketfft import fft as _fft
+        backend = PocketFFTBackend()
+        data = np.array([[1.0, 2.0], [3.0, 4.0]])
+        result = backend._raw_fftnd(data, function=_fft)
+        expected = np.array([[10+0j, -2+0j], [-4+0j, 0+0j]])
+        np.testing.assert_allclose(result, expected)
+
+
+# ---------------------------------------------------------------------------
+# Context manager with pocketfft (no KML required)
+# ---------------------------------------------------------------------------
+
+class TestBackendContextPocketFFT:
+    """Tests for _BackendContext using pocketfft backend."""
+
+    def test_set_backend_pocketfft_context(self):
+        assert np.fft.get_backend() == "pocketfft"
+        with np.fft.set_backend("pocketfft"):
+            assert np.fft.get_backend() == "pocketfft"
+            data = np.array([1.0, 2.0, 3.0, 4.0])
+            result = np.fft.fft(data)
+            expected = np.array([10+0j, -2+2j, -2+0j, -2-2j])
+            np.testing.assert_allclose(result, expected)
+        assert np.fft.get_backend() == "pocketfft"
+
+    def test_nested_pocketfft_context(self):
+        with np.fft.set_backend("pocketfft"):
+            assert np.fft.get_backend() == "pocketfft"
+            with np.fft.set_backend("pocketfft"):
+                assert np.fft.get_backend() == "pocketfft"
+            assert np.fft.get_backend() == "pocketfft"
+
+    def test_context_exit_without_previous(self):
+        tl = _BACKEND_MANAGER._thread_local
+        if hasattr(tl, "backend"):
+            del tl.backend
+        with np.fft.set_backend("pocketfft"):
+            assert hasattr(tl, "backend")
+        assert not hasattr(tl, "backend") or tl.backend is None
+
+    def test_context_exit_with_previous(self):
+        with np.fft.set_backend("pocketfft"):
+            with np.fft.set_backend("pocketfft"):
+                assert np.fft.get_backend() == "pocketfft"
+            assert np.fft.get_backend() == "pocketfft"
+
+
+# ---------------------------------------------------------------------------
+# set_global_backend / reset_backend with pocketfft
+# ---------------------------------------------------------------------------
+
+class TestGlobalBackendPocketFFT:
+    """Tests for set_global_backend and reset_backend using pocketfft."""
+
+    def test_set_global_pocketfft(self):
+        np.fft.set_global_backend("pocketfft")
+        assert np.fft.get_backend() == "pocketfft"
+        np.fft.reset_backend()
+        assert np.fft.get_backend() == "pocketfft"
+
+    def test_reset_clears_global(self):
+        np.fft.set_global_backend("pocketfft")
+        assert _BACKEND_MANAGER._global_backend is not None
+        np.fft.reset_backend()
+        assert _BACKEND_MANAGER._global_backend is None
+
+    def test_global_backend_fft_computation(self):
+        np.fft.set_global_backend("pocketfft")
+        try:
+            data = np.array([1.0, 2.0, 3.0, 4.0])
+            result = np.fft.fft(data)
+            expected = np.array([10+0j, -2+2j, -2+0j, -2-2j])
+            np.testing.assert_allclose(result, expected)
+        finally:
+            np.fft.reset_backend()
+
+
+# ---------------------------------------------------------------------------
+# get_backend_for_type fallback
+# ---------------------------------------------------------------------------
+
+class TestGetBackendForType:
+    """Tests for _BackendManager.get_backend_for_type."""
+
+    def test_fallback_for_unsupported_dtype(self):
+        class _FakeBackend:
+            name = "fake"
+            def supports_type(self, dtype):
+                return False
+        _BACKEND_MANAGER._thread_local.backend = _FakeBackend()
+        try:
+            backend = _BACKEND_MANAGER.get_backend_for_type(np.float64)
+            assert backend.name == "pocketfft"
+        finally:
+            del _BACKEND_MANAGER._thread_local.backend
+
+
+# ---------------------------------------------------------------------------
+# Env var backend resolution
+# ---------------------------------------------------------------------------
+
+class TestEnvVarBackendResolution:
+    """Tests for env var backend resolution in get_current_backend."""
+
+    def test_env_backend_takes_effect(self):
+        _simulate_env_var("pocketfft")
+        assert _BACKEND_MANAGER._env_backend is not None
+        assert np.fft.get_backend() == "pocketfft"
+
+    def test_env_backend_invalid_warns(self):
+        with pytest.warns(RuntimeWarning, match="NUMPY_FFT_BACKEND"):
+            _simulate_env_var("nonexistent_backend")
+        assert _BACKEND_MANAGER._env_backend is None
+
+    def test_env_var_valid_backend_in_init(self):
+        import os
+        from numpy.fft._backend import _BackendManager
+        old = os.environ.get("NUMPY_FFT_BACKEND")
+        try:
+            os.environ["NUMPY_FFT_BACKEND"] = "pocketfft"
+            mgr = _BackendManager()
+            assert mgr._env_backend is not None
+            assert mgr.get_backend_name() == "pocketfft"
+        finally:
+            if old is None:
+                os.environ.pop("NUMPY_FFT_BACKEND", None)
+            else:
+                os.environ["NUMPY_FFT_BACKEND"] = old
+
+    def test_env_var_invalid_backend_in_init(self):
+        import os
+        from numpy.fft._backend import _BackendManager
+        old = os.environ.get("NUMPY_FFT_BACKEND")
+        try:
+            os.environ["NUMPY_FFT_BACKEND"] = "nonexistent"
+            with pytest.warns(RuntimeWarning, match="NUMPY_FFT_BACKEND"):
+                mgr = _BackendManager()
+            assert mgr._env_backend is None
+            assert mgr.get_backend_name() == "pocketfft"
+        finally:
+            if old is None:
+                os.environ.pop("NUMPY_FFT_BACKEND", None)
+            else:
+                os.environ["NUMPY_FFT_BACKEND"] = old
