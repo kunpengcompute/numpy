@@ -41,7 +41,7 @@ npy_highway_floor_divide_scalar_unsigned_available(int element_size);
 /* Signed integer contig (vector-vector) wrappers */
 NPY_VISIBILITY_HIDDEN void
 npy_highway_floor_divide_s8_contig(char **args, npy_intp len);
-
+ 
 NPY_VISIBILITY_HIDDEN void
 npy_highway_floor_divide_s16_contig(char **args, npy_intp len);
 

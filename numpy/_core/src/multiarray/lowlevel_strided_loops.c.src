@@ -23,6 +23,7 @@
 #include "array_assign.h"
 #include "array_method.h"
 #include "usertypes.h"
+
 #include "umathmodule.h"
 #include "gil_utils.h"
 
@@ -92,13 +93,20 @@
  * #dst_contig = 0, 1, 0 ,1#
  */
 /**begin repeat2
- * #swap = _NPY_SWAP_INPLACE, _NPY_SWAP,
+ * #swap = _NPY_NOP, _NPY_NOP, _NPY_SWAP_INPLACE, _NPY_SWAP,
  *         _NPY_SWAP_INPLACE, _NPY_SWAP_PAIR#
- * #prefix = _swap, _aligned_swap, _swap_pair, _aligned_swap_pair#
- * #is_aligned = 0, 1, 0, 1#
- * #minelsize = 2, 2, 4, 4#
- * #is_swap = 1, 1, 2, 2#
+ * #prefix = , _aligned, _swap, _aligned_swap, _swap_pair, _aligned_swap_pair#
+ * #is_aligned = 0, 1, 0, 1, 0, 1#
+ * #minelsize = 1, 1, 2, 2, 4, 4#
+ * #is_swap = 0, 0, 1, 1, 2, 2#
  */
+
+/*
+ * On aarch64, non-swap strided copy kernels are provided by
+ * strided_copy_kernels.cpp with optimized typed pointer access.
+ * Only swap variants are still generated here for all platforms.
+ */
+#if !defined(__aarch64__) || @is_swap@
 
 #if (@elsize@ >= @minelsize@) && \
     (@elsize@ > 1 || @is_aligned@) && \
@@ -260,9 +268,38 @@ static NPY_GCC_OPT_3 int
 
 #endif/* @elsize@ >= @minelsize@ */
 
+#endif // !defined(__aarch64__) || @is_swap@
+
 /**end repeat2**/
 /**end repeat1**/
 /**end repeat**/
+
+/*
+ * On aarch64, _strided_to_strided, _contig_to_contig, and
+ * PyArray_GetStridedCopyFn are provided by strided_copy_kernels.cpp.
+ */
+#if !defined(__aarch64__)
+static int
+_strided_to_strided(
+        PyArrayMethod_Context *context, char *const *args,
+        const npy_intp *dimensions, const npy_intp *strides,
+        NpyAuxData *NPY_UNUSED(data))
+{
+    npy_intp N = dimensions[0];
+    char *src = args[0], *dst = args[1];
+    npy_intp src_stride = strides[0], dst_stride = strides[1];
+    npy_intp src_itemsize = context->descriptors[0]->elsize;
+
+    while (N > 0) {
+        memmove(dst, src, src_itemsize);
+        dst += dst_stride;
+        src += src_stride;
+        --N;
+    }
+    return 0;
+}
+
+#endif // !defined(__aarch64__)
 
 /*
  * NOTE: This function is currently unused. It would currently be used for
@@ -340,6 +377,167 @@ _swap_pair_strided_to_strided(
     }
     return 0;
 }
+
+#if !defined(__aarch64__)
+static int
+_contig_to_contig(
+        PyArrayMethod_Context *context, char *const *args,
+        const npy_intp *dimensions, const npy_intp *NPY_UNUSED(strides),
+        NpyAuxData *NPY_UNUSED(data))
+{
+    npy_intp N = dimensions[0];
+    char *src = args[0], *dst = args[1];
+    npy_intp src_itemsize = context->descriptors[0]->elsize;
+
+    memmove(dst, src, src_itemsize*N);
+    return 0;
+}
+
+
+NPY_NO_EXPORT PyArrayMethod_StridedLoop *
+PyArray_GetStridedCopyFn(int aligned, npy_intp src_stride,
+                         npy_intp dst_stride, npy_intp itemsize)
+{
+/*
+ * Skip the "unaligned" versions on CPUs which support unaligned
+ * memory accesses.
+ */
+#if !NPY_USE_UNALIGNED_ACCESS
+    if (aligned) {
+#endif/*!NPY_USE_UNALIGNED_ACCESS*/
+
+        /* contiguous dst */
+        if (itemsize != 0 && dst_stride == itemsize) {
+            /* constant src */
+            if (src_stride == 0) {
+                switch (itemsize) {
+/**begin repeat
+ * #elsize = 1, 2, 4, 8, 16#
+ */
+                    case @elsize@:
+                        return
+                          &_aligned_strided_to_contig_size@elsize@_srcstride0;
+/**end repeat**/
+                }
+            }
+            /* contiguous src */
+            else if (src_stride == itemsize) {
+                return &_contig_to_contig;
+            }
+            /* general src */
+            else {
+                switch (itemsize) {
+/**begin repeat
+ * #elsize = 1, 2, 4, 8, 16#
+ */
+                    case @elsize@:
+                        return &_aligned_strided_to_contig_size@elsize@;
+/**end repeat**/
+                }
+            }
+
+            return &_strided_to_strided;
+        }
+        /* general dst */
+        else {
+            /* constant src */
+            if (src_stride == 0) {
+                switch (itemsize) {
+/**begin repeat
+ * #elsize = 1, 2, 4, 8, 16#
+ */
+                    case @elsize@:
+                        return
+                          &_aligned_strided_to_strided_size@elsize@_srcstride0;
+/**end repeat**/
+                }
+            }
+            /* contiguous src */
+            else if (src_stride == itemsize) {
+                switch (itemsize) {
+/**begin repeat
+ * #elsize = 1, 2, 4, 8, 16#
+ */
+                    case @elsize@:
+                        return &_aligned_contig_to_strided_size@elsize@;
+/**end repeat**/
+                }
+
+                return &_strided_to_strided;
+            }
+            else {
+                switch (itemsize) {
+/**begin repeat
+ * #elsize = 1, 2, 4, 8, 16#
+ */
+                    case @elsize@:
+                        return &_aligned_strided_to_strided_size@elsize@;
+/**end repeat**/
+                }
+            }
+        }
+
+#if !NPY_USE_UNALIGNED_ACCESS
+    }
+    else {
+        if (itemsize != 0) {
+            if (dst_stride == itemsize) {
+                /* contiguous dst */
+                if (src_stride == itemsize) {
+                    /* contiguous src, dst */
+                    return &_contig_to_contig;
+                }
+                else {
+                    /* general src */
+                    switch (itemsize) {
+                        case 1:
+                            return &_aligned_strided_to_contig_size1;
+/**begin repeat
+ * #elsize = 2, 4, 8, 16#
+ */
+                        case @elsize@:
+                            return &_strided_to_contig_size@elsize@;
+/**end repeat**/
+                    }
+                }
+
+                return &_strided_to_strided;
+            }
+            else if (src_stride == itemsize) {
+                /* contiguous src, general dst */
+                switch (itemsize) {
+                    case 1:
+                        return &_aligned_contig_to_strided_size1;
+/**begin repeat
+ * #elsize = 2, 4, 8, 16#
+ */
+                    case @elsize@:
+                        return &_contig_to_strided_size@elsize@;
+/**end repeat**/
+                }
+
+                return &_strided_to_strided;
+            }
+        }
+        else {
+            /* general src, dst */
+            switch (itemsize) {
+                case 1:
+                    return &_aligned_strided_to_strided_size1;
+/**begin repeat
+ * #elsize = 2, 4, 8, 16#
+ */
+                case @elsize@:
+                    return &_strided_to_strided_size@elsize@;
+/**end repeat**/
+            }
+        }
+    }
+#endif/*!NPY_USE_UNALIGNED_ACCESS*/
+
+    return &_strided_to_strided;
+}
+#endif // !defined(__aarch64__)
 
 /*
  * PyArray_GetStridedCopySwapFn and PyArray_GetStridedCopySwapPairFn are

@@ -182,7 +182,7 @@ def _remove_nan_1d(arr1d, second_arr1d=None, overwrite_input=False):
             return arr1d[:0], second_arr1d[:0], True
     elif s.size == 0:
         return arr1d, second_arr1d, overwrite_input
-    elif not overwrite_input and s.size * 2 >= arr1d.size:
+    elif not overwrite_input and s.size * 4 >= arr1d.size * 3:
         # For dense NaN slices, compact directly instead of copying the full
         # buffer and then backfilling from the tail.
         if second_arr1d is None:

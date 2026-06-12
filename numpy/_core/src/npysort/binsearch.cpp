@@ -11,6 +11,7 @@
 
 #include <array>
 #include <functional>  // for std::less and std::less_equal
+#include <vector>
 
 // Enumerators for the variant of binsearch
 enum arg_t
@@ -51,6 +52,222 @@ struct side_to_generic_cmp<right> {
     using type = std::less_equal<int>;
 };
 
+#if defined(__aarch64__)
+
+/*
+ * Interleaved multi-query binary search for contiguous arrays on aarch64.
+ * Processes BATCH queries simultaneously to overlap DRAM latency via
+ * the CPU's out-of-order execution. Prefetches next-level midpoint addresses.
+ */
+template <class Tag, side_t side, int BATCH>
+static void
+binsearch_interleaved(const char *arr, const char *key, char *ret,
+                      npy_intp arr_len, npy_intp key_len)
+{
+    using T = typename Tag::type;
+    auto cmp = side_to_cmp<Tag, side>::value;
+    const T *arr_t = (const T *)arr;
+    const T *key_t = (const T *)key;
+    npy_intp *ret_t = (npy_intp *)ret;
+
+    npy_intp ki = 0;
+    npy_intp batch_end = key_len - (key_len % BATCH);
+
+    for (; ki < batch_end; ki += BATCH) {
+        T key_vals[BATCH];
+        npy_intp min_idx[BATCH], max_idx[BATCH];
+        int active[BATCH];
+        int any_active = BATCH;
+
+        for (int b = 0; b < BATCH; b++) {
+            key_vals[b] = key_t[ki + b];
+            min_idx[b] = 0;
+            max_idx[b] = arr_len;
+            active[b] = 1;
+        }
+
+        /* Interleaved binary search: advance all queries by one step
+         * each round, overlapping their midpoint memory accesses */
+        while (any_active > 0) {
+            for (int b = 0; b < BATCH; b++) {
+                if (!active[b]) continue;
+
+                npy_intp mid = min_idx[b] + ((max_idx[b] - min_idx[b]) >> 1);
+
+                /* Prefetch both possible next-step midpoints */
+                npy_intp next_left = min_idx[b] + ((mid - min_idx[b]) >> 1);
+                npy_intp next_right = mid + 1 + ((max_idx[b] - mid - 1) >> 1);
+                __builtin_prefetch(arr_t + next_left, 0, 1);
+                __builtin_prefetch(arr_t + next_right, 0, 1);
+
+                T mid_val = arr_t[mid];
+
+                if (cmp(mid_val, key_vals[b])) {
+                    min_idx[b] = mid + 1;
+                } else {
+                    max_idx[b] = mid;
+                }
+
+                if (min_idx[b] >= max_idx[b]) {
+                    ret_t[ki + b] = min_idx[b];
+                    active[b] = 0;
+                    any_active--;
+                }
+            }
+        }
+    }
+
+    /* Remaining queries: scalar search */
+    for (; ki < key_len; ki++) {
+        T key_val = key_t[ki];
+        npy_intp min_i = 0, max_i = arr_len;
+        while (min_i < max_i) {
+            npy_intp mid = min_i + ((max_i - min_i) >> 1);
+            T mid_val = arr_t[mid];
+            if (cmp(mid_val, key_val)) {
+                min_i = mid + 1;
+            } else {
+                max_i = mid;
+            }
+        }
+        ret_t[ki] = min_i;
+    }
+}
+
+/*
+ * Two-level indexed interleaved binary search for large arrays on aarch64.
+ * Builds a compact block index (first element of each 4K-entry block = ~32KB)
+ * that fits in L1 cache. Coarse search in the index stays in L1 (~12 steps @ 3ns),
+ * fine search within identified blocks stays in L2/L3 (~12 steps @ 10-20ns).
+ * Interleaved fine search overlaps DRAM latency across BATCH queries.
+ */
+template <class Tag, side_t side, int BATCH>
+static void
+binsearch_indexed_interleaved(const char *arr, const char *key, char *ret,
+                              npy_intp arr_len, npy_intp key_len)
+{
+    using T = typename Tag::type;
+    auto cmp = side_to_cmp<Tag, side>::value;
+    const T *arr_t = (const T *)arr;
+    const T *key_t = (const T *)key;
+    npy_intp *ret_t = (npy_intp *)ret;
+
+    const npy_intp BLOCK_SIZE = 4096;
+    const npy_intp n_blocks = (arr_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    /* Build block index (first element of each block) — fits in L1 */
+    std::vector<T> block_index_vec(n_blocks);
+    T *block_index = block_index_vec.data();
+    for (npy_intp i = 0; i < n_blocks; i++) {
+        block_index[i] = arr_t[i * BLOCK_SIZE];
+    }
+
+    npy_intp ki = 0;
+    npy_intp batch_end = key_len - (key_len % BATCH);
+
+    for (; ki < batch_end; ki += BATCH) {
+        T key_vals[BATCH];
+        npy_intp block_idx[BATCH];
+
+        /* Load key values and do coarse binary search in block_index */
+        for (int b = 0; b < BATCH; b++) {
+            key_vals[b] = key_t[ki + b];
+
+            npy_intp lo = 0, hi = n_blocks;
+            while (lo < hi) {
+                npy_intp mid = lo + ((hi - lo) >> 1);
+                if (cmp(block_index[mid], key_vals[b])) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            block_idx[b] = (lo > 0) ? lo - 1 : 0;
+        }
+
+        /* Initialize fine search bounds */
+        npy_intp fine_min[BATCH], fine_max[BATCH];
+        int active[BATCH];
+        int any_active = BATCH;
+
+        for (int b = 0; b < BATCH; b++) {
+            fine_min[b] = block_idx[b] * BLOCK_SIZE;
+            fine_max[b] = fine_min[b] + BLOCK_SIZE;
+            if (fine_max[b] > arr_len) fine_max[b] = arr_len;
+            active[b] = 1;
+
+            /* Prefetch first midpoint of fine search */
+            npy_intp first_mid = fine_min[b] + ((fine_max[b] - fine_min[b]) >> 1);
+            __builtin_prefetch(arr_t + first_mid, 0, 1);
+        }
+
+        /* Interleaved fine binary search within blocks */
+        while (any_active > 0) {
+            for (int b = 0; b < BATCH; b++) {
+                if (!active[b]) continue;
+
+                npy_intp mid = fine_min[b] + ((fine_max[b] - fine_min[b]) >> 1);
+
+                /* Prefetch both possible next-step midpoints */
+                npy_intp next_left = fine_min[b] + ((mid - fine_min[b]) >> 1);
+                npy_intp next_right = mid + 1 + ((fine_max[b] - mid - 1) >> 1);
+                __builtin_prefetch(arr_t + next_left, 0, 1);
+                __builtin_prefetch(arr_t + next_right, 0, 1);
+
+                T mid_val = arr_t[mid];
+
+                if (cmp(mid_val, key_vals[b])) {
+                    fine_min[b] = mid + 1;
+                } else {
+                    fine_max[b] = mid;
+                }
+
+                if (fine_min[b] >= fine_max[b]) {
+                    ret_t[ki + b] = fine_min[b];
+                    active[b] = 0;
+                    any_active--;
+                }
+            }
+        }
+    }
+
+    /* Remaining queries: scalar search with two-level decomposition */
+    for (; ki < key_len; ki++) {
+        T key_val = key_t[ki];
+
+        /* Coarse search */
+        npy_intp lo = 0, hi = n_blocks;
+        while (lo < hi) {
+            npy_intp mid = lo + ((hi - lo) >> 1);
+            if (cmp(block_index[mid], key_val)) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        npy_intp blk = (lo > 0) ? lo - 1 : 0;
+
+        /* Fine search */
+        npy_intp fine_lo = blk * BLOCK_SIZE;
+        npy_intp fine_hi = fine_lo + BLOCK_SIZE;
+        if (fine_hi > arr_len) fine_hi = arr_len;
+
+        __builtin_prefetch(arr_t + fine_lo + ((fine_hi - fine_lo) >> 1), 0, 1);
+
+        while (fine_lo < fine_hi) {
+            npy_intp mid = fine_lo + ((fine_hi - fine_lo) >> 1);
+            if (cmp(arr_t[mid], key_val)) {
+                fine_lo = mid + 1;
+            } else {
+                fine_hi = mid;
+            }
+        }
+        ret_t[ki] = fine_lo;
+    }
+}
+
+#endif /* __aarch64__ */
+
 /*
  *****************************************************************************
  **                            NUMERIC SEARCHES                             **
@@ -63,6 +280,26 @@ binsearch(const char *arr, const char *key, char *ret, npy_intp arr_len,
           npy_intp ret_str, PyArrayObject *)
 {
     using T = typename Tag::type;
+
+#if defined(__aarch64__)
+    /* Fast path: ARM-optimized search for contiguous arrays */
+    if (arr_str == sizeof(T) && key_str == sizeof(T) &&
+        ret_str == sizeof(npy_intp)) {
+        if (arr_len > 32768 && key_len >= 4) {
+            /* Two-level indexed interleaved search (cache optimization) */
+            binsearch_indexed_interleaved<Tag, side, 4>(
+                arr, key, ret, arr_len, key_len);
+            return;
+        }
+        else if (arr_len > 0 && key_len >= 4) {
+            /* Direct interleaved search (small arrays) */
+            binsearch_interleaved<Tag, side, 4>(
+                arr, key, ret, arr_len, key_len);
+            return;
+        }
+    }
+#endif
+
     auto cmp = side_to_cmp<Tag, side>::value;
     npy_intp min_idx = 0;
     npy_intp max_idx = arr_len;

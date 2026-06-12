@@ -20,7 +20,7 @@ MinusInfinity = 'PyFloat_FromDouble(-NPY_INFINITY)'
 ReorderableNone = "(Py_INCREF(Py_None), Py_None)"
 
 # for arm optimized dispatch
-IsArm = platform.machine().startswith('arm') or platform.machine().startswith('aarch64')
+IsArm = platform.machine().startswith('aarch64')
 
 class docstrings:
     @staticmethod
@@ -462,10 +462,9 @@ defdict = {
           docstrings.get('numpy._core.umath.reciprocal'),
           None,
           TD(ints + inexact, dispatch=[
-              ('loops_unary_fp_ops', 'eFD'),
               ('loops_unary_fp', 'fd'),
               ('loops_autovec', ints),
-          ]),
+          ] + ([('loops_unary_fp_ops', 'eFD')] if IsArm else [])),
           TD(O, f='Py_reciprocal'),
           ),
 # This is no longer used as numpy.ones_like, however it is
@@ -963,7 +962,8 @@ defdict = {
           docstrings.get('numpy._core.umath.ceil'),
           None,
           TD(bints),
-          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]),
+          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]) if IsArm else
+          TD('e', f='ceil', astype={'e': 'f'}),
           TD(inexactvec, dispatch=[('loops_unary_fp', 'fd')]),
           TD('g', f='ceil'),
           TD(O, f='npy_ObjectCeil'),
@@ -973,7 +973,8 @@ defdict = {
           docstrings.get('numpy._core.umath.trunc'),
           None,
           TD(bints),
-          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]),
+          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]) if IsArm else
+          TD('e', f='trunc', astype={'e': 'f'}),
           TD(inexactvec, dispatch=[('loops_unary_fp', 'fd')]),
           TD('g', f='trunc'),
           TD(O, f='npy_ObjectTrunc'),
@@ -991,7 +992,8 @@ defdict = {
           docstrings.get('numpy._core.umath.floor'),
           None,
           TD(bints),
-          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]),
+          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]) if IsArm else
+          TD('e', f='floor', astype={'e': 'f'}),
           TD(inexactvec, dispatch=[('loops_unary_fp', 'fd')]),
           TD('g', f='floor'),
           TD(O, f='npy_ObjectFloor'),
@@ -1000,8 +1002,8 @@ defdict = {
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.rint'),
           None,
-          TD(bints),
-          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]),
+          TD('e', dispatch=[('loops_unary_fp_ops', 'e')]) if IsArm else
+          TD('e', f='rint', astype={'e': 'f'}),
           TD(inexactvec, dispatch=[('loops_unary_fp', 'fd')]),
           TD('g' + cmplx, f='rint'),
           TD(P, f='rint'),
