@@ -887,7 +887,7 @@ foreach gen_mtargets : [
     'highway_qsort.dispatch.h',
     'src/npysort/highway_qsort.dispatch.cpp',
     use_highway ? [
-      SVE, ASIMD, VSX2,  # FIXME: disable VXE due to runtime segfault
+      ASIMD, VSX2,  # FIXME: disable VXE due to runtime segfault
     ] : []
   ],
   [
@@ -1051,7 +1051,7 @@ foreach gen_mtargets : [
     'loops_logical.dispatch.h',
     'src/umath/loops_logical.dispatch.cpp',
     [
-      ASIMD, NEON, SVE,
+      ASIMD, NEON,
       X86_V4, X86_V3, X86_V2,
       VSX2,
       VX,
@@ -1069,14 +1069,6 @@ foreach gen_mtargets : [
       VXE, VX,
       LSX,
     ]
-  ],
-  [
-    'loops_arithm_sum_hwy.dispatch.h',
-    'src/umath/loops_arithm_sum_hwy.dispatch.cpp',
-    use_highway ? [
-      X86_V4, X86_V3, X86_V2,
-      SVE, ASIMD, NEON
-    ] : []
   ],
   [
     'loops_modulo.dispatch.h',
@@ -1386,9 +1378,6 @@ src_umath = umath_gen_headers + [
   # Highway SIMD half-float absolute
   'src/umath/loops_autovec_abs_hwy.h',
   'src/umath/loops_autovec_abs_hwy_avail.c',
-  # Highway SIMD pairwise sum
-  'src/umath/loops_arithm_sum_hwy.h',
-  'src/umath/loops_arithm_sum_hwy_avail.c',
   # For testing. Eventually, should use public API and be separate:
   'src/umath/_scaled_float_dtype.c',
 ]
