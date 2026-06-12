@@ -241,8 +241,9 @@ exclude = build/.*
 exclude = numpy/_core/src/highway/.*
 exclude = numpy/_core/src/npysort/.*
 
-# Tolerate GCC coverage parse issues: warn once per file instead of failing.
-gcov-ignore-parse-errors = all
+# Only ignore negative hit-count anomalies from optimized code; surface all
+# other gcov parse failures so incomplete XML does not silently pass thresholds.
+gcov-ignore-parse-errors = negative_hits.warn_once_per_file
 EOF
 
 ci_append_supported_coverage_warning_flags
@@ -279,7 +280,13 @@ COVERAGE_FILE="${coverage_data}" python -m coverage xml --omit="${python_coverag
 
 ci_log "Regenerating C/C++ XML coverage with multi-target merge."
 rm -f "${c_coverage_xml}"
-python "${SCRIPT_DIR}/../../merge_coverage.py" "${build_dir}" "${c_coverage_xml}"
+gcovr_stderr_file="$(mktemp)"
+python "${SCRIPT_DIR}/../../merge_coverage.py" "${build_dir}" "${c_coverage_xml}" 2>"${gcovr_stderr_file}"
+if [[ -s "${gcovr_stderr_file}" ]]; then
+    ci_log "WARNING: gcovr reported parse errors (see below). Coverage XML may be incomplete."
+    cat "${gcovr_stderr_file}" >&2
+fi
+rm -f "${gcovr_stderr_file}"
 
 ci_log "Checking Python and C/C++ coverage thresholds."
 python - "${coverage_xml}" "${c_coverage_xml}" \

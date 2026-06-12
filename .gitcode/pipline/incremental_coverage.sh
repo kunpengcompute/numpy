@@ -9,7 +9,7 @@ source "${SCRIPT_DIR}/common.sh"
 ci_enter_repo_root
 
 : "${VENV_DIR:=.venv-internal-ci/incremental_coverage}"
-: "${COMPARE_BRANCH:=53550c38fd85767ff4ba53b8252fdfddc98070a0}"
+: "${COMPARE_BRANCH:=origin/main}"
 : "${DIFF_COVER_FAIL_UNDER:=0}"
 : "${DIFF_COVER_SHOW_FILES:=0}"
 : "${INCREMENTAL_COVERAGE_REPORT_DIR:=build/incremental_coverage}"
@@ -193,3 +193,4 @@ set -e
 if ((python_diff_status != 0 || c_diff_status != 0 || summary_status != 0)); then
     exit 1
 fi
+

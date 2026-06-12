@@ -30,8 +30,11 @@ def run_gcovr(build_dir, source_root, output_xml, config_file=None):
         str(build_dir)
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.stderr:
+        for line in result.stderr.splitlines():
+            print(f"[gcovr] {line}", file=sys.stderr)
     if result.returncode != 0:
-        print(f"Warning: gcovr failed: {result.stderr}", file=sys.stderr)
+        print(f"Warning: gcovr failed with exit code {result.returncode}", file=sys.stderr)
         return False
     return True
 
@@ -46,10 +49,13 @@ def run_gcovr_for_target(target_dir, source_root, output_xml):
         '--exclude', 'build/.*',
         '--exclude', 'numpy/_core/src/highway/.*',
         '--exclude', 'numpy/_core/src/npysort/.*',
-        '--gcov-ignore-parse-errors', 'all',
+        '--gcov-ignore-parse-errors', 'negative_hits.warn_once_per_file',
         str(target_dir)
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.stderr:
+        for line in result.stderr.splitlines():
+            print(f"[gcovr] {line}", file=sys.stderr)
     return result.returncode == 0
 
 
