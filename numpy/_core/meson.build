@@ -887,7 +887,7 @@ foreach gen_mtargets : [
     'highway_qsort.dispatch.h',
     'src/npysort/highway_qsort.dispatch.cpp',
     use_highway ? [
-      SVE, ASIMD, VSX2,  # FIXME: disable VXE due to runtime segfault
+      ASIMD, VSX2,  # FIXME: disable VXE due to runtime segfault
     ] : []
   ],
   [
@@ -1051,7 +1051,7 @@ foreach gen_mtargets : [
     'loops_logical.dispatch.h',
     'src/umath/loops_logical.dispatch.cpp',
     [
-      ASIMD, NEON, SVE,
+      ASIMD, NEON,
       X86_V4, X86_V3, X86_V2,
       VSX2,
       VX,
