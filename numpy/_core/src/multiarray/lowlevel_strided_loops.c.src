@@ -1046,6 +1046,9 @@ static GCC_CAST_OPT_LEVEL int
  * This is the entry point function called outside this file
  */
 
+#if defined(__arm__) || defined(__aarch64__)
+__attribute__((aligned(16)))
+#endif
 static GCC_CAST_OPT_LEVEL int
 @prefix@_cast_@name1@_to_@name2@(
         PyArrayMethod_Context *context, char *const *args,

@@ -976,9 +976,11 @@ aquicksort_ulonglong(void *vv, npy_intp *tosort, npy_intp n,
 NPY_NO_EXPORT int
 aquicksort_half(void *vv, npy_intp *tosort, npy_intp n, void *NPY_UNUSED(varr))
 {
+#if !defined(NPY_CPU_AMD64) && !defined(NPY_CPU_X86)
     if (aquicksort_dispatch((np::Half *)vv, tosort, n)) {
         return 0;
     }
+#endif
     return aquicksort_<npy::half_tag>((npy_half *)vv, tosort, n);
 }
 NPY_NO_EXPORT int

@@ -143,7 +143,8 @@ count_run_(type *arr, npy_intp l, npy_intp num, npy_intp minrun)
 
     /* (not strictly) ascending sequence */
     if (!Tag::less(*(pl + 1), *pl)) {
-        /* unroll loop */
+#if !defined(NPY_CPU_AMD64) && !defined(NPY_CPU_X86)
+        /* unroll loop for non-x86 (ARM/Power) */
         while (pi + 4 <= end) {
             if (Tag::less(*(pi + 1), *pi)) {
                 break;
@@ -162,12 +163,13 @@ count_run_(type *arr, npy_intp l, npy_intp num, npy_intp minrun)
             }
             ++pi;
         }
-
+#endif
         for (; pi < end && !Tag::less(*(pi + 1), *pi); ++pi) {
         }
     }
     else { /* (strictly) descending sequence */
-        /* unroll loop */
+#if !defined(NPY_CPU_AMD64) && !defined(NPY_CPU_X86)
+        /* unroll loop for non-x86 (ARM/Power) */
         while (pi + 4 <= end) {
             if (!Tag::less(*(pi + 1), *pi)) {
                 break;
@@ -186,7 +188,7 @@ count_run_(type *arr, npy_intp l, npy_intp num, npy_intp minrun)
             }
             ++pi;
         }
-
+#endif
         for (; pi < end && Tag::less(*(pi + 1), *pi); ++pi) {
         }
 
@@ -633,9 +635,10 @@ acount_run_(type *arr, npy_intp *tosort, npy_intp l, npy_intp num,
 
     /* (not strictly) ascending sequence */
     if (!Tag::less(arr[*(pl + 1)], arr[*pl])) {
+#if !defined(NPY_CPU_AMD64) && !defined(NPY_CPU_X86)
         /* npy_double performance regression on bench_lib.unique */
         if constexpr (!std::is_same_v<type, npy_double>) {
-            /* unroll loop */
+            /* unroll loop for non-x86 (ARM/Power) */
             while (pi + 4 <= end) {
                 if (Tag::less(arr[*(pi + 1)], arr[*pi])) {
                     break;
@@ -655,14 +658,15 @@ acount_run_(type *arr, npy_intp *tosort, npy_intp l, npy_intp num,
                 ++pi;
             }
         }
-
+#endif
         for (; pi < end && !Tag::less(arr[*(pi + 1)], arr[*pi]); ++pi) {
         }
     }
     else { /* (strictly) descending sequence */
+#if !defined(NPY_CPU_AMD64) && !defined(NPY_CPU_X86)
         /* npy_double performance regression on bench_lib.unique */
         if constexpr (!std::is_same_v<type, npy_double>) {
-            /* unroll loop */
+            /* unroll loop for non-x86 (ARM/Power) */
             while (pi + 4 <= end) {
                 if (!Tag::less(arr[*(pi + 1)], arr[*pi])) {
                     break;
@@ -682,7 +686,7 @@ acount_run_(type *arr, npy_intp *tosort, npy_intp l, npy_intp num,
                 ++pi;
             }
         }
-
+#endif
         for (; pi < end && Tag::less(arr[*(pi + 1)], arr[*pi]); ++pi) {
         }
 
