@@ -57,6 +57,7 @@
  * #big = 0, 0, 0, 0, 0, 0, 1, 1, 1, 1#
  * #use_sve_lshift_scalar = 1, 1, 1, 1, 0, 0, 1, 1, 1, 1#
  * #use_sve_rshift_scalar = 1, 1, 1, 1, 0, 0, 1, 1, 1, 1#
+ * #is_uint = 0*5, 1, 0*4#
  */
 
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_positive)
@@ -91,9 +92,15 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_reciprocal)
  * #kind = add, subtract, multiply#
  * #OP = +, -, *#
  * #UNROLL = 0, 0, 1#
+ * #is_add = 1, 0, 0#
  */
 #if @big@ && @UNROLL@
 AUTO_VEC_UNROLL_LOOPS
+#endif
+#if defined(__aarch64__) && (__GNUC__ < 12 || (__GNUC__ == 12 && __GNUC_MINOR__ <= 2))
+#if @is_add@ && @is_uint@
+__attribute__((aligned(16)))
+#endif
 #endif
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
