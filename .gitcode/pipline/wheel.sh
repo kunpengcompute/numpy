@@ -75,6 +75,17 @@ esac
 ci_log "Using conda LP64 OpenBLAS: $(pkg-config --modversion openblas)"
 ci_log "Building wheel with Python: $(python -c 'import platform, sys; print(sys.version.split()[0], platform.machine())')"
 
+export SOURCE_DATE_EPOCH="$(python - <<'PY'
+import datetime
+
+today = datetime.datetime.now(datetime.timezone.utc).replace(
+    hour=0, minute=0, second=0, microsecond=0
+)
+print(int(today.timestamp()))
+PY
+)"
+ci_log "Using SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} for wheel timestamps."
+
 rm -rf -- "${WHEEL_BUILD_DIR}"
 mkdir -p "${WHEEL_BUILD_DIR}" "${WHEEL_OUTPUT_DIR}"
 find "${WHEEL_OUTPUT_DIR}" -maxdepth 1 -type f -name 'numpy-*.whl' -delete
