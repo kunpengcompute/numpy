@@ -1502,7 +1502,7 @@ class BitwiseCount(_AggregateBenchmark):
         _select_case_params(_Official_bench_ufunc_UFunc, 'time_ufunc_types', (11,)),  # bench_ufunc.UFunc.time_ufunc_types('bitwise_count')
     )
     run_repeat = (
-        55,  # bench_ufunc.UFunc.time_ufunc_types('bitwise_count')
+        1,  # bench_ufunc.UFunc.time_ufunc_types('bitwise_count')
     )
     case_methods = (
         'time_ufunc_types',
@@ -3066,7 +3066,7 @@ class Invert(_AggregateBenchmark):
         _select_case_params(_Official_bench_ufunc_UFunc, 'time_ufunc_types', (43,)),  # bench_ufunc.UFunc.time_ufunc_types('invert')
     )
     run_repeat = (
-        99,  # bench_ufunc.UFunc.time_ufunc_types('invert')
+        1,  # bench_ufunc.UFunc.time_ufunc_types('invert')
     )
     case_methods = (
         'time_ufunc_types',

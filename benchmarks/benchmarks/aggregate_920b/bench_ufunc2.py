@@ -892,7 +892,7 @@ class Add(_AggregateBenchmark):
         _select_case_params(_Official_bench_ufunc_UFunc, 'time_ufunc_types', (2,)),  # bench_ufunc.UFunc.time_ufunc_types('add')
     )
     run_repeat = (
-        9,  # bench_ufunc.UFunc.time_ufunc_types('add')
+        1,  # bench_ufunc.UFunc.time_ufunc_types('add')
     )
     case_methods = (
         'time_ufunc_types',
@@ -1011,7 +1011,7 @@ class Divide(_AggregateBenchmark):
         _select_case_params(_Official_bench_ufunc_UFunc, 'time_ufunc_types', (24,)),  # bench_ufunc.UFunc.time_ufunc_types('divide')
     )
     run_repeat = (
-        5,  # bench_ufunc.UFunc.time_ufunc_types('divide')
+        1,  # bench_ufunc.UFunc.time_ufunc_types('divide')
     )
     case_methods = (
         'time_ufunc_types',
@@ -1436,7 +1436,7 @@ class Multiply(_AggregateBenchmark):
         _select_case_params(_Official_bench_ufunc_UFunc, 'time_ufunc_types', (69,)),  # bench_ufunc.UFunc.time_ufunc_types('multiply')
     )
     run_repeat = (
-        8,  # bench_ufunc.UFunc.time_ufunc_types('multiply')
+        1,  # bench_ufunc.UFunc.time_ufunc_types('multiply')
     )
     case_methods = (
         'time_ufunc_types',
@@ -1619,7 +1619,7 @@ class Subtract(_AggregateBenchmark):
         _select_case_params(_Official_bench_ufunc_UFunc, 'time_ufunc_types', (88,)),  # bench_ufunc.UFunc.time_ufunc_types('subtract')
     )
     run_repeat = (
-        8,  # bench_ufunc.UFunc.time_ufunc_types('subtract')
+        1,  # bench_ufunc.UFunc.time_ufunc_types('subtract')
     )
     case_methods = (
         'time_ufunc_types',
