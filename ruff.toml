@@ -11,9 +11,6 @@ extend-exclude = [
     "numpy/_core/src/npysort/x86-simd-sort",
     "numpy/_core/src/highway",
     "numpy/_core/src/common/pythoncapi-compat",
-    # Generated self-contained copies of upstream ASV benchmarks.
-    "benchmarks/benchmarks/aggregate_920b",
-    "benchmarks/benchmarks/aggregate_950",
 ]
 
 line-length = 88
@@ -82,6 +79,7 @@ ignore = [
 [lint.per-file-ignores]
 "_tempita.py" = ["B909"]
 "bench_*.py" = ["B015", "B018"]
+"benchmarks/benchmarks/aggregate_*/*.py" = ["E501", "TID252"]
 "test*.py" = ["B015", "B018", "E201", "E714"]
 
 "numpy/_core/tests/test_arrayprint.py" = ["E501"]
