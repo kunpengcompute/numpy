@@ -11,6 +11,9 @@ extend-exclude = [
     "numpy/_core/src/npysort/x86-simd-sort",
     "numpy/_core/src/highway",
     "numpy/_core/src/common/pythoncapi-compat",
+    # Generated self-contained copies of upstream ASV benchmarks.
+    "benchmarks/benchmarks/aggregate_920b",
+    "benchmarks/benchmarks/aggregate_950",
 ]
 
 line-length = 88
