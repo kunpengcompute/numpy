@@ -73,8 +73,7 @@ xml_path.write_text(content, encoding="utf-8")
 print(f"Remapped {build_prefix!r} -> '' in {xml_path}")
 REMAP_PY
 
-compare_commit="${COMPARE_BRANCH}^{commit}"
-if git rev-parse --verify "${compare_commit}" >/dev/null 2>&1; then
+if git rev-parse --verify "${COMPARE_BRANCH}" >/dev/null 2>&1; then
     ci_log "Using compare branch ${COMPARE_BRANCH}."
 else
     ci_log "Compare branch ${COMPARE_BRANCH} not found locally, trying to fetch it."
@@ -82,12 +81,6 @@ else
         git fetch origin "${COMPARE_BRANCH#origin/}"
     else
         git fetch origin "${COMPARE_BRANCH}"
-    fi
-
-    if ! git rev-parse --verify "${compare_commit}" >/dev/null 2>&1; then
-        printf 'Compare branch is not a locally available commit after fetch: %s\n' \
-            "${COMPARE_BRANCH}" >&2
-        exit 1
     fi
 fi
 
