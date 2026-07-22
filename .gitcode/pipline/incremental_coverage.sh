@@ -73,7 +73,8 @@ xml_path.write_text(content, encoding="utf-8")
 print(f"Remapped {build_prefix!r} -> '' in {xml_path}")
 REMAP_PY
 
-if git rev-parse --verify "${COMPARE_BRANCH}" >/dev/null 2>&1; then
+compare_commit="${COMPARE_BRANCH}^{commit}"
+if git rev-parse --verify "${compare_commit}" >/dev/null 2>&1; then
     ci_log "Using compare branch ${COMPARE_BRANCH}."
 else
     ci_log "Compare branch ${COMPARE_BRANCH} not found locally, trying to fetch it."
@@ -83,6 +84,17 @@ else
         git fetch origin "${COMPARE_BRANCH}"
     fi
 fi
+
+while ! git merge-base "${compare_commit}" HEAD >/dev/null 2>&1; do
+    if [[ "$(git rev-parse --is-shallow-repository)" != "true" ]]; then
+        printf 'Compare branch has no merge base with HEAD: %s\n' \
+            "${COMPARE_BRANCH}" >&2
+        exit 1
+    fi
+
+    ci_log "Compare branch has no merge base with HEAD, deepening history."
+    git fetch --deepen=256 origin
+done
 
 case "${DIFF_COVER_SHOW_FILES}" in
     0|1)
