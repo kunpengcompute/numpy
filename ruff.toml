@@ -79,6 +79,7 @@ ignore = [
 [lint.per-file-ignores]
 "_tempita.py" = ["B909"]
 "bench_*.py" = ["B015", "B018"]
+"benchmarks/benchmarks/aggregate_*/*.py" = ["E501", "TID252"]
 "test*.py" = ["B015", "B018", "E201", "E714"]
 
 "numpy/_core/tests/test_arrayprint.py" = ["E501"]
