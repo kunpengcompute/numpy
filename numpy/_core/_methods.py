@@ -84,7 +84,7 @@ def _count_reduce_items(arr, axis, keepdims=False, where=True):
     if where is True:
         # no boolean mask given, calculate items according to axis
         if axis is None:
-            return nt.intp(arr.size)
+            axis = tuple(range(arr.ndim))
         elif not isinstance(axis, tuple):
             axis = (axis,)
         items = 1
@@ -126,11 +126,7 @@ def _mean(a, axis=None, dtype=None, out=None, keepdims=False, *, where=True):
 
     is_float16_result = False
 
-    if where is True and axis is not None and not isinstance(axis, tuple):
-        rcount = nt.intp(arr.shape[mu.normalize_axis_index(axis, arr.ndim)])
-    else:
-        rcount = _count_reduce_items(arr, axis, keepdims=keepdims,
-                                     where=where)
+    rcount = _count_reduce_items(arr, axis, keepdims=keepdims, where=where)
     if rcount == 0 if where is True else umr_any(rcount == 0, axis=None):
         warnings.warn("Mean of empty slice", RuntimeWarning, stacklevel=2)
 
@@ -142,10 +138,7 @@ def _mean(a, axis=None, dtype=None, out=None, keepdims=False, *, where=True):
             dtype = mu.dtype('f4')
             is_float16_result = True
 
-    if where is True:
-        ret = umr_sum(arr, axis, dtype, out, keepdims)
-    else:
-        ret = umr_sum(arr, axis, dtype, out, keepdims, where=where)
+    ret = umr_sum(arr, axis, dtype, out, keepdims, where=where)
     if isinstance(ret, mu.ndarray):
         ret = um.true_divide(
                 ret, rcount, out=ret, casting='unsafe', subok=False)
@@ -165,11 +158,7 @@ def _var(a, axis=None, dtype=None, out=None, ddof=0, keepdims=False, *,
          where=True, mean=None):
     arr = asanyarray(a)
 
-    if where is True and axis is None:
-        rcount = nt.intp(arr.size)
-    else:
-        rcount = _count_reduce_items(arr, axis, keepdims=keepdims,
-                                     where=where)
+    rcount = _count_reduce_items(arr, axis, keepdims=keepdims, where=where)
     # Make this warning show up on top.
     if ddof >= rcount if where is True else umr_any(ddof >= rcount, axis=None):
         warnings.warn("Degrees of freedom <= 0 for slice", RuntimeWarning,
@@ -206,17 +195,11 @@ def _var(a, axis=None, dtype=None, out=None, ddof=0, keepdims=False, *,
         # Compute the mean.
         # Note that if dtype is not of inexact type then arraymean will
         # not be either.
-        if where is True:
-            arrmean = umr_sum(arr, axis, dtype, None, True)
-        else:
-            arrmean = umr_sum(arr, axis, dtype, keepdims=True, where=where)
+        arrmean = umr_sum(arr, axis, dtype, keepdims=True, where=where)
         # The shape of rcount has to match arrmean to not change the shape of
         # out in broadcasting. Otherwise, it cannot be stored back to arrmean.
-        if where is True:
-            # Default reduction count is always a scalar.
-            div = rcount
-        elif rcount.ndim == 0:
-            # Fast-path for scalar counts produced by non-default where.
+        if rcount.ndim == 0:
+            # fast-path for default case when where is True
             div = rcount
         else:
             # matching rcount to arrmean when where is specified as array
@@ -233,7 +216,7 @@ def _var(a, axis=None, dtype=None, out=None, ddof=0, keepdims=False, *,
     # Note that x may not be inexact and that we need it to be an array,
     # not a scalar.
     x = um.subtract(arr, arrmean, out=...)
-    if x.dtype.kind == "f":
+    if issubclass(arr.dtype.type, (nt.floating, nt.integer)):
         x = um.square(x, out=x)
     # Fast-paths for built-in complex types
     elif (_float_dtype := _complex_to_float.get(x.dtype)) is not None:
@@ -245,14 +228,10 @@ def _var(a, axis=None, dtype=None, out=None, ddof=0, keepdims=False, *,
     else:
         x = um.multiply(x, um.conjugate(x), out=x).real
 
-    if where is True:
-        ret = umr_sum(x, axis, dtype, out, keepdims)
-    else:
-        ret = umr_sum(x, axis, dtype, out, keepdims=keepdims, where=where)
+    ret = umr_sum(x, axis, dtype, out, keepdims=keepdims, where=where)
 
     # Compute degrees of freedom and make sure it is not negative.
-    if ddof != 0:
-        rcount = um.maximum(rcount - ddof, 0)
+    rcount = um.maximum(rcount - ddof, 0)
 
     # divide by degrees of freedom
     if isinstance(ret, mu.ndarray):
