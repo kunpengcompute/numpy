@@ -24,6 +24,12 @@ using namespace np::simd;
  * you never know
  */
 #if NPY_HWY
+#if defined(__aarch64__) || defined(_M_ARM64)
+#define NPY_LOGICAL_BOOL_REDUCE_ARM 1
+#else
+#define NPY_LOGICAL_BOOL_REDUCE_ARM 0
+#endif
+
 HWY_INLINE HWY_ATTR Vec<uint8_t> byte_to_true(Vec<uint8_t> v)
 {
     return hn::IfThenZeroElse(hn::Eq(v, Zero<uint8_t>()), Set(uint8_t(1)));
@@ -63,14 +69,22 @@ HWY_INLINE HWY_ATTR Vec<uint8_t> simd_logical_or_u8(Vec<uint8_t> a, Vec<uint8_t>
 
 HWY_INLINE HWY_ATTR bool simd_any_u8(Vec<uint8_t> v)
 {
+#if NPY_LOGICAL_BOOL_REDUCE_ARM
     const auto d = _Tag<uint8_t>();
     return !hn::AllTrue(d, hn::Eq(v, Zero<uint8_t>()));
+#else
+    return hn::ReduceMax(_Tag<uint8_t>(), v) != 0;
+#endif
 }
 
 HWY_INLINE HWY_ATTR bool simd_all_u8(Vec<uint8_t> v)
 {
+#if NPY_LOGICAL_BOOL_REDUCE_ARM
     const auto d = _Tag<uint8_t>();
     return hn::AllFalse(d, hn::Eq(v, Zero<uint8_t>()));
+#else
+    return hn::ReduceMin(_Tag<uint8_t>(), v) != 0;
+#endif
 }
 #endif
 
@@ -194,6 +208,7 @@ static void simd_reduce_logical_BOOL(npy_bool* op, npy_bool* ip, npy_intp len) {
         auto v6 = LoadU(ip + vstep * 6);
         auto v7 = LoadU(ip + vstep * 7);
 
+#if NPY_LOGICAL_BOOL_REDUCE_ARM
         auto m01 = Traits::reduce(v0, v1);
         auto m23 = Traits::reduce(v2, v3);
         auto m45 = Traits::reduce(v4, v5);
@@ -210,6 +225,21 @@ static void simd_reduce_logical_BOOL(npy_bool* op, npy_bool* ip, npy_intp len) {
             *op = !Traits::is_and;
             return;
         }
+#else
+        auto m01 = Traits::simd_op(v0, v1);
+        auto m23 = Traits::simd_op(v2, v3);
+        auto m45 = Traits::simd_op(v4, v5);
+        auto m67 = Traits::simd_op(v6, v7);
+
+        auto m0123 = Traits::simd_op(m01, m23);
+        auto m4567 = Traits::simd_op(m45, m67);
+        auto mv = Traits::simd_op(m0123, m4567);
+
+        if(Traits::anyall(mv) == !Traits::is_and) {
+            *op = !Traits::is_and;
+            return;
+        }
+#endif
     }
 
     // Single vectors loop
