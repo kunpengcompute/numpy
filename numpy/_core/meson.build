@@ -967,7 +967,6 @@ foreach gen_mtargets : [
     'loops_arithmetic_floor_hwy.dispatch.h',
     'src/umath/loops_arithmetic_floor_hwy.dispatch.cpp',
     use_highway ? [
-      X86_V4, X86_V3, X86_V2,
       SVE, ASIMD, NEON
     ] : []
   ],
