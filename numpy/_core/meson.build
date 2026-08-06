@@ -819,15 +819,14 @@ multiarray_gen_headers = [
   src_file.process('src/common/npy_sort.h.src'),
 ]
 foreach gen_mtargets : [
-  # Keep argmin/argmax on the baseline argfunc dispatch path. The Highway
-  # implementation remains in-tree but is not registered here.
+  # Keep non-AArch64 argmin/argmax on the baseline argfunc dispatch path.
+  # The Highway implementation is registered separately for AArch64 below.
   [
     'argfunc.dispatch.h',
     src_file.process('src/multiarray/argfunc.dispatch.c.src'),
     [
       X86_V4, X86_V3, X86_V2,
       VSX2,
-      ASIMD, NEON,
       VXE, VX
     ]
   ],
@@ -855,6 +854,33 @@ foreach gen_mtargets : [
     multiarray_umath_mtargets.extend(mtargets)
   endif
 endforeach
+
+if cpu_family == 'aarch64'
+  mtargets = mod_features.multi_targets(
+    'highway_argfunc.dispatch.h',
+    multiarray_gen_headers + ['src/multiarray/highway_argfunc.dispatch.cpp'],
+    dispatch: use_highway ? [SVE, ASIMD, NEON] : [],
+    baseline: CPU_BASELINE,
+    prefix: 'NPY_',
+    dependencies: [py_dep, np_core_dep],
+    c_args: c_args_common + max_opt,
+    cpp_args: cpp_args_common + max_opt,
+    include_directories: [
+      'include',
+      'src/common',
+      'src/multiarray',
+      'src/multiarray/stringdtype',
+      'src/npymath',
+      'src/umath',
+      'src/highway',
+    ]
+  )
+  if not is_variable('multiarray_umath_mtargets')
+    multiarray_umath_mtargets = mtargets
+  else
+    multiarray_umath_mtargets.extend(mtargets)
+  endif
+endif
 
 # Build npysort dispatch-able sources
 # -----------------------------------
