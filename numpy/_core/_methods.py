@@ -84,7 +84,7 @@ def _count_reduce_items(arr, axis, keepdims=False, where=True):
     if where is True:
         # no boolean mask given, calculate items according to axis
         if axis is None:
-            return nt.intp(arr.size)
+            axis = tuple(range(arr.ndim))
         elif not isinstance(axis, tuple):
             axis = (axis,)
         items = 1
@@ -126,11 +126,7 @@ def _mean(a, axis=None, dtype=None, out=None, keepdims=False, *, where=True):
 
     is_float16_result = False
 
-    if where is True and axis is not None and not isinstance(axis, tuple):
-        rcount = nt.intp(arr.shape[mu.normalize_axis_index(axis, arr.ndim)])
-    else:
-        rcount = _count_reduce_items(arr, axis, keepdims=keepdims,
-                                     where=where)
+    rcount = _count_reduce_items(arr, axis, keepdims=keepdims, where=where)
     if rcount == 0 if where is True else umr_any(rcount == 0, axis=None):
         warnings.warn("Mean of empty slice", RuntimeWarning, stacklevel=2)
 
@@ -142,10 +138,7 @@ def _mean(a, axis=None, dtype=None, out=None, keepdims=False, *, where=True):
             dtype = mu.dtype('f4')
             is_float16_result = True
 
-    if where is True:
-        ret = umr_sum(arr, axis, dtype, out, keepdims)
-    else:
-        ret = umr_sum(arr, axis, dtype, out, keepdims, where=where)
+    ret = umr_sum(arr, axis, dtype, out, keepdims, where=where)
     if isinstance(ret, mu.ndarray):
         ret = um.true_divide(
                 ret, rcount, out=ret, casting='unsafe', subok=False)
@@ -238,7 +231,7 @@ def _var(a, axis=None, dtype=None, out=None, ddof=0, keepdims=False, *,
     # Note that x may not be inexact and that we need it to be an array,
     # not a scalar.
     x = um.subtract(arr, arrmean, out=...)
-    if x.dtype.kind == "f":
+    if issubclass(arr.dtype.type, (nt.floating, nt.integer)):
         x = um.square(x, out=x)
     # Fast-paths for built-in complex types
     elif (_float_dtype := _complex_to_float.get(x.dtype)) is not None:
