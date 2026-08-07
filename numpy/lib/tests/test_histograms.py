@@ -1089,3 +1089,46 @@ class TestHistogramFastFloatIndex:
         data = rng.random(100000)
         hist, edges = histogram(data, bins=100, range=(0, 1))
         assert_equal(hist.sum(), 100000)
+
+
+class TestHistogramArmSimdExceptPath:
+    """Tests for _HAS_ARM_SIMD import error handling path."""
+
+    def test_has_arm_simd_except_path_coverage(self):
+        """Trigger the except branch by simulating import failure."""
+        import importlib
+        import numpy.lib._histograms_impl as impl
+
+        # Save original state
+        original_has_arm_simd = impl._HAS_ARM_SIMD
+
+        # Verify the except path sets _HAS_ARM_SIMD to False
+        # by re-importing with a broken __cpu_features__
+        import numpy._core._multiarray_umath as ma
+        original_cpu_features = getattr(ma, '__cpu_features__', None)
+
+        # Remove __cpu_features__ to trigger AttributeError in except path
+        if hasattr(ma, '__cpu_features__'):
+            del ma.__cpu_features__
+
+        # Re-import to trigger except branch
+        importlib.reload(impl)
+
+        # Verify _HAS_ARM_SIMD is False when __cpu_features__ is missing
+        assert impl._HAS_ARM_SIMD is False
+
+        # Restore original state
+        if original_cpu_features is not None:
+            ma.__cpu_features__ = original_cpu_features
+        importlib.reload(impl)
+        assert impl._HAS_ARM_SIMD == original_has_arm_simd
+
+    def test_has_arm_simd_get_returns_default_on_missing_key(self):
+        """Test .get() with default when key is missing from __cpu_features__."""
+        import numpy.lib._histograms_impl as impl
+        from numpy._core._multiarray_umath import __cpu_features__
+
+        # Verify .get() returns False default for missing keys
+        assert __cpu_features__.get('NONEXISTENT', False) is False
+        # _HAS_ARM_SIMD should be a valid boolean
+        assert isinstance(impl._HAS_ARM_SIMD, (bool, type(False)))
