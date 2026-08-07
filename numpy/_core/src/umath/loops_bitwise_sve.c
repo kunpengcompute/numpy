@@ -89,6 +89,12 @@ npy_bitwise_and_sve_i64(char **args, npy_intp len)
 #endif
 }
 
+/*
+ * Generic bitwise SVE helpers are intentionally kept even when dispatch is
+ * disabled in loops_autovec.dispatch.c.src.  Keeping the implementations makes
+ * it straightforward to re-enable selected AArch64 cases if future platform
+ * data shows stable gains.
+ */
 NPY_SVE_TARGET void
 npy_bitwise_sve_contig(char **args, npy_intp len, int itemsize, int op)
 {
