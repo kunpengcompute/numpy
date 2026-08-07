@@ -228,8 +228,6 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_sign)
  * Arithmetic
  * #kind = bitwise_and, bitwise_or, bitwise_xor#
  * #OP = &, |, ^#
- * #use_sve_bitwise_and = 1, 0, 0#
- * #sve_bitwise_op = 0, 1, 2#
  */
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
@@ -238,34 +236,6 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
         BINARY_REDUCE_LOOP_FAST(@type@, io1 @OP@= in2);
     }
     else {
-#if defined(__aarch64__)
-        if (IS_BINARY_CONT(@type@, @type@) &&
-                (abs_ptrdiff(args[2], args[0]) == 0 ||
-                 abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE) &&
-                (abs_ptrdiff(args[2], args[1]) == 0 ||
-                 abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) &&
-                npy_bitwise_sve_available()) {
-            npy_bitwise_sve_contig(
-                    args, dimensions[0], (int)sizeof(@type@), @sve_bitwise_op@);
-            return;
-        }
-        if (IS_BINARY_CONT_S1(@type@, @type@) &&
-                (abs_ptrdiff(args[2], args[1]) == 0 ||
-                 abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) &&
-                npy_bitwise_sve_available()) {
-            npy_bitwise_sve_scalar_in0(
-                    args, dimensions[0], (int)sizeof(@type@), @sve_bitwise_op@);
-            return;
-        }
-        if (IS_BINARY_CONT_S2(@type@, @type@) &&
-                (abs_ptrdiff(args[2], args[0]) == 0 ||
-                 abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE) &&
-                npy_bitwise_sve_available()) {
-            npy_bitwise_sve_scalar_in1(
-                    args, dimensions[0], (int)sizeof(@type@), @sve_bitwise_op@);
-            return;
-        }
-#endif
         BINARY_LOOP_FAST(@type@, @type@, *out = in1 @OP@ in2);
     }
 }
