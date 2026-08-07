@@ -158,16 +158,7 @@ def _var(a, axis=None, dtype=None, out=None, ddof=0, keepdims=False, *,
          where=True, mean=None):
     arr = asanyarray(a)
 
-    if _IS_ARM and where is True and axis is None:
-        rcount = nt.intp(arr.size)
-    elif where is True and axis is None:
-        items = 1
-        for ax in range(arr.ndim):
-            items *= arr.shape[ax]
-        rcount = nt.intp(items)
-    else:
-        rcount = _count_reduce_items(arr, axis, keepdims=keepdims,
-                                     where=where)
+    rcount = _count_reduce_items(arr, axis, keepdims=keepdims, where=where)
     # Make this warning show up on top.
     if ddof >= rcount if where is True else umr_any(ddof >= rcount, axis=None):
         warnings.warn("Degrees of freedom <= 0 for slice", RuntimeWarning,
@@ -204,17 +195,11 @@ def _var(a, axis=None, dtype=None, out=None, ddof=0, keepdims=False, *,
         # Compute the mean.
         # Note that if dtype is not of inexact type then arraymean will
         # not be either.
-        if _IS_ARM and where is True:
-            arrmean = umr_sum(arr, axis, dtype, None, True)
-        else:
-            arrmean = umr_sum(arr, axis, dtype, keepdims=True, where=where)
+        arrmean = umr_sum(arr, axis, dtype, keepdims=True, where=where)
         # The shape of rcount has to match arrmean to not change the shape of
         # out in broadcasting. Otherwise, it cannot be stored back to arrmean.
-        if _IS_ARM and where is True:
-            # Default reduction count is always a scalar.
-            div = rcount
-        elif rcount.ndim == 0:
-            # Fast-path for scalar counts produced by non-default where.
+        if rcount.ndim == 0:
+            # fast-path for default case when where is True
             div = rcount
         else:
             # matching rcount to arrmean when where is specified as array
@@ -243,14 +228,10 @@ def _var(a, axis=None, dtype=None, out=None, ddof=0, keepdims=False, *,
     else:
         x = um.multiply(x, um.conjugate(x), out=x).real
 
-    if _IS_ARM and where is True:
-        ret = umr_sum(x, axis, dtype, out, keepdims)
-    else:
-        ret = umr_sum(x, axis, dtype, out, keepdims=keepdims, where=where)
+    ret = umr_sum(x, axis, dtype, out, keepdims=keepdims, where=where)
 
     # Compute degrees of freedom and make sure it is not negative.
-    if not (_IS_ARM and ddof == 0):
-        rcount = um.maximum(rcount - ddof, 0)
+    rcount = um.maximum(rcount - ddof, 0)
 
     # divide by degrees of freedom
     if isinstance(ret, mu.ndarray):
