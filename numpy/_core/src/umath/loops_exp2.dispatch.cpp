@@ -58,7 +58,6 @@ simd_exp2_neon_FLOAT(const npy_float *src, npy_intp ssrc,
     uint32x4_t is_nan[UNROLL], is_overflow[UNROLL], is_underflow[UNROLL];
 
     if (ssrc == 1) {
-      __builtin_prefetch(infp + 128, 0, 3);
       for (int i = 0; i < UNROLL; i++)
         x[i] = vld1q_f32(infp + i * VEC_SIZE);
     } else {
@@ -88,7 +87,6 @@ simd_exp2_neon_FLOAT(const npy_float *src, npy_intp ssrc,
     }
 
     if (sdst == 1) {
-      __builtin_prefetch(outp + 128, 1, 3);
       for (int i = 0; i < UNROLL; i++)
         vst1q_f32(outp + i * VEC_SIZE, result[i]);
     } else {
@@ -203,7 +201,6 @@ simd_exp2_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
     uint64x2_t need_special[UNROLL];
 
     if (ssrc == 1) {
-      __builtin_prefetch(infp + 64, 0, 3);
       for (int i = 0; i < UNROLL; i++)
         x[i] = vld1q_f64(infp + i * VEC_SIZE);
     } else {
@@ -228,15 +225,12 @@ simd_exp2_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
     }
 
     if (sdst == 1) {
-      __builtin_prefetch(outp + 64, 1, 3);
       for (int i = 0; i < UNROLL; i++)
         vst1q_f64(outp + i * VEC_SIZE, result[i]);
     } else {
       for (int j = 0; j < UNROLL; j++) {
-        double tmp[VEC_SIZE];
-        vst1q_f64(tmp, result[j]);
         for (int i = 0; i < VEC_SIZE; i++)
-          outp[(i + j * VEC_SIZE) * sdst] = tmp[i];
+          vst1q_lane_f64(outp + (i + j * VEC_SIZE) * sdst, result[j], i);
       }
     }
 
@@ -271,9 +265,8 @@ simd_exp2_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
       if (current_len == 1) vst1q_lane_f64(outp, result, 0);
       else vst1q_f64(outp, result);
     } else {
-      double tmp[2];
-      vst1q_f64(tmp, result);
-      for (int i = 0; i < current_len; i++) outp[i * sdst] = tmp[i];
+      for (int i = 0; i < current_len; i++)
+        vst1q_lane_f64(outp + i * sdst, result, i);
     }
 
     infp += ssrc * current_len;
@@ -308,15 +301,13 @@ simd_exp2_neon_HALF_stride2(const npy_half *src, npy_intp ssrc,
   feclearexcept(FE_ALL_EXCEPT);
 
   while (remaining >= 16) {
-    __builtin_prefetch(infp + ssrc * 64, 0, 3);
-    __builtin_prefetch(outp + sdst * 64, 1, 3);
 
     float32x4_t x[4], result[4];
     for (int k = 0; k < 4; k++) {
-      float16_t h_arr[4];
+      uint16_t h_raw[4];
       for (int j = 0; j < 4; j++)
-        h_arr[j] = (float16_t)infp[(k * 4 + j) * ssrc];
-      x[k] = vcvt_f32_f16(vld1_f16(h_arr));
+        h_raw[j] = infp[(k * 4 + j) * ssrc];
+      x[k] = vcvt_f32_f16(vld1_f16((const float16_t *)h_raw));
     }
 
     for (int k = 0; k < 4; k++) {
@@ -340,18 +331,12 @@ simd_exp2_neon_HALF_stride2(const npy_half *src, npy_intp ssrc,
       result[k] = vbslq_f32(is_underflow, zero_v, result[k]);
     }
 
-    if (sdst == 2) {
-      for (int k = 0; k < 4; k++) {
-        float16x4_t rh = vcvt_f16_f32(result[k]);
-        float16x4_t z = vdup_n_f16(0);
-        float16x4x2_t zipped = vzip_f16(rh, z);
-        vst1q_f16((float16_t *)(outp + k * 8), vcombine_f16(zipped.val[0], zipped.val[1]));
-      }
-    } else {
-      for (int k = 0; k < 4; k++) {
-        float16x4_t rh = vcvt_f16_f32(result[k]);
-        for (int j = 0; j < 4; j++)
-          outp[(k * 4 + j) * sdst] = vget_lane_f16(rh, j);
+    for (int k = 0; k < 4; k++) {
+      float16x4_t rh = vcvt_f16_f32(result[k]);
+      for (int j = 0; j < 4; j++) {
+        union { float16_t f; npy_half h; } u;
+        u.f = vget_lane_f16(rh, j);
+        outp[(k * 4 + j) * sdst] = u.h;
       }
     }
 
@@ -361,10 +346,10 @@ simd_exp2_neon_HALF_stride2(const npy_half *src, npy_intp ssrc,
   }
 
   while (remaining >= 4) {
-    float16_t h_arr[4];
+    uint16_t h_raw[4];
     for (int j = 0; j < 4; j++)
-      h_arr[j] = (float16_t)infp[j * ssrc];
-    float32x4_t x = vcvt_f32_f16(vld1_f16(h_arr));
+      h_raw[j] = infp[j * ssrc];
+    float32x4_t x = vcvt_f32_f16(vld1_f16((const float16_t *)h_raw));
 
     uint32x4_t is_nan = vmvnq_u32(vceqq_f32(x, x));
     uint32x4_t is_overflow = vcgtq_f32(x, exp_max_v);
@@ -386,13 +371,10 @@ simd_exp2_neon_HALF_stride2(const npy_half *src, npy_intp ssrc,
     result = vbslq_f32(is_underflow, zero_v, result);
 
     float16x4_t rh = vcvt_f16_f32(result);
-    if (sdst == 2) {
-      float16x4_t z = vdup_n_f16(0);
-      float16x4x2_t zipped = vzip_f16(rh, z);
-      vst1q_f16((float16_t *)outp, vcombine_f16(zipped.val[0], zipped.val[1]));
-    } else {
-      for (int j = 0; j < 4; j++)
-        outp[j * sdst] = vget_lane_f16(rh, j);
+    for (int j = 0; j < 4; j++) {
+      union { float16_t f; npy_half h; } u;
+      u.f = vget_lane_f16(rh, j);
+      outp[j * sdst] = u.h;
     }
 
     infp += ssrc * 4;
@@ -401,8 +383,8 @@ simd_exp2_neon_HALF_stride2(const npy_half *src, npy_intp ssrc,
   }
 
   for (npy_intp i = 0; i < remaining; i++) {
-    float16_t h_val = (float16_t)(*infp);
-    float32x4_t x = vcvt_f32_f16(vdup_n_f16(h_val));
+    uint16_t h_raw = *infp;
+    float32x4_t x = vcvt_f32_f16(vld1_dup_f16((const float16_t *)&h_raw));
 
     uint32x4_t is_nan = vmvnq_u32(vceqq_f32(x, x));
     uint32x4_t is_overflow = vcgtq_f32(x, exp_max_v);
@@ -423,7 +405,9 @@ simd_exp2_neon_HALF_stride2(const npy_half *src, npy_intp ssrc,
     result = vbslq_f32(is_underflow, zero_v, result);
 
     float16x4_t rh = vcvt_f16_f32(result);
-    *outp = (npy_half)vget_lane_f16(rh, 0);
+    union { float16_t f; npy_half h; } u;
+    u.f = vget_lane_f16(rh, 0);
+    *outp = u.h;
     infp += ssrc;
     outp += sdst;
   }
@@ -455,8 +439,6 @@ simd_exp2_neon_HALF_stride1(const npy_half *src, npy_half *dst, npy_intp len)
   feclearexcept(FE_ALL_EXCEPT);
 
   while (remaining >= 16) {
-    __builtin_prefetch(infp + 64, 0, 3);
-    __builtin_prefetch(outp + 64, 1, 3);
 
     float16x8_t h0 = vld1q_f16((const float16_t *)infp);
     float16x8_t h1 = vld1q_f16((const float16_t *)(infp + 8));
@@ -585,7 +567,6 @@ simd_exp2_neon_HALF(const npy_half *src, npy_intp ssrc,
     npy_intp i = 0;
     if (ssrc == 1) {
       for (; i + UNROLL * VEC_SIZE <= block_len; i += UNROLL * VEC_SIZE) {
-        __builtin_prefetch(block_src + i + 256, 0, 3);
         float16x8_t h[4];
         for (int u = 0; u < 4; u++)
           h[u] = vld1q_f16((const float16_t *)(block_src + i + u * 8));
@@ -595,7 +576,6 @@ simd_exp2_neon_HALF(const npy_half *src, npy_intp ssrc,
         }
       }
       for (; i + VEC_SIZE <= block_len; i += VEC_SIZE) {
-        __builtin_prefetch(block_src + i + 128, 0, 3);
         float16x8_t h0 = vld1q_f16((const float16_t *)(block_src + i));
         vst1q_f32(src_buf + i, vcvt_f32_f16(vget_low_f16(h0)));
         vst1q_f32(src_buf + i + 4, vcvt_f32_f16(vget_high_f16(h0)));
@@ -616,7 +596,6 @@ simd_exp2_neon_HALF(const npy_half *src, npy_intp ssrc,
     i = 0;
     if (sdst == 1) {
       for (; i + UNROLL * VEC_SIZE <= block_len; i += UNROLL * VEC_SIZE) {
-        __builtin_prefetch(block_dst + i + 256, 1, 3);
         for (int u = 0; u < 4; u++) {
           float16x8_t hv = vcombine_f16(vcvt_f16_f32(vld1q_f32(dst_buf + i + u * 8)),
                                          vcvt_f16_f32(vld1q_f32(dst_buf + i + u * 8 + 4)));
@@ -624,7 +603,6 @@ simd_exp2_neon_HALF(const npy_half *src, npy_intp ssrc,
         }
       }
       for (; i + VEC_SIZE <= block_len; i += VEC_SIZE) {
-        __builtin_prefetch(block_dst + i + 128, 1, 3);
         float16x8_t h_combined = vcombine_f16(vcvt_f16_f32(vld1q_f32(dst_buf + i)), vcvt_f16_f32(vld1q_f32(dst_buf + i + 4)));
         vst1q_f16((float16_t *)(block_dst + i), h_combined);
       }
@@ -647,8 +625,8 @@ simd_exp2_neon_HALF(const npy_half *src, npy_intp ssrc,
   feclearexcept(FE_ALL_EXCEPT);
 }
 
-
 #endif // SIMD_ARM
+
 #if NPY_SIMD && defined(NPY_HAVE_AVX512_SKX) && defined(NPY_CAN_LINK_SVML)
 static void
 simd_exp2_f32(const npyv_lanetype_f32 *src, npy_intp ssrc,
@@ -774,7 +752,17 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_exp2)
         npy_float *dst = (npy_float*)args[1];
         const npy_intp ssrc = steps[0] / sizeof(npy_float);
         const npy_intp sdst = steps[1] / sizeof(npy_float);
-        simd_exp2_neon_FLOAT(src, ssrc, dst, sdst, len);
+        if (ssrc <= 2) {
+            simd_exp2_neon_FLOAT(src, ssrc, dst, sdst, len);
+        } else {
+            const npy_float * __restrict ip = src;
+            npy_float * __restrict op = dst;
+            for (npy_intp i = 0; i < len; i++) {
+                *op = npy_exp2f(*ip);
+                ip += ssrc;
+                op += sdst;
+            }
+        }
     }
     else {
         UNARY_LOOP {
@@ -819,7 +807,17 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_exp2)
         npy_double *dst = (npy_double*)args[1];
         const npy_intp ssrc = steps[0] / sizeof(npy_double);
         const npy_intp sdst = steps[1] / sizeof(npy_double);
-        simd_exp2_neon_DOUBLE(src, ssrc, dst, sdst, len);
+        if (ssrc <= 2) {
+            simd_exp2_neon_DOUBLE(src, ssrc, dst, sdst, len);
+        } else {
+            const npy_double * __restrict ip = src;
+            npy_double * __restrict op = dst;
+            for (npy_intp i = 0; i < len; i++) {
+                *op = npy_exp2(*ip);
+                ip += ssrc;
+                op += sdst;
+            }
+        }
     }
     else {
         UNARY_LOOP {
