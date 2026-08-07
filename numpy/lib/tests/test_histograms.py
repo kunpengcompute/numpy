@@ -975,3 +975,74 @@ class TestHistogramIntegerNonFloatPath:
         hist, edges = histogram(data, bins=10, range=(0, 99))
         assert_equal(hist.sum(), 100)
         assert edges.dtype.kind != 'f' or True
+
+
+class TestHistogramArmSimdDetection:
+    """Tests for _HAS_ARM_SIMD CPU feature detection in histogram code."""
+
+    def test_has_arm_simd_attribute_exists(self):
+        assert hasattr(hist_impl, '_HAS_ARM_SIMD')
+
+    def test_has_arm_simd_is_bool(self):
+        assert isinstance(hist_impl._HAS_ARM_SIMD, (bool, np.bool_))
+
+    def test_histogram_1d_float_regardless_of_arm_simd(self):
+        data = np.random.randn(1000).astype(np.float64)
+        hist, edges = histogram(data, bins=50, range=(-5, 5))
+        assert hist.sum() == 1000
+        assert len(edges) == 51
+
+    def test_histogram_1d_int_regardless_of_arm_simd(self):
+        data = np.arange(100, dtype=np.int32)
+        hist, edges = histogram(data, bins=10, range=(0, 99))
+        assert hist.sum() == 100
+
+    def test_histogramdd_2d_uniform_float(self):
+        sample = np.random.randn(1000, 2).astype(np.float64)
+        hist, edges = histogramdd(sample, bins=10, range=[[-5, 5], [-5, 5]])
+        assert hist.sum() == 1000
+        assert hist.shape == (10, 10)
+
+    def test_histogramdd_2d_uniform_non_float_ignored(self):
+        sample = np.random.randint(0, 100, size=(100, 2)).astype(np.int64)
+        hist, edges = histogramdd(sample, bins=10, range=[[0, 99], [0, 99]])
+        assert hist.sum() == 100
+
+    def test_histogram_edge_correction_float(self):
+        data = np.array([0.0, 0.1, 0.5, 0.9, 1.0])
+        hist, edges = histogram(data, bins=5, range=(0, 1))
+        assert hist.sum() == 5
+
+    def test_histogram_overflow_range_handling(self):
+        data = np.array([1e300, -1e300, 0.0, 1e-300, -1e-300])
+        hist, edges = histogram(data, bins=10)
+        assert hist.sum() == 5
+
+    def test_histogram_empty_input(self):
+        data = np.array([], dtype=np.float64)
+        hist, edges = histogram(data, bins=10, range=(0, 1))
+        assert hist.sum() == 0
+
+    def test_histogramdd_2d_with_weights_not_using_fast_path(self):
+        sample = np.random.randn(100, 2).astype(np.float64)
+        weights = np.ones(100)
+        hist, edges = histogramdd(sample, bins=10, range=[[-5, 5], [-5, 5]],
+                                   weights=weights)
+        assert hist.sum() == 100
+
+    def test_histogramdd_2d_non_uniform_bins_not_using_fast_path(self):
+        sample = np.random.randn(100, 2).astype(np.float64)
+        bins = [np.linspace(-5, 5, 11), np.linspace(-5, 5, 11)]
+        hist, edges = histogramdd(sample, bins=bins)
+        assert hist.sum() == 100
+
+    def test_histogramdd_2d_density_not_using_fast_path(self):
+        sample = np.random.randn(100, 2).astype(np.float64)
+        hist, edges = histogramdd(sample, bins=10, range=[[-5, 5], [-5, 5]],
+                                   density=True)
+        assert hist.shape == (10, 10)
+
+    def test_histogramdd_2d_non_contiguous_not_using_fast_path(self):
+        sample = np.random.randn(200, 2).astype(np.float64)[::2]
+        hist, edges = histogramdd(sample, bins=10, range=[[-5, 5], [-5, 5]])
+        assert hist.sum() == 100

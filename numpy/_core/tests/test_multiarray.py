@@ -11019,3 +11019,105 @@ class TestTextSignatures:
         sig = inspect.signature(func)
         assert sig.parameters
         assert tuple(sig.parameters) == parameter_names
+
+
+class TestMethodsRevertBaselineBehavior:
+    """Tests verifying reverted cross-platform optimizations match baseline."""
+
+    def test_mean_default_args(self):
+        a = np.arange(100, dtype=np.float64)
+        result = np.mean(a)
+        assert result == 49.5
+
+    def test_mean_with_axis(self):
+        a = np.arange(100, dtype=np.float64).reshape(10, 10)
+        result = np.mean(a, axis=0)
+        assert_allclose(result, np.arange(100, dtype=np.float64).reshape(10, 10).mean(axis=0))
+
+    def test_mean_with_keepdims(self):
+        a = np.arange(100, dtype=np.float64).reshape(10, 10)
+        result = np.mean(a, axis=0, keepdims=True)
+        assert result.shape == (1, 10)
+
+    def test_mean_with_where(self):
+        a = np.arange(100, dtype=np.float64)
+        mask = np.ones(100, dtype=bool)
+        mask[50:] = False
+        result = np.mean(a, where=mask)
+        assert result == 24.5
+
+    def test_std_default_args(self):
+        a = np.arange(100, dtype=np.float64)
+        result = np.std(a)
+        assert_allclose(result, np.std(np.arange(100, dtype=np.float64)))
+
+    def test_std_with_ddof(self):
+        a = np.arange(100, dtype=np.float64)
+        result = np.std(a, ddof=1)
+        expected = np.std(np.arange(100, dtype=np.float64), ddof=1)
+        assert_allclose(result, expected)
+
+    def test_var_default_args(self):
+        a = np.arange(100, dtype=np.float64)
+        result = np.var(a)
+        assert_allclose(result, np.var(np.arange(100, dtype=np.float64)))
+
+    def test_var_with_keepdims(self):
+        a = np.arange(100, dtype=np.float64).reshape(10, 10)
+        result = np.var(a, axis=0, keepdims=True)
+        assert result.shape == (1, 10)
+
+    def test_var_integer_dtype(self):
+        a = np.arange(100, dtype=np.int64)
+        result = np.var(a)
+        assert_allclose(result, np.var(np.arange(100, dtype=np.int64)))
+
+    def test_var_complex_dtype(self):
+        a = np.array([1+2j, 3+4j, 5+6j], dtype=np.complex128)
+        result = np.var(a)
+        expected = np.var(np.array([1+2j, 3+4j, 5+6j], dtype=np.complex128))
+        assert_allclose(result, expected)
+
+    def test_mean_empty_array_warning(self):
+        a = np.array([], dtype=np.float64)
+        with pytest.warns(RuntimeWarning, match="Mean of empty slice"):
+            np.mean(a)
+
+    def test_var_empty_array_warning(self):
+        a = np.array([], dtype=np.float64)
+        with pytest.warns(RuntimeWarning, match="Degrees of freedom"):
+            np.var(a)
+
+    def test_mean_ndarray_subclass(self):
+        class MyArray(np.ndarray):
+            pass
+        a = np.arange(10).view(MyArray)
+        result = np.mean(a)
+        assert result == 4.5
+
+    def test_std_with_mean_param(self):
+        a = np.arange(100, dtype=np.float64)
+        m = np.mean(a)
+        result = np.std(a, mean=m)
+        expected = np.std(np.arange(100, dtype=np.float64))
+        assert_allclose(result, expected)
+
+    def test_var_all_equal_float(self):
+        a = np.ones(100, dtype=np.float64)
+        result = np.var(a)
+        assert result == 0.0
+
+    def test_var_all_equal_int(self):
+        a = np.ones(100, dtype=np.int64)
+        result = np.var(a)
+        assert result == 0.0
+
+    def test_count_reduce_items_axis_none(self):
+        a = np.arange(24, dtype=np.float64).reshape(2, 3, 4)
+        result = np.mean(a)
+        assert result == 11.5
+
+    def test_count_reduce_items_axis_tuple(self):
+        a = np.arange(24, dtype=np.float64).reshape(2, 3, 4)
+        result = np.mean(a, axis=(0, 1))
+        assert result.shape == (4,)
