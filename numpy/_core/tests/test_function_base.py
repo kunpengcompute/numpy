@@ -328,6 +328,39 @@ class TestGeomspace:
         stop = array([10 + 10j, 20 + 20j])
         assert_raises(ValueError, geomspace, start, stop, -1)
 
+    def test_complex_array_basic(self):
+        start = array([1 + 1j, 2 + 2j])
+        stop = array([10 + 10j, 20 + 20j])
+        result = geomspace(start, stop, num=3)
+        expected0 = geomspace(1 + 1j, 10 + 10j, num=3)
+        expected1 = geomspace(2 + 2j, 20 + 20j, num=3)
+        assert_allclose(result[:, 0], expected0)
+        assert_allclose(result[:, 1], expected1)
+
+    def test_complex_array_endpoint_false(self):
+        start = array([1 + 1j, 2 + 2j])
+        stop = array([10 + 10j, 20 + 20j])
+        result = geomspace(start, stop, num=3, endpoint=False)
+        assert result.shape == (3, 2)
+
+    def test_complex_array_axis(self):
+        start = array([1 + 1j, 2 + 2j])
+        stop = array([10 + 10j, 20 + 20j])
+        result = geomspace(start, stop, num=3, axis=1)
+        assert result.shape == (2, 3)
+
+    def test_complex_array_dtype(self):
+        start = array([1 + 1j, 2 + 2j])
+        stop = array([10 + 10j, 20 + 20j])
+        result = geomspace(start, stop, num=3, dtype=np.complex64)
+        assert result.dtype == np.complex64
+
+    def test_complex_array_1d_start(self):
+        start = array([1 + 1j, 2 + 2j])
+        stop = 10 + 10j
+        result = geomspace(start, stop, num=3)
+        assert result.shape == (3, 2)
+
 
 class TestLinspace:
 

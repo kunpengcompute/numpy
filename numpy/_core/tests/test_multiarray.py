@@ -1966,6 +1966,27 @@ class TestZeroSizeFlexible:
         zs = self._zeros(10, int)
         assert_equal(zs, pickle.loads(zs.dumps()))
 
+    def test_dump_file_object(self):
+        arr = np.array([1, 2, 3])
+        buf = io.BytesIO()
+        arr.dump(buf)
+        buf.seek(0)
+        assert_array_equal(pickle.load(buf), arr)
+
+    def test_dump_file_path(self, tmp_path):
+        arr = np.array([1, 2, 3])
+        path = tmp_path / "test_dump_methods.npy"
+        arr.dump(str(path))
+        loaded = np.load(str(path), allow_pickle=True)
+        assert_array_equal(loaded, arr)
+
+    def test_dump_protocol(self):
+        arr = np.array([1, 2, 3])
+        buf = io.BytesIO()
+        arr.dump(buf, protocol=2)
+        buf.seek(0)
+        assert_array_equal(pickle.load(buf), arr)
+
     def test_pickle(self):
         for proto in range(2, pickle.HIGHEST_PROTOCOL + 1):
             for dt in [bytes, np.void, str]:
@@ -5423,6 +5444,30 @@ class TestClip:
         result = input_arr.clip(-1, 1)
         expected = np.array([-1., np.nan, 0.5, 1., 0.25, np.nan])
         assert_array_equal(result, expected)
+
+    def test_clip_min_only(self):
+        arr = np.array([1, 2, 3, 4, 5])
+        assert_array_equal(np.clip(arr, 2, None), [2, 2, 3, 4, 5])
+
+    def test_clip_max_only(self):
+        arr = np.array([1, 2, 3, 4, 5])
+        assert_array_equal(np.clip(arr, None, 4), [1, 2, 3, 4, 4])
+
+    def test_clip_neither(self):
+        arr = np.array([1, 2, 3, 4, 5])
+        assert_array_equal(np.clip(arr, None, None), [1, 2, 3, 4, 5])
+
+    def test_clip_uint8_below_min(self):
+        arr = np.array([1, 2, 3], dtype=np.uint8)
+        assert_array_equal(np.clip(arr, -100, 100), [1, 2, 3])
+
+    def test_clip_uint8_above_max(self):
+        arr = np.array([1, 2, 3], dtype=np.uint8)
+        assert_array_equal(np.clip(arr, -1, None), [1, 2, 3])
+
+    def test_clip_uint8_above_max_min_none(self):
+        arr = np.array([1, 2, 3], dtype=np.uint8)
+        assert_array_equal(np.clip(arr, None, 300), [1, 2, 3])
 
 
 class TestCompress:

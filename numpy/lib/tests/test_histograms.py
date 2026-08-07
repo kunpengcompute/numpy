@@ -975,3 +975,46 @@ class TestHistogramIntegerNonFloatPath:
         hist, edges = histogram(data, bins=10, range=(0, 99))
         assert_equal(hist.sum(), 100)
         assert edges.dtype.kind != 'f' or True
+
+
+class TestHistogramFastFloatIndex:
+    """Tests for the fast floating-point index path in histogram()."""
+
+    def test_float_bins_values_at_edges(self):
+        data = np.array([0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+        hist, edges = histogram(data, bins=5, range=(0, 5))
+        assert_equal(hist.sum(), 6)
+
+    def test_float_bins_values_near_edges(self):
+        eps = np.finfo(np.float64).eps
+        data = np.array([1.0 - eps, 1.0 + eps, 2.0 - eps, 2.0 + eps])
+        hist, edges = histogram(data, bins=3, range=(0, 3))
+        assert_equal(hist.sum(), 4)
+
+    def test_float_bins_last_edge_inclusive(self):
+        data = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0])
+        hist, edges = histogram(data, bins=3, range=(0, 3))
+        assert_equal(hist.sum(), 7)
+        assert_equal(hist[-1], 3)
+
+    def test_float_bins_extreme_range(self):
+        data = np.array([1e300, 2e300, 3e300])
+        hist, edges = histogram(data, bins=3, range=(0, 4e300))
+        assert_equal(hist.sum(), 3)
+
+    def test_float_density(self):
+        data = np.random.default_rng(42).random(1000)
+        hist, edges = histogram(data, bins=20, range=(0, 1), density=True)
+        assert abs(hist.sum() * np.diff(edges).mean() - 1.0) < 0.01
+
+    def test_float_with_weights(self):
+        data = np.array([0.5, 1.5, 2.5, 3.5])
+        weights = np.array([1.0, 2.0, 3.0, 4.0])
+        hist, edges = histogram(data, bins=4, range=(0, 4), weights=weights)
+        assert_equal(hist, [1.0, 2.0, 3.0, 4.0])
+
+    def test_float_large_array(self):
+        rng = np.random.default_rng(42)
+        data = rng.random(100000)
+        hist, edges = histogram(data, bins=100, range=(0, 1))
+        assert_equal(hist.sum(), 100000)
