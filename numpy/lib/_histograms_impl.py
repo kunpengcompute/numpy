@@ -10,6 +10,12 @@ import numpy as np
 from numpy._core import overrides
 from numpy._core._multiarray_umath import _histogramdd_uniform2d
 
+try:
+    from numpy._core._multiarray_umath import __cpu_features__
+    _HAS_ARM_SIMD = __cpu_features__.get('ASIMD', False) or __cpu_features__.get('SVE', False)
+except (ImportError, AttributeError):
+    _HAS_ARM_SIMD = False
+
 __all__ = ['histogram', 'histogramdd', 'histogram_bin_edges']
 
 array_function_dispatch = functools.partial(
@@ -822,7 +828,7 @@ def histogram(a, bins=10, range=None, density=None, weights=None):
         # Pre-compute histogram scaling factor
         norm_numerator = n_equal_bins
         norm_denom = _unsigned_subtract(last_edge, first_edge)
-        fast_float_index = bin_edges.dtype.kind == 'f'
+        fast_float_index = _HAS_ARM_SIMD and bin_edges.dtype.kind == 'f'
 
         # For extreme floating-point ranges, precomputing the scaling
         # factor can overflow.  Detect this case and fall back to the
@@ -1088,7 +1094,7 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
         nbin[i] = len(edges[i]) + 1  # includes an outlier on each end
         dedges[i] = np.diff(edges[i])
 
-    if (D == 2 and weights is None and not density and explicit_range and
+    if (_HAS_ARM_SIMD and D == 2 and weights is None and not density and explicit_range and
             range[0] is not None and range[1] is not None and
             uniform_bins[0] and uniform_bins[1] and
             sample.dtype == np.float64 and sample.flags.c_contiguous):
