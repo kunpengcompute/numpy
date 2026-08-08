@@ -4960,3 +4960,114 @@ class TestHypotErrorMessages:
     def test_hypot_error_message_multiple_args(self):
         with pytest.raises(TypeError, match="hypot\\(\\) takes .* but 4 were given"):
             np.hypot(1, 2, 3, 4)
+
+
+class TestFloorDivideArmOnlyHighway:
+    """Tests for floor_divide with ARM-only Highway SIMD dispatch."""
+
+    def test_floor_divide_int8(self):
+        a = np.array([10, -10, 7, -7], dtype=np.int8)
+        result = np.floor_divide(a, 3)
+        assert_array_equal(result, np.array([3, -4, 2, -3], dtype=np.int8))
+
+    def test_floor_divide_int16(self):
+        a = np.array([100, -100, 70, -70], dtype=np.int16)
+        result = np.floor_divide(a, 7)
+        expected = np.array([14, -15, 10, -10], dtype=np.int16)
+        assert_array_equal(result, expected)
+
+    def test_floor_divide_int32(self):
+        a = np.array([1000, -1000, 700, -700], dtype=np.int32)
+        result = np.floor_divide(a, 7)
+        expected = np.array([142, -143, 100, -100], dtype=np.int32)
+        assert_array_equal(result, expected)
+
+    def test_floor_divide_uint8(self):
+        a = np.array([10, 20, 30, 40], dtype=np.uint8)
+        result = np.floor_divide(a, 3)
+        assert_array_equal(result, np.array([3, 6, 10, 13], dtype=np.uint8))
+
+    def test_floor_divide_uint16(self):
+        a = np.array([100, 200, 300, 400], dtype=np.uint16)
+        result = np.floor_divide(a, 7)
+        assert_array_equal(result, np.array([14, 28, 42, 57], dtype=np.uint16))
+
+    def test_floor_divide_uint32(self):
+        a = np.array([1000, 2000, 3000, 4000], dtype=np.uint32)
+        result = np.floor_divide(a, 7)
+        expected = np.array([142, 285, 428, 571], dtype=np.uint32)
+        assert_array_equal(result, expected)
+
+    def test_floor_divide_scalar_divisor_int32(self):
+        a = np.arange(100, dtype=np.int32)
+        result = np.floor_divide(a, 7)
+        expected = np.floor(a / 7).astype(np.int32)
+        assert_array_equal(result, expected)
+
+    def test_floor_divide_div_by_zero_warning(self):
+        a = np.array([1, 2, 3], dtype=np.int32)
+        with pytest.warns(RuntimeWarning, match="divide by zero"):
+            np.floor_divide(a, 0)
+
+    def test_floor_divide_overflow_warning(self):
+        a = np.array([np.iinfo(np.int32).min], dtype=np.int32)
+        with pytest.warns(RuntimeWarning, match="overflow"):
+            np.floor_divide(a, np.int32(-1))
+
+    def test_floor_divide_array_array(self):
+        a = np.array([10, 20, 30, 40], dtype=np.int32)
+        b = np.array([3, 7, 5, 4], dtype=np.int32)
+        result = np.floor_divide(a, b)
+        assert_array_equal(result, np.array([3, 2, 6, 10], dtype=np.int32))
+
+    def test_floor_divide_large_array(self):
+        a = np.arange(10000, dtype=np.int32)
+        result = np.floor_divide(a, 3)
+        expected = np.floor(a / 3).astype(np.int32)
+        assert_array_equal(result, expected)
+
+
+class TestPositiveUfuncBaselineBehavior:
+    """Tests verifying positive ufunc reverts to scalar (no memmove fast path)."""
+
+    def test_positive_int32(self):
+        a = np.array([1, -2, 3, -4], dtype=np.int32)
+        result = np.positive(a)
+        assert_array_equal(result, a)
+
+    def test_positive_int64(self):
+        a = np.array([1, -2, 3, -4], dtype=np.int64)
+        result = np.positive(a)
+        assert_array_equal(result, a)
+
+    def test_positive_float64(self):
+        a = np.array([1.5, -2.5, 3.5], dtype=np.float64)
+        result = np.positive(a)
+        assert_array_equal(result, a)
+
+    def test_positive_uint8(self):
+        a = np.array([1, 2, 3, 4], dtype=np.uint8)
+        result = np.positive(a)
+        assert_array_equal(result, a)
+
+    def test_positive_contiguous_copy(self):
+        a = np.arange(100, dtype=np.int32)
+        result = np.positive(a)
+        assert_array_equal(result, a)
+        assert result is not a or np.array_equal(result, a)
+
+    def test_positive_strided(self):
+        a = np.arange(100, dtype=np.int32)
+        result = np.positive(a[::2])
+        assert_array_equal(result, a[::2])
+
+    def test_positive_inplace(self):
+        a = np.array([1, 2, 3], dtype=np.int32)
+        b = np.positive(a, out=a)
+        assert b is a
+        assert_array_equal(b, [1, 2, 3])
+
+    def test_positive_large_array(self):
+        a = np.arange(10000, dtype=np.int64)
+        result = np.positive(a)
+        assert_array_equal(result, a)
