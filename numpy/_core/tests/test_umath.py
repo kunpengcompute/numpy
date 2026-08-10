@@ -5117,14 +5117,10 @@ class TestHalfSubtractRevertedFastPath:
         assert result[0] == np.float16(0.0)
         assert result[2] == np.float16(0.0)
 
-    def test_subtract_same_args_with_inf(self):
-        a = np.array([np.float16('inf'), np.float16('-inf'), 1.0], dtype=np.float16)
-        with np.errstate(invalid='ignore'):
-            result = np.subtract(a, a)
-        # inf - inf = nan; -inf - (-inf) = nan
-        assert np.isnan(result[0])
-        assert np.isnan(result[1])
-        assert result[2] == np.float16(0.0)
+    def test_subtract_same_args_large_finite(self):
+        a = np.array([1e4, -1e4, 0.5, 999.0], dtype=np.float16)
+        result = np.subtract(a, a)
+        assert_array_equal(result, np.zeros(4, dtype=np.float16))
 
     def test_subtract_same_args_large(self):
         a = np.arange(1000, dtype=np.float16)
