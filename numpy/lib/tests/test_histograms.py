@@ -3,6 +3,7 @@ import warnings
 import pytest
 
 import numpy as np
+import numpy.lib._histograms_impl as hist_impl
 from numpy import histogram, histogram_bin_edges, histogramdd
 from numpy.testing import (
     assert_,
