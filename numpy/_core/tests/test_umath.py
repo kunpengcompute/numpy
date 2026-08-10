@@ -5071,3 +5071,194 @@ class TestPositiveUfuncBaselineBehavior:
         a = np.arange(10000, dtype=np.int64)
         result = np.positive(a)
         assert_array_equal(result, a)
+
+
+class TestHalfSubtractRevertedFastPath:
+    """Tests for HALF_subtract after reverting the same-args fast path.
+
+    The same-args fast path (args[0] == args[1]) was removed for subtract
+    to fix a cross-platform regression.  These tests verify that subtract
+    still produces correct results via the standard BINARY_LOOP path when
+    both inputs reference the same array.
+    """
+
+    def test_subtract_same_args_contiguous(self):
+        a = np.array([1.0, -2.0, 3.0, -4.0, 0.5], dtype=np.float16)
+        result = np.subtract(a, a)
+        assert_array_equal(result, np.zeros(5, dtype=np.float16))
+
+    def test_subtract_same_args_inplace(self):
+        a = np.array([5.0, -3.0, 2.5], dtype=np.float16)
+        np.subtract(a, a, out=a)
+        assert_array_equal(a, np.zeros(3, dtype=np.float16))
+
+    def test_subtract_same_args_noncontiguous(self):
+        full = np.arange(20, dtype=np.float16).reshape(4, 5)
+        sl = full[:, ::2]
+        result = np.subtract(sl, sl)
+        assert_array_equal(result, np.zeros((4, 3), dtype=np.float16))
+
+    def test_subtract_different_args(self):
+        a = np.array([10.0, 20.0, 30.0], dtype=np.float16)
+        b = np.array([1.0, 2.0, 3.0], dtype=np.float16)
+        result = np.subtract(a, b)
+        assert_array_equal(result, np.array([9.0, 18.0, 27.0], dtype=np.float16))
+
+    def test_subtract_reduce(self):
+        a = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float16)
+        result = np.subtract.reduce(a)
+        # 1 - 2 - 3 - 4 = -8
+        assert result == np.float16(-8.0)
+
+    def test_subtract_same_args_with_nan(self):
+        a = np.array([1.0, np.float16('nan'), 3.0], dtype=np.float16)
+        result = np.subtract(a, a)
+        assert np.isnan(result[1])
+        assert result[0] == np.float16(0.0)
+        assert result[2] == np.float16(0.0)
+
+    def test_subtract_same_args_large_finite(self):
+        a = np.array([1e4, -1e4, 0.5, 999.0], dtype=np.float16)
+        result = np.subtract(a, a)
+        assert_array_equal(result, np.zeros(4, dtype=np.float16))
+
+    def test_subtract_same_args_large(self):
+        a = np.arange(1000, dtype=np.float16)
+        result = np.subtract(a, a)
+        assert_array_equal(result, np.zeros(1000, dtype=np.float16))
+
+
+class TestHalfMultiplyArmOnlyFastPath:
+    """Tests for HALF_multiply same-args fast path (ARM-only).
+
+    On ARM the same-args fast path is kept; on x86 it is reverted.
+    These tests verify correct results on both paths.
+    """
+
+    def test_multiply_same_args_contiguous(self):
+        a = np.array([1.0, -2.0, 3.0, 0.5], dtype=np.float16)
+        result = np.multiply(a, a)
+        assert_array_equal(result, np.array([1.0, 4.0, 9.0, 0.25], dtype=np.float16))
+
+    def test_multiply_same_args_inplace(self):
+        a = np.array([2.0, 3.0, 4.0], dtype=np.float16)
+        np.multiply(a, a, out=a)
+        assert_array_equal(a, np.array([4.0, 9.0, 16.0], dtype=np.float16))
+
+    def test_multiply_different_args(self):
+        a = np.array([10.0, 20.0], dtype=np.float16)
+        b = np.array([2.0, 0.5], dtype=np.float16)
+        result = np.multiply(a, b)
+        assert_array_equal(result, np.array([20.0, 10.0], dtype=np.float16))
+
+    def test_multiply_reduce(self):
+        a = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float16)
+        result = np.multiply.reduce(a)
+        assert result == np.float16(24.0)
+
+    def test_multiply_same_args_noncontiguous(self):
+        full = np.arange(20, dtype=np.float16).reshape(4, 5)
+        sl = full[:, ::2]
+        result = np.multiply(sl, sl)
+        assert_array_equal(result, sl * sl)
+
+    def test_add_same_args_unchanged(self):
+        a = np.array([1.0, -2.0, 3.0], dtype=np.float16)
+        result = np.add(a, a)
+        assert_array_equal(result, np.array([2.0, -4.0, 6.0], dtype=np.float16))
+
+    def test_divide_same_args_unchanged(self):
+        a = np.array([4.0, -6.0, 9.0], dtype=np.float16)
+        result = np.divide(a, a)
+        assert_array_equal(result, np.array([1.0, 1.0, 1.0], dtype=np.float16))
+
+
+class TestScalarAbsRevertedFastPath:
+    """Tests for scalar abs after reverting find_scalar_fast_path.
+
+    The find_scalar_fast_path mechanism added a strcmp table lookup on
+    every unary scalar ufunc call.  It has been reverted to the baseline
+    path.  These tests verify that scalar abs still works correctly via
+    the normal ufunc dispatch.
+    """
+
+    def test_abs_float64_negative(self):
+        assert np.abs(np.float64(-1.5)) == 1.5
+
+    def test_abs_float64_positive(self):
+        assert np.abs(np.float64(1.1)) == 1.1
+
+    def test_abs_float64_zero(self):
+        assert np.abs(np.float64(0.0)) == 0.0
+
+    def test_abs_float32_negative(self):
+        assert np.abs(np.float32(-2.0)) == 2.0
+
+    def test_abs_python_float_negative(self):
+        assert np.abs(-3.14) == 3.14
+
+    def test_abs_python_float_positive(self):
+        assert np.abs(3.14) == 3.14
+
+    def test_abs_complex64(self):
+        assert np.abs(np.complex64(3 + 4j)) == 5.0
+
+    def test_abs_complex128(self):
+        assert np.abs(np.complex128(3 + 4j)) == 5.0
+
+    def test_abs_int_types(self):
+        for dt in [np.int8, np.int16, np.int32, np.int64]:
+            assert np.abs(dt(-5)) == 5
+
+    def test_abs_numpy_scalar_preserves_type(self):
+        x = np.float64(-2.0)
+        result = np.abs(x)
+        assert isinstance(result, np.float64)
+        assert result == 2.0
+
+
+class TestScalarMathUfuncNormalPath:
+    """Tests for scalar math ufuncs after reverting find_scalar_fast_path.
+
+    sqrt/cos/sin/tan/exp/log were in the fast path table.  After revert
+    they go through the normal ufunc dispatch.  Verify correctness.
+    """
+
+    def test_sqrt_scalar(self):
+        assert_allclose(np.sqrt(np.float64(4.0)), 2.0)
+
+    def test_sqrt_python_float(self):
+        assert_allclose(np.sqrt(9.0), 3.0)
+
+    def test_cos_scalar(self):
+        assert_allclose(np.cos(np.float64(0.0)), 1.0)
+
+    def test_cos_python_float(self):
+        assert_allclose(np.cos(0.0), 1.0)
+
+    def test_sin_scalar(self):
+        assert_allclose(np.sin(np.float64(0.0)), 0.0)
+
+    def test_tan_scalar(self):
+        assert_allclose(np.tan(np.float64(0.0)), 0.0)
+
+    def test_exp_scalar(self):
+        assert_allclose(np.exp(np.float64(0.0)), 1.0)
+
+    def test_exp_python_float(self):
+        assert_allclose(np.exp(0.0), 1.0)
+
+    def test_log_scalar(self):
+        assert_allclose(np.log(np.float64(1.0)), 0.0)
+
+    def test_log_python_float(self):
+        assert_allclose(np.log(1.0), 0.0)
+
+    def test_sqrt_complex_scalar(self):
+        result = np.sqrt(np.complex128(-1.0))
+        assert_allclose(result, 1j)
+
+    def test_cos_array_unchanged(self):
+        a = np.array([0.0, np.pi / 2, np.pi], dtype=np.float64)
+        result = np.cos(a)
+        assert_allclose(result, [1.0, 0.0, -1.0], atol=1e-15)
