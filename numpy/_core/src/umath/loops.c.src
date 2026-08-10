@@ -1582,10 +1582,15 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(LONGDOUBLE_deg2rad)
  * # OP = +, -, *, /#
  * # PW = 1, 0, 0, 0#
  * # is_mul = 0, 0, 1, 0#
+ * # is_subtract = 0, 1, 0, 0#
  */
 NPY_NO_EXPORT void
 HALF_@kind@(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
+#if !@is_subtract@
+#if @is_mul@ && !defined(__aarch64__)
+    /* multiply same-args fast path: ARM only, skip on x86 to avoid regression */
+#else
     if (!IS_BINARY_REDUCE && args[0] == args[1] && steps[0] == steps[1] &&
             steps[0] == steps[2] && steps[0] == sizeof(npy_half)) {
         char *src = args[0];
@@ -1603,6 +1608,8 @@ HALF_@kind@(char **args, npy_intp const *dimensions, npy_intp const *steps, void
         }
         return;
     }
+#endif
+#endif
     if (IS_BINARY_REDUCE) {
         char *iop1 = args[0];
         float io1 = npy_half_to_float(*(npy_half *)iop1);
