@@ -1577,7 +1577,8 @@ class TestPartitionFloatFastPath:
     @pytest.mark.parametrize("dt", [np.float32, np.float64])
     def test_nanpercentile_all_nan(self, dt):
         arr = np.full(100, np.nan, dtype=dt)
-        result = np.nanpercentile(arr, 50)
+        with pytest.warns(RuntimeWarning, match="All-NaN slice"):
+            result = np.nanpercentile(arr, 50)
         assert np.isnan(result)
 
     @pytest.mark.parametrize("dt", [np.float32, np.float64])
