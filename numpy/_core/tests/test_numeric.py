@@ -3293,6 +3293,134 @@ class TestStdVar:
         assert_(r is out)
         assert_array_equal(r, out)
 
+    @pytest.mark.parametrize("dt", [np.int8, np.int16, np.int32, np.int64,
+                                    np.uint8, np.uint16, np.uint32, np.uint64])
+    def test_var_integer_dtype_inference(self, dt):
+        arr = np.array([1, 2, 3, 4], dtype=dt)
+        assert np.var(arr).dtype == np.float64
+
+    @pytest.mark.parametrize("dt", [np.int8, np.int16, np.int32, np.int64,
+                                    np.uint8, np.uint16, np.uint32, np.uint64])
+    def test_mean_integer_dtype_inference(self, dt):
+        arr = np.array([1, 2, 3, 4], dtype=dt)
+        assert np.mean(arr).dtype == np.float64
+
+    def test_var_bool_dtype_inference(self):
+        assert np.var(np.array([True, False, True, True])).dtype == np.float64
+
+    def test_mean_bool_dtype_inference(self):
+        assert np.mean(np.array([True, False, True, True])).dtype == np.float64
+
+    def test_var_float16(self):
+        arr = np.array([1, 2, 3], dtype=np.float16)
+        assert np.var(arr).dtype == np.float16
+
+    def test_mean_float16_dtype_inference(self):
+        arr = np.array([1, 2, 3], dtype=np.float16)
+        assert np.mean(arr).dtype == np.float16
+
+    def test_mean_float16_with_out(self):
+        arr = np.array([1, 2, 3], dtype=np.float16)
+        out = np.zeros((), dtype=np.float16)
+        r = np.mean(arr, out=out)
+        assert_(r is out)
+
+    def test_var_object_array(self):
+        arr = np.array([1.0, 2.0, 3.0, 4.0], dtype=object)
+        assert_almost_equal(float(np.var(arr)), 1.25)
+
+    def test_mean_object_array(self):
+        arr = np.array([1.0, 2.0, 3.0], dtype=object)
+        assert_almost_equal(float(np.mean(arr)), 2.0)
+
+    def test_std_object_array(self):
+        arr = np.array([1.0, 2.0, 3.0, 4.0], dtype=object)
+        assert_almost_equal(float(np.std(arr)), np.std([1.0, 2.0, 3.0, 4.0]))
+
+    def test_var_where_array(self):
+        arr = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        mask = np.array([True, False, True, False, True])
+        assert_almost_equal(np.var(arr, where=mask), np.var(arr[mask]))
+
+    def test_mean_where_array(self):
+        arr = np.array([1.0, 2.0, 3.0, 4.0])
+        mask = np.array([True, False, True, False])
+        assert_almost_equal(np.mean(arr, where=mask), 2.0)
+
+    def test_var_where_false(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            result = np.var(np.array([1.0, 2.0, 3.0]), where=False)
+        assert np.isnan(result) or result == 0.0
+
+    def test_mean_where_false(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            result = np.mean(np.array([1.0, 2.0, 3.0]), where=False)
+        assert np.isnan(result)
+
+    def test_var_ddof_ge_n(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            result = np.var(np.array([1.0, 2.0, 3.0]), ddof=3)
+        assert np.isnan(result) or result == 0.0 or np.isinf(result)
+
+    def test_var_axis_tuple(self):
+        arr = np.array([[1.0, 2.0], [3.0, 4.0]])
+        assert_almost_equal(np.var(arr, axis=(0, 1)), 1.25)
+
+    def test_mean_axis_tuple(self):
+        arr = np.array([[1.0, 2.0], [3.0, 4.0]])
+        assert_almost_equal(np.mean(arr, axis=(0, 1)), 2.5)
+
+    def test_var_0d(self):
+        assert np.var(np.array(5.0)) == 0.0
+
+    def test_std_0d(self):
+        assert np.std(np.array(5.0)) == 0.0
+
+    def test_mean_0d(self):
+        assert np.mean(np.array(5.0)) == 5.0
+
+    def test_var_all_equal_float(self):
+        assert np.var(np.ones(10, dtype=np.float64)) == 0.0
+
+    def test_var_all_equal_integer(self):
+        assert np.var(np.ones(10, dtype=np.int64)) == 0.0
+
+    def test_var_all_equal_bool(self):
+        assert np.var(np.ones(10, dtype=bool)) == 0.0
+
+    def test_var_all_equal_with_out(self):
+        out = np.zeros((), dtype=np.float64)
+        r = np.var(np.ones(10, dtype=np.float64), out=out)
+        assert_(r is out)
+        assert r == 0.0
+
+    def test_var_all_equal_with_keepdims(self):
+        r = np.var(np.ones(10, dtype=np.float64), keepdims=True)
+        assert r.shape == (1,)
+        assert r[0] == 0.0
+
+    def test_var_all_equal_nan(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            result = np.var(np.array([np.nan] * 5, dtype=np.float64))
+        assert np.isnan(result)
+
+    def test_var_not_all_equal(self):
+        assert np.var(np.array([1.0, 2.0, 1.0, 2.0, 1.0])) > 0.0
+
+    def test_var_all_equal_size_256(self):
+        assert np.var(np.ones(256, dtype=np.float64)) == 0.0
+
+    def test_var_all_equal_non_contiguous(self):
+        assert np.var(np.ones(20, dtype=np.float64)[::2]) == 0.0
+
+    def test_var_all_equal_with_mean_param(self):
+        arr = np.ones(10, dtype=np.float64)
+        assert np.var(arr, mean=np.float64(1.0)) == 0.0
+
 
 class TestStdVarComplex:
     def test_basic(self):
@@ -3304,6 +3432,26 @@ class TestStdVarComplex:
     def test_scalars(self):
         assert_equal(np.var(1j), 0)
         assert_equal(np.std(1j), 0)
+
+    def test_complex64(self):
+        arr = np.array([1 + 2j, 3 + 4j, 5 + 6j], dtype=np.complex64)
+        result = np.var(arr)
+        assert result.dtype == np.float32
+        assert result > 0
+
+    def test_complex128(self):
+        arr = np.array([1 + 2j, 3 + 4j, 5 + 6j], dtype=np.complex128)
+        result = np.var(arr)
+        assert_almost_equal(result, np.var(arr))
+
+    def test_clongdouble(self):
+        arr = np.array([1 + 2j, 3 + 4j], dtype=np.clongdouble)
+        result = np.var(arr)
+        assert np.isfinite(float(result.real))
+
+    def test_std_complex(self):
+        arr = np.array([1 + 2j, 3 + 4j, 5 + 6j])
+        assert_almost_equal(np.std(arr), np.sqrt(np.var(arr)))
 
 
 class TestCreationFuncs:

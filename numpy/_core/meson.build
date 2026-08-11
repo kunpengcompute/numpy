@@ -819,6 +819,8 @@ multiarray_gen_headers = [
   src_file.process('src/common/npy_sort.h.src'),
 ]
 foreach gen_mtargets : [
+  # Keep argmin/argmax on the baseline argfunc dispatch path. The Highway
+  # implementation remains in-tree but is not registered here.
   [
     'argfunc.dispatch.h',
     src_file.process('src/multiarray/argfunc.dispatch.c.src'),
@@ -828,14 +830,6 @@ foreach gen_mtargets : [
       ASIMD, NEON,
       VXE, VX
     ]
-  ],
-  [
-    'highway_argfunc.dispatch.h',
-    'src/multiarray/highway_argfunc.dispatch.cpp',
-    use_highway ? [
-      X86_V4, X86_V3, X86_V2,
-      SVE, ASIMD, NEON
-    ] : []
   ],
 ]
   mtargets = mod_features.multi_targets(
@@ -852,8 +846,7 @@ foreach gen_mtargets : [
       'src/multiarray',
       'src/multiarray/stringdtype',
       'src/npymath',
-      'src/umath',
-      'src/highway',
+      'src/umath'
     ]
   )
   if not is_variable('multiarray_umath_mtargets')
@@ -967,7 +960,6 @@ foreach gen_mtargets : [
     'loops_arithmetic_floor_hwy.dispatch.h',
     'src/umath/loops_arithmetic_floor_hwy.dispatch.cpp',
     use_highway ? [
-      X86_V4, X86_V3, X86_V2,
       SVE, ASIMD, NEON
     ] : []
   ],
