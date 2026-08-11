@@ -5471,3 +5471,116 @@ class TestFusedVarDoubleContig:
             ma.__cpu_features__ = original_cpu_features
         importlib.reload(impl)
         assert impl._HAS_ARM_SIMD == original_has_arm_simd
+
+
+class TestMultiKthHighwaySelect:
+    """Tests for multi-kth Highway QSelect dispatch on ARM."""
+
+    def test_partition_multi_kth_float64(self):
+        a = np.array([5.0, 3.0, 8.0, 1.0, 9.0, 2.0, 7.0, 4.0, 6.0, 10.0])
+        kths = [2, 4, 7]
+        result = np.partition(a, kths)
+        for k in kths:
+            assert np.all(result[:k] <= result[k])
+            assert np.all(result[k+1:] >= result[k])
+
+    def test_partition_multi_kth_int64(self):
+        a = np.arange(100, dtype=np.int64)[::-1]
+        kths = [24, 49, 74]
+        result = np.partition(a, kths)
+        for k in kths:
+            assert np.all(result[:k] <= result[k])
+            assert np.all(result[k+1:] >= result[k])
+
+    def test_partition_multi_kth_large_random(self):
+        rng = np.random.RandomState(42)
+        a = rng.standard_normal(5000)
+        kths = [1249, 2499, 3749, 4749]
+        result = np.partition(a, kths)
+        for k in kths:
+            assert np.all(result[:k] <= result[k])
+            assert np.all(result[k+1:] >= result[k])
+
+    def test_percentile_multi_kth_returns_values(self):
+        rng = np.random.RandomState(42)
+        a = rng.standard_normal(2000)
+        result = np.percentile(a, [25, 50, 75, 95, 99])
+        assert len(result) == 5
+        assert result[0] <= result[1] <= result[2] <= result[3] <= result[4]
+
+    def test_partition_single_kth_not_affected(self):
+        a = np.array([5.0, 3.0, 8.0, 1.0, 9.0])
+        result = np.partition(a, 2)
+        assert np.all(result[:2] <= result[2])
+        assert np.all(result[3:] >= result[2])
+
+    def test_partition_small_array_not_fastpath(self):
+        a = np.array([5.0, 3.0, 8.0, 1.0])
+        result = np.partition(a, [1, 2])
+        for k in [1, 2]:
+            assert np.all(result[:k] <= result[k])
+            assert np.all(result[k+1:] >= result[k])
+
+    def test_partition_multi_kth_float32(self):
+        a = np.array([5.0, 3.0, 8.0, 1.0, 9.0, 2.0, 7.0], dtype=np.float32)
+        kths = [1, 3, 5]
+        result = np.partition(a, kths)
+        for k in kths:
+            assert np.all(result[:k] <= result[k])
+            assert np.all(result[k+1:] >= result[k])
+
+    def test_partition_multi_kth_int32(self):
+        a = np.array([5, 3, 8, 1, 9, 2, 7, 4, 6], dtype=np.int32)
+        kths = [2, 4, 6]
+        result = np.partition(a, kths)
+        for k in kths:
+            assert np.all(result[:k] <= result[k])
+            assert np.all(result[k+1:] >= result[k])
+
+    def test_partition_multi_kth_with_duplicates(self):
+        a = np.array([3.0, 1.0, 3.0, 2.0, 3.0, 1.0, 2.0])
+        kths = [2, 4]
+        result = np.partition(a, kths)
+        for k in kths:
+            assert np.all(result[:k] <= result[k])
+            assert np.all(result[k+1:] >= result[k])
+
+    def test_partition_multi_kth_all_same(self):
+        a = np.full(2000, 5.0)
+        kths = [499, 999, 1499]
+        result = np.partition(a, kths)
+        for k in kths:
+            assert result[k] == 5.0
+
+    def test_partition_multi_kth_descending(self):
+        a = np.arange(2000, dtype=np.float64)[::-1]
+        kths = [499, 999, 1499]
+        result = np.partition(a, kths)
+        for k in kths:
+            assert np.all(result[:k] <= result[k])
+            assert np.all(result[k+1:] >= result[k])
+
+    def test_partition_multi_kth_ascending(self):
+        a = np.arange(2000, dtype=np.float64)
+        kths = [499, 999, 1499]
+        result = np.partition(a, kths)
+        for k in kths:
+            assert np.all(result[:k] <= result[k])
+            assert np.all(result[k+1:] >= result[k])
+
+    def test_partition_multi_kth_16m(self):
+        rng = np.random.RandomState(42)
+        a = rng.standard_normal(4000 * 4000)
+        kths = [999999, 7999999, 15999999]
+        result = np.partition(a, kths)
+        for k in kths:
+            assert np.all(result[:k] <= result[k])
+            assert np.all(result[k+1:] >= result[k])
+
+    def test_argpartition_multi_kth(self):
+        a = np.array([5.0, 3.0, 8.0, 1.0, 9.0, 2.0, 7.0])
+        kths = [2, 4]
+        result = np.argpartition(a, kths)
+        for k in kths:
+            assert np.all(a[result[:k]] <= a[result[k]])
+            assert np.all(a[result[k+1:]] >= a[result[k]])
