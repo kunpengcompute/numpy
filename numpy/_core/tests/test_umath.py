@@ -5262,3 +5262,140 @@ class TestScalarMathUfuncNormalPath:
         a = np.array([0.0, np.pi / 2, np.pi], dtype=np.float64)
         result = np.cos(a)
         assert_allclose(result, [1.0, 0.0, -1.0], atol=1e-15)
+
+
+class TestFusedVarDoubleContig:
+    """Tests for the ARM fused variance fast path."""
+
+    def test_var_basic(self):
+        a = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
+        assert_allclose(np.var(a), 2.0)
+
+    def test_var_large_random(self):
+        rng = np.random.RandomState(42)
+        a = rng.standard_normal(10000)
+        expected = np.var(a)
+        result = np.var(a)
+        assert_allclose(result, expected, rtol=1e-12)
+
+    def test_var_ddof_zero(self):
+        rng = np.random.RandomState(42)
+        a = rng.standard_normal(5000)
+        assert_allclose(np.var(a, ddof=0), np.var(a, ddof=0))
+
+    def test_var_ddof_nonzero_skips_fastpath(self):
+        rng = np.random.RandomState(42)
+        a = rng.standard_normal(5000)
+        expected = np.var(a, ddof=1)
+        result = np.var(a, ddof=1)
+        assert_allclose(result, expected, rtol=1e-12)
+
+    def test_std_basic(self):
+        a = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
+        assert_allclose(np.std(a), np.sqrt(2.0))
+
+    def test_std_large(self):
+        rng = np.random.RandomState(42)
+        a = rng.standard_normal(100000)
+        expected = np.std(a)
+        result = np.std(a)
+        assert_allclose(result, expected, rtol=1e-12)
+
+    def test_var_out_param(self):
+        a = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
+        out = np.empty((), dtype=np.float64)
+        result = np.var(a, out=out)
+        assert result is out
+        assert_allclose(out, 2.0)
+
+    def test_var_keepdims(self):
+        a = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
+        result = np.var(a, keepdims=True)
+        assert result.shape == (1,)
+        assert_allclose(result, [2.0])
+
+    def test_var_float32_not_fastpath(self):
+        a = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float32)
+        result = np.var(a)
+        assert_allclose(result, 2.0)
+
+    def test_var_non_contiguous_not_fastpath(self):
+        full = np.arange(100, dtype=np.float64).reshape(10, 10)
+        sl = full[:, ::2]
+        expected = np.var(sl.copy())
+        result = np.var(sl)
+        assert_allclose(result, expected)
+
+    def test_var_2d_not_fastpath(self):
+        a = np.arange(100, dtype=np.float64).reshape(10, 10)
+        result = np.var(a)
+        expected = np.var(a.ravel())
+        assert_allclose(result, expected)
+
+    def test_var_with_axis_not_fastpath(self):
+        a = np.arange(100, dtype=np.float64).reshape(10, 10)
+        result = np.var(a, axis=0)
+        expected = np.var(a, axis=0)
+        assert_allclose(result, expected)
+
+    def test_var_single_element(self):
+        a = np.array([42.0], dtype=np.float64)
+        assert np.var(a) == 0.0
+
+    def test_var_constant_array(self):
+        a = np.full(1000, 3.14, dtype=np.float64)
+        assert_allclose(np.var(a), 0.0, atol=1e-25)
+
+    def test_var_negative_values(self):
+        a = np.array([-1.0, -2.0, -3.0, -4.0, -5.0], dtype=np.float64)
+        assert_allclose(np.var(a), 2.0)
+
+    def test_var_mixed_sign(self):
+        a = np.array([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=np.float64)
+        assert_allclose(np.var(a), 2.0)
+
+    def test_var_large_16m(self):
+        rng = np.random.RandomState(42)
+        a = rng.standard_normal(4000 * 4000)
+        expected = a.var()
+        result = np.var(a)
+        assert_allclose(result, expected, rtol=1e-10)
+
+    def test_fused_var_c_direct(self):
+        try:
+            from numpy._core._multiarray_umath import _fused_var_double_contig
+        except ImportError:
+            pytest.skip("_fused_var_double_contig not available")
+        a = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
+        assert_allclose(_fused_var_double_contig(a, 0), 2.0)
+
+    def test_fused_var_c_ddof(self):
+        try:
+            from numpy._core._multiarray_umath import _fused_var_double_contig
+        except ImportError:
+            pytest.skip("_fused_var_double_contig not available")
+        a = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
+        assert_allclose(_fused_var_double_contig(a, 1), 2.5)
+
+    def test_fused_var_c_empty_raises(self):
+        try:
+            from numpy._core._multiarray_umath import _fused_var_double_contig
+        except ImportError:
+            pytest.skip("_fused_var_double_contig not available")
+        a = np.array([], dtype=np.float64)
+        with pytest.raises(ValueError, match="empty"):
+            _fused_var_double_contig(a, 0)
+
+    def test_var_where_param_not_fastpath(self):
+        a = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
+        mask = np.array([True, True, False, True, True])
+        result = np.var(a, where=mask)
+        expected = np.var(a[mask])
+        assert_allclose(result, expected)
+
+    def test_var_mean_param_not_fastpath(self):
+        a = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
+        m = np.mean(a)
+        result = np.var(a, mean=m)
+        expected = np.var(a)
+        assert_allclose(result, expected)
