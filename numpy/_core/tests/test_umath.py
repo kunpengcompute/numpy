@@ -5274,19 +5274,21 @@ class TestFusedVarDoubleContig:
     def test_var_large_random(self):
         rng = np.random.RandomState(42)
         a = rng.standard_normal(10000)
-        expected = np.var(a)
+        expected = ((a - a.mean()) ** 2).mean()
         result = np.var(a)
         assert_allclose(result, expected, rtol=1e-12)
 
     def test_var_ddof_zero(self):
         rng = np.random.RandomState(42)
         a = rng.standard_normal(5000)
-        assert_allclose(np.var(a, ddof=0), np.var(a, ddof=0))
+        expected = ((a - a.mean()) ** 2).sum() / len(a)
+        result = np.var(a, ddof=0)
+        assert_allclose(result, expected, rtol=1e-12)
 
     def test_var_ddof_nonzero_skips_fastpath(self):
         rng = np.random.RandomState(42)
         a = rng.standard_normal(5000)
-        expected = np.var(a, ddof=1)
+        expected = ((a - a.mean()) ** 2).sum() / (len(a) - 1)
         result = np.var(a, ddof=1)
         assert_allclose(result, expected, rtol=1e-12)
 
@@ -5297,7 +5299,7 @@ class TestFusedVarDoubleContig:
     def test_std_large(self):
         rng = np.random.RandomState(42)
         a = rng.standard_normal(100000)
-        expected = np.std(a)
+        expected = np.sqrt(((a - a.mean()) ** 2).mean())
         result = np.std(a)
         assert_allclose(result, expected, rtol=1e-12)
 
@@ -5317,6 +5319,12 @@ class TestFusedVarDoubleContig:
     def test_var_float32_not_fastpath(self):
         a = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float32)
         result = np.var(a)
+        assert_allclose(result, 2.0)
+
+    def test_var_dtype_param_not_fastpath(self):
+        a = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
+        result = np.var(a, dtype=np.float32)
+        assert result.dtype == np.float32
         assert_allclose(result, 2.0)
 
     def test_var_non_contiguous_not_fastpath(self):
@@ -5357,7 +5365,7 @@ class TestFusedVarDoubleContig:
     def test_var_large_16m(self):
         rng = np.random.RandomState(42)
         a = rng.standard_normal(4000 * 4000)
-        expected = a.var()
+        expected = ((a - a.mean()) ** 2).mean()
         result = np.var(a)
         assert_allclose(result, expected, rtol=1e-10)
 

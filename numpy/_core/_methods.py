@@ -198,7 +198,7 @@ def _var(a, axis=None, dtype=None, out=None, ddof=0, keepdims=False, *,
             return (dtype or arr.dtype).type(0)
 
     if (_HAS_ARM_SIMD and _fused_var_double_contig is not None and
-            mean is None and where is True and ddof == 0 and
+            dtype is None and mean is None and where is True and ddof == 0 and
             axis is None and arr.ndim == 1 and
             arr.size > 0 and arr.flags.c_contiguous and
             arr.dtype == np.dtype(np.float64) and
