@@ -5459,17 +5459,18 @@ class TestFusedVarDoubleContig:
         import importlib
         import numpy._core._methods as impl
         original_has_arm_simd = impl._HAS_ARM_SIMD
-        original_fused = getattr(impl, '_fused_var_double_contig', None)
         import numpy._core._multiarray_umath as ma
         original_cpu_features = getattr(ma, '__cpu_features__', None)
-        if hasattr(ma, '__cpu_features__'):
-            del ma.__cpu_features__
-        importlib.reload(impl)
-        assert impl._HAS_ARM_SIMD is False
-        assert impl._fused_var_double_contig is None
-        if original_cpu_features is not None:
-            ma.__cpu_features__ = original_cpu_features
-        importlib.reload(impl)
+        try:
+            if hasattr(ma, '__cpu_features__'):
+                del ma.__cpu_features__
+            importlib.reload(impl)
+            assert impl._HAS_ARM_SIMD is False
+            assert impl._fused_var_double_contig is None
+        finally:
+            if original_cpu_features is not None:
+                ma.__cpu_features__ = original_cpu_features
+            importlib.reload(impl)
         assert impl._HAS_ARM_SIMD == original_has_arm_simd
 
 
