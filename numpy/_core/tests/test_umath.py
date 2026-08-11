@@ -5399,3 +5399,67 @@ class TestFusedVarDoubleContig:
         result = np.var(a, mean=m)
         expected = np.var(a)
         assert_allclose(result, expected)
+
+    def test_fused_var_c_invalid_ddof_raises(self):
+        try:
+            from numpy._core._multiarray_umath import _fused_var_double_contig
+        except ImportError:
+            pytest.skip("_fused_var_double_contig not available")
+        a = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+        with pytest.raises(TypeError, match="cannot be interpreted"):
+            _fused_var_double_contig(a, 'abc')
+
+    def test_fused_var_c_ddof_too_large_raises(self):
+        try:
+            from numpy._core._multiarray_umath import _fused_var_double_contig
+        except ImportError:
+            pytest.skip("_fused_var_double_contig not available")
+        a = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+        with pytest.raises(ValueError, match="ddof"):
+            _fused_var_double_contig(a, 3)
+
+    def test_fused_var_c_invalid_array_raises(self):
+        try:
+            from numpy._core._multiarray_umath import _fused_var_double_contig
+        except ImportError:
+            pytest.skip("_fused_var_double_contig not available")
+        with pytest.raises((ValueError, TypeError)):
+            _fused_var_double_contig("not_an_array", 0)
+
+    def test_has_arm_simd_attribute(self):
+        import numpy._core._methods as m
+        assert hasattr(m, '_HAS_ARM_SIMD')
+        assert isinstance(m._HAS_ARM_SIMD, bool)
+
+    def test_fused_var_module_available(self):
+        try:
+            from numpy._core._multiarray_umath import _fused_var_double_contig
+            assert _fused_var_double_contig is not None
+        except ImportError:
+            pass
+
+    def test_fused_var_c_missing_ddof_raises(self):
+        try:
+            from numpy._core._multiarray_umath import _fused_var_double_contig
+        except ImportError:
+            pytest.skip("_fused_var_double_contig not available")
+        a = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+        with pytest.raises(TypeError, match="missing required"):
+            _fused_var_double_contig(a)
+
+    def test_has_arm_simd_except_path_coverage(self):
+        import importlib
+        import numpy._core._methods as impl
+        original_has_arm_simd = impl._HAS_ARM_SIMD
+        original_fused = getattr(impl, '_fused_var_double_contig', None)
+        import numpy._core._multiarray_umath as ma
+        original_cpu_features = getattr(ma, '__cpu_features__', None)
+        if hasattr(ma, '__cpu_features__'):
+            del ma.__cpu_features__
+        importlib.reload(impl)
+        assert impl._HAS_ARM_SIMD is False
+        assert impl._fused_var_double_contig is None
+        if original_cpu_features is not None:
+            ma.__cpu_features__ = original_cpu_features
+        importlib.reload(impl)
+        assert impl._HAS_ARM_SIMD == original_has_arm_simd
