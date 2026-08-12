@@ -429,6 +429,117 @@ arr_histogramdd_uniform2d(PyObject *NPY_UNUSED(self), PyObject *const *args,
     return (PyObject *)hist;
 }
 
+NPY_NO_EXPORT PyObject *
+arr_fused_var_double_contig(PyObject *NPY_UNUSED(self), PyObject *const *args,
+                            Py_ssize_t len_args, PyObject *kwnames)
+{
+    PyObject *arr_obj = NULL;
+    PyObject *ddof_obj = NULL;
+    PyArrayObject *arr = NULL;
+    npy_intp n;
+    const double *data;
+    double mean_val, variance_val;
+    npy_intp ddof_i = 0;
+    npy_intp rcount;
+
+    NPY_PREPARE_ARGPARSER;
+    if (npy_parse_arguments("_fused_var_double_contig", args, len_args, kwnames,
+                "arr", NULL, &arr_obj,
+                "ddof", NULL, &ddof_obj,
+                NULL, NULL, NULL) < 0) {
+        return NULL;
+    }
+
+    ddof_i = PyArray_PyIntAsIntp(ddof_obj);
+    if (error_converting(ddof_i)) {
+        return NULL;
+    }
+
+    arr = (PyArrayObject *)PyArray_FromAny(arr_obj,
+            PyArray_DescrFromType(NPY_DOUBLE), 1, 1,
+            NPY_ARRAY_C_CONTIGUOUS | NPY_ARRAY_ALIGNED, NULL);
+    if (arr == NULL) {
+        return NULL;
+    }
+
+    n = PyArray_SIZE(arr);
+    data = (const double *)PyArray_DATA(arr);
+
+    if (n == 0) {
+        Py_DECREF(arr);
+        PyErr_SetString(PyExc_ValueError, "array must not be empty");
+        return NULL;
+    }
+
+    rcount = n - ddof_i;
+    if (rcount <= 0) {
+        Py_DECREF(arr);
+        PyErr_SetString(PyExc_ValueError, "ddof must be less than array size");
+        return NULL;
+    }
+
+    /*
+     * Two-pass fused variance: pass 1 computes sum for mean, pass 2
+     * fuses (x-mean)^2 accumulation.  ARM NEON uses npyv_muladd_f64
+     * (FMA) to combine subtract+square+accumulate per lane.
+     */
+    {
+        NPY_BEGIN_ALLOW_THREADS
+
+        double sum = 0.0;
+#if defined(NPY_HAVE_NEON) || defined(NPY_HAVE_ASIMD) || defined(NPY_HAVE_SVE)
+        {
+            npy_intp i = 0;
+            npyv_f64 vsum = npyv_zero_f64();
+            const npy_intp simd_width = npyv_nlanes_f64;
+            for (; i + simd_width <= n; i += simd_width) {
+                vsum = npyv_add_f64(vsum, npyv_load_f64(data + i));
+            }
+            sum = npyv_sum_f64(vsum);
+            for (; i < n; ++i) {
+                sum += data[i];
+            }
+        }
+#else
+        for (npy_intp i = 0; i < n; ++i) {
+            sum += data[i];
+        }
+#endif
+        mean_val = sum / (double)n;
+
+        double sq_sum = 0.0;
+#if defined(NPY_HAVE_NEON) || defined(NPY_HAVE_ASIMD) || defined(NPY_HAVE_SVE)
+        {
+            npy_intp i = 0;
+            const npyv_f64 vmean = npyv_setall_f64(mean_val);
+            npyv_f64 vsq_sum = npyv_zero_f64();
+            const npy_intp simd_width = npyv_nlanes_f64;
+            for (; i + simd_width <= n; i += simd_width) {
+                npyv_f64 v = npyv_load_f64(data + i);
+                v = npyv_sub_f64(v, vmean);
+                vsq_sum = npyv_muladd_f64(v, v, vsq_sum);
+            }
+            sq_sum = npyv_sum_f64(vsq_sum);
+            for (; i < n; ++i) {
+                double d = data[i] - mean_val;
+                sq_sum += d * d;
+            }
+        }
+#else
+        for (npy_intp i = 0; i < n; ++i) {
+            double d = data[i] - mean_val;
+            sq_sum += d * d;
+        }
+#endif
+        variance_val = sq_sum / (double)rcount;
+
+        NPY_END_ALLOW_THREADS
+    }
+
+    Py_DECREF(arr);
+    return PyFloat_FromDouble(variance_val);
+}
+
 /* Internal function to expose check_array_monotonic to python */
 NPY_NO_EXPORT PyObject *
 arr__monotonicity(PyObject *NPY_UNUSED(self), PyObject *args, PyObject *kwds)
