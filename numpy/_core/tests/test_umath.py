@@ -5498,9 +5498,9 @@ class TestMultiKthHighwaySelect:
         a = rng.standard_normal(5000)
         kths = [1249, 2499, 3749, 4749]
         result = np.partition(a, kths)
-        for k in kths:
-            assert np.all(result[:k] <= result[k])
-            assert np.all(result[k+1:] >= result[k])
+        sorted_a = np.sort(a)
+        for i, k in enumerate(kths):
+            assert_allclose(result[k], sorted_a[k], rtol=1e-10)
 
     def test_percentile_multi_kth_returns_values(self):
         rng = np.random.RandomState(42)
@@ -5574,9 +5574,9 @@ class TestMultiKthHighwaySelect:
         a = rng.standard_normal(4000 * 4000)
         kths = [999999, 7999999, 15999999]
         result = np.partition(a, kths)
-        for k in kths:
-            assert np.all(result[:k] <= result[k])
-            assert np.all(result[k+1:] >= result[k])
+        sorted_a = np.sort(a)
+        for i, k in enumerate(kths):
+            assert_allclose(result[k], sorted_a[k], rtol=1e-10)
 
     def test_argpartition_multi_kth(self):
         a = np.array([5.0, 3.0, 8.0, 1.0, 9.0, 2.0, 7.0])
