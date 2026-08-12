@@ -1257,6 +1257,7 @@ introselect_noarg(void *v, npy_intp num, npy_intp kth, npy_intp *pivots,
 #if NPY_ARM_SELECTION_TUNING
     if (nkth > 1 && num >= 1024) {
         npy_intp low = 0, high = num - 1;
+        npy_intp saved_npiv = (npiv != NULL) ? *npiv : 0;
         if (pivots != NULL && npiv != NULL) {
             while (*npiv > 0) {
                 if (pivots[*npiv - 1] > kth) {
@@ -1276,6 +1277,9 @@ introselect_noarg(void *v, npy_intp num, npy_intp kth, npy_intp *pivots,
                     (T *)((char *)v + low * sizeof(T)), span, kth - low)) {
             store_pivot(kth, kth, pivots, npiv);
             return 0;
+        }
+        if (npiv != NULL) {
+            *npiv = saved_npiv;
         }
     }
 #endif
