@@ -9,6 +9,56 @@
 #include <cmath>
 #include <cstring>
 
+#ifdef __aarch64__
+template <typename T>
+static inline bool
+all_zero_exponents(const char *src, npy_intp stride, npy_intp len)
+{
+    for (npy_intp i = 0; i < len; i++, src += stride) {
+        if (*(const T *)src != (T)0) {
+            return false;
+        }
+    }
+    return len != 0;
+}
+
+static inline bool
+all_tiny_double_exponents(const char *src, npy_intp stride, npy_intp len)
+{
+    for (npy_intp i = 0; i < len; i++, src += stride) {
+        if (!(npy_fabs(*(const npy_double *)src) < 0x1p-65)) {
+            return false;
+        }
+    }
+    return len != 0;
+}
+
+static inline bool
+all_large_float_exponents(const char *src, npy_intp stride, npy_intp len)
+{
+    for (npy_intp i = 0; i < len; i++, src += stride) {
+        if (!(npy_fabsf(*(const npy_float *)src) > 0x1p+12f)) {
+            return false;
+        }
+    }
+    return len != 0;
+}
+
+template <typename T>
+static inline bool
+all_finite_bases(const char *src, npy_intp stride, npy_intp len,
+                 bool require_positive)
+{
+    for (npy_intp i = 0; i < len; i++, src += stride) {
+        const T x = *(const T *)src;
+        if (!npy_isfinite(x) || (require_positive && !(x > (T)0))) {
+            return false;
+        }
+    }
+    return true;
+}
+#endif
+
 #if NPY_SIMD && defined(NPY_HAVE_AVX512_SKX) && defined(NPY_CAN_LINK_SVML)
 
 static void
@@ -329,54 +379,6 @@ HWY_INLINE auto IsZeroInfNan(D d, hn::Vec<hn::RebindToUnsigned<D>> i)
     VU one = hn::Set(du, 1);
     VU bound = hn::Set(du, 2u * 0x7ff0000000000000ULL - 1);
     return hn::Ge(hn::Sub(hn::Add(i, i), one), bound);
-}
-
-template <typename T>
-static inline bool
-all_zero_exponents(const char *src, npy_intp stride, npy_intp len)
-{
-    for (npy_intp i = 0; i < len; i++, src += stride) {
-        if (*(const T *)src != (T)0) {
-            return false;
-        }
-    }
-    return len != 0;
-}
-
-static inline bool
-all_tiny_double_exponents(const char *src, npy_intp stride, npy_intp len)
-{
-    for (npy_intp i = 0; i < len; i++, src += stride) {
-        if (!(npy_fabs(*(const npy_double *)src) < 0x1p-65)) {
-            return false;
-        }
-    }
-    return len != 0;
-}
-
-static inline bool
-all_large_float_exponents(const char *src, npy_intp stride, npy_intp len)
-{
-    for (npy_intp i = 0; i < len; i++, src += stride) {
-        if (!(npy_fabsf(*(const npy_float *)src) > 0x1p+12f)) {
-            return false;
-        }
-    }
-    return len != 0;
-}
-
-template <typename T>
-static inline bool
-all_finite_bases(const char *src, npy_intp stride, npy_intp len,
-                 bool require_positive)
-{
-    for (npy_intp i = 0; i < len; i++, src += stride) {
-        const T x = *(const T *)src;
-        if (!npy_isfinite(x) || (require_positive && !(x > (T)0))) {
-            return false;
-        }
-    }
-    return true;
 }
 
 // ============================================================
