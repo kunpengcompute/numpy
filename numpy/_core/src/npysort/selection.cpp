@@ -121,9 +121,10 @@ inline bool highway_quickselect_dispatch(T* v, npy_intp num, npy_intp kth)
 {
 #ifndef __CYGWIN__
 #if defined(__aarch64__) || defined(__powerpc64__) || defined(__PPC64__)
-    if constexpr (
-        (std::is_integral_v<T> || std::is_floating_point_v<T>) &&
-        (sizeof(T) == sizeof(uint32_t) || sizeof(T) == sizeof(uint64_t))) {
+    if constexpr (sizeof(T) == sizeof(uint64_t) &&
+            (std::is_same_v<T, double> ||
+             std::is_same_v<T, int64_t> ||
+             std::is_same_v<T, uint64_t>)) {
         using TF = typename np::meta::FixedWidth<T>::Type;
         void (*dispfunc)(TF*, npy_intp, npy_intp) = nullptr;
         #include "highway_qsort.dispatch.h"
