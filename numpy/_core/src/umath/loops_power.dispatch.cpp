@@ -331,6 +331,54 @@ HWY_INLINE auto IsZeroInfNan(D d, hn::Vec<hn::RebindToUnsigned<D>> i)
     return hn::Ge(hn::Sub(hn::Add(i, i), one), bound);
 }
 
+template <typename T>
+static inline bool
+all_zero_exponents(const char *src, npy_intp stride, npy_intp len)
+{
+    for (npy_intp i = 0; i < len; i++, src += stride) {
+        if (*(const T *)src != (T)0) {
+            return false;
+        }
+    }
+    return len != 0;
+}
+
+static inline bool
+all_tiny_double_exponents(const char *src, npy_intp stride, npy_intp len)
+{
+    for (npy_intp i = 0; i < len; i++, src += stride) {
+        if (!(npy_fabs(*(const npy_double *)src) < 0x1p-65)) {
+            return false;
+        }
+    }
+    return len != 0;
+}
+
+static inline bool
+all_large_float_exponents(const char *src, npy_intp stride, npy_intp len)
+{
+    for (npy_intp i = 0; i < len; i++, src += stride) {
+        if (!(npy_fabsf(*(const npy_float *)src) > 0x1p+12f)) {
+            return false;
+        }
+    }
+    return len != 0;
+}
+
+template <typename T>
+static inline bool
+all_finite_bases(const char *src, npy_intp stride, npy_intp len,
+                 bool require_positive)
+{
+    for (npy_intp i = 0; i < len; i++, src += stride) {
+        const T x = *(const T *)src;
+        if (!npy_isfinite(x) || (require_positive && !(x > (T)0))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // ============================================================
 // Double-precision log - matching SVE sv_log_inline
 // ============================================================
@@ -497,20 +545,20 @@ HWY_INLINE hn::Vec<D> v_exp_inline_hwy(D d, hn::Vec<D> x, hn::Vec<D> xtail,
     VU sbits;
     hn::Vec<hn::RebindToSigned<D>> ki;
     if (HWY_UNLIKELY(!hn::AllFalse(du, uoflow))) {
-        VD z = ExpCore(d, x, xtail, sign_bias, &tmp, &sbits, &ki);
-
         // |x| is tiny (|x| <= 0x1p-54).
         auto uflow = hn::Ge(hn::Sub(abstop, hn::Set(du, V_POW_SMALL_EXP)), hn::Set(du, 0x80000000ULL));
         uflow = hn::And(uoflow, uflow);
-        if ((!hn::AllFalse(du, uflow))) {
-            npy_set_floatstatus_underflow();
-        }
         // |x| is huge (|x| >= 1024).
         auto oflow = hn::Ge(abstop, hn::Set(du, V_POW_HUGE_EXP));
         oflow = hn::And(uoflow, hn::AndNot(uflow, oflow));
-        if ((!hn::AllFalse(du, oflow))) {
-            npy_set_floatstatus_overflow();
-        }
+
+        // Do not feed huge lanes to ExpCore: constructing their scale can
+        // raise an exception opposite to the final result.
+        VD core_x = hn::IfThenElse(hn::RebindMask(d, oflow), hn::Zero(d), x);
+        VD core_xtail = hn::IfThenElse(
+                hn::RebindMask(d, oflow), hn::Zero(d), xtail);
+        VD z = ExpCore(d, core_x, core_xtail, sign_bias, &tmp, &sbits, &ki);
+
         // Handle scale*(1+TMP) overflow for intermediate values
         auto special = hn::AndNot(hn::Or(uflow, oflow), uoflow);
         if (HWY_UNLIKELY(!hn::AllFalse(du, special))) {
@@ -520,6 +568,14 @@ HWY_INLINE hn::Vec<D> v_exp_inline_hwy(D d, hn::Vec<D> x, hn::Vec<D> xtail,
         // For huge values, return inf directly without calling ExpCore
         // (ExpCore would overflow the exponent shift into the sign bit)
         auto x_is_neg = hn::Lt(x, hn::Zero(d));
+        auto oflow_neg = hn::And(oflow, hn::RebindMask(du, x_is_neg));
+        if (HWY_UNLIKELY(!hn::AllFalse(du, oflow_neg))) {
+            npy_set_floatstatus_underflow();
+        }
+        if (HWY_UNLIKELY(!hn::AllFalse(
+                du, hn::AndNot(oflow_neg, oflow)))) {
+            npy_set_floatstatus_overflow();
+        }
         VU sign_mask = hn::ShiftLeft<52 - V_POW_EXP_TABLE_BITS>(sign_bias);
         VD res_oflow = hn::IfThenElse(x_is_neg, hn::Zero(d), hn::Set(d, NPY_INFINITY));
         res_oflow = hn::BitCast(d, hn::Or(hn::BitCast(du, res_oflow), sign_mask));
@@ -1038,6 +1094,17 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_power)
 {
     POWER_FAST_PATH(DOUBLE, npy_double, npy_sqrt)
 
+#ifdef __aarch64__
+    if (all_tiny_double_exponents(args[1], steps[1], dimensions[0]) &&
+            all_finite_bases<npy_double>(
+                    args[0], steps[0], dimensions[0], true)) {
+        BINARY_LOOP {
+            *(npy_double *)op1 = 1.0;
+        }
+        return;
+    }
+#endif
+
 #if NPY_SIMD && defined(NPY_HAVE_AVX512_SKX) && defined(NPY_CAN_LINK_SVML)
     const npy_intp len = dimensions[0];
     const npy_double *src1 = (npy_double*)args[0];
@@ -1087,43 +1154,65 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_power)
 {
     POWER_FAST_PATH(FLOAT, npy_float, npy_sqrtf)
 
-#if NPY_SIMD && defined(NPY_HAVE_AVX512_SKX) && defined(NPY_CAN_LINK_SVML)
-    const npy_intp len = dimensions[0];
-    const npy_float *src1 = (npy_float*)args[0];
-    const npy_float *src2 = (npy_float*)args[1];
-          npy_float *dst  = (npy_float*)args[2];
-
-    if (!is_mem_overlap(src1, steps[0], dst, steps[2], len) &&
-        !is_mem_overlap(src2, steps[1], dst, steps[2], len) &&
-        npyv_loadable_stride_f32(steps[0]) &&
-        npyv_loadable_stride_f32(steps[1]) &&
-        npyv_storable_stride_f32(steps[2])
-    ) {
-        const npy_intp ssrc1 = steps[0] / sizeof(npy_float);
-        const npy_intp ssrc2 = steps[1] / sizeof(npy_float);
-        const npy_intp sdst  = steps[2] / sizeof(npy_float);
-
-        simd_pow_f32(src1, ssrc1, src2, ssrc2, dst, sdst, len);
+#ifdef __aarch64__
+    if (all_zero_exponents<npy_float>(
+                args[1], steps[1], dimensions[0]) &&
+            all_finite_bases<npy_float>(
+                args[0], steps[0], dimensions[0], false)) {
+        BINARY_LOOP {
+            *(npy_float *)op1 = 1.0f;
+        }
         return;
     }
-#elif NPY_SIMD_FMA3
-    const npy_intp len = dimensions[0];
-    const npy_float *src1_hwy = (npy_float*)args[0];
-    const npy_float *src2_hwy = (npy_float*)args[1];
-          npy_float *dst_hwy  = (npy_float*)args[2];
-
-    if (!is_mem_overlap(src1_hwy, steps[0], dst_hwy, steps[2], len) &&
-        !is_mem_overlap(src2_hwy, steps[1], dst_hwy, steps[2], len))
-    {
-        const npy_intp ssrc1 = steps[0] / sizeof(npy_float);
-        const npy_intp ssrc2 = steps[1] / sizeof(npy_float);
-        const npy_intp sdst  = steps[2] / sizeof(npy_float);
-
-        simd_power<npy_float>(src1_hwy, ssrc1, src2_hwy, ssrc2, dst_hwy, sdst, len);
-        return;
+    if (all_large_float_exponents(
+                args[1], steps[1], dimensions[0])) {
+        goto scalar;
     }
 #endif
 
+#if NPY_SIMD && defined(NPY_HAVE_AVX512_SKX) && defined(NPY_CAN_LINK_SVML)
+    {
+        const npy_intp len = dimensions[0];
+        const npy_float *src1 = (npy_float*)args[0];
+        const npy_float *src2 = (npy_float*)args[1];
+              npy_float *dst  = (npy_float*)args[2];
+
+        if (!is_mem_overlap(src1, steps[0], dst, steps[2], len) &&
+            !is_mem_overlap(src2, steps[1], dst, steps[2], len) &&
+            npyv_loadable_stride_f32(steps[0]) &&
+            npyv_loadable_stride_f32(steps[1]) &&
+            npyv_storable_stride_f32(steps[2])
+        ) {
+            const npy_intp ssrc1 = steps[0] / sizeof(npy_float);
+            const npy_intp ssrc2 = steps[1] / sizeof(npy_float);
+            const npy_intp sdst  = steps[2] / sizeof(npy_float);
+
+            simd_pow_f32(src1, ssrc1, src2, ssrc2, dst, sdst, len);
+            return;
+        }
+    }
+#elif NPY_SIMD_FMA3
+    {
+        const npy_intp len = dimensions[0];
+        const npy_float *src1_hwy = (npy_float*)args[0];
+        const npy_float *src2_hwy = (npy_float*)args[1];
+              npy_float *dst_hwy  = (npy_float*)args[2];
+
+        if (!is_mem_overlap(src1_hwy, steps[0], dst_hwy, steps[2], len) &&
+            !is_mem_overlap(src2_hwy, steps[1], dst_hwy, steps[2], len))
+        {
+            const npy_intp ssrc1 = steps[0] / sizeof(npy_float);
+            const npy_intp ssrc2 = steps[1] / sizeof(npy_float);
+            const npy_intp sdst  = steps[2] / sizeof(npy_float);
+
+            simd_power<npy_float>(src1_hwy, ssrc1, src2_hwy, ssrc2,
+                                  dst_hwy, sdst, len);
+            return;
+        }
+    }
+#endif
+
+scalar:
     BINARY_LOOP {
         const npy_float in1 = *(npy_float *)ip1;
         const npy_float in2 = *(npy_float *)ip2;

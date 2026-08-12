@@ -1086,6 +1086,50 @@ class TestCbrt:
 
 
 class TestPower:
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_float_power_array_zero_exponent(self, dtype):
+        base = np.linspace(0.5, 2.0, 100, dtype=dtype)
+        exponent = np.zeros(100, dtype=dtype)
+        with np.errstate(all="raise"):
+            assert_array_equal(np.power(base, exponent), np.ones_like(base))
+
+    @pytest.mark.parametrize(
+        "dtype,tiny_exponent", [(np.float32, 2.0**-30),
+                                  (np.float64, 2.0**-70)])
+    def test_float_power_tiny_exponent_no_underflow(self, dtype,
+                                                    tiny_exponent):
+        base = np.full(100, 2.0, dtype=dtype)
+        exponent = np.full(100, tiny_exponent, dtype=dtype)
+        with np.errstate(all="raise"):
+            result = np.power(base, exponent)
+        assert_array_equal(result, np.ones_like(base))
+
+    def test_float_power_mixed_tiny_exponent_lanes(self):
+        base = np.linspace(0.5, 2.0, 16, dtype=np.float64)
+        exponent = np.linspace(-2.0, 2.0, 16, dtype=np.float64)
+        exponent[::2] = 2.0**-70
+        with np.errstate(all="raise"):
+            result = np.power(base, exponent)
+        assert_array_equal(result[::2], np.ones(8))
+        assert_allclose(result[1::2], base[1::2] ** exponent[1::2],
+                        rtol=1e-14)
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_float_power_overflow_status(self, dtype):
+        base = np.full(100, 2.0, dtype=dtype)
+        exponent = np.full(100, 10000.0, dtype=dtype)
+        with np.errstate(all="raise"):
+            with pytest.raises(FloatingPointError, match="overflow"):
+                np.power(base, exponent)
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_float_power_underflow_status(self, dtype):
+        base = np.full(100, 2.0, dtype=dtype)
+        exponent = np.full(100, -10000.0, dtype=dtype)
+        with np.errstate(all="raise"):
+            with pytest.raises(FloatingPointError, match="underflow"):
+                np.power(base, exponent)
+
     def test_power_float(self):
         x = np.array([1., 2., 3.])
         assert_equal(x**0, [1., 1., 1.])
