@@ -556,6 +556,7 @@ unguarded_partition_(type *v, npy_intp *tosort, const type pivot, npy_intp *ll,
     Idx<arg> idx(tosort);
     Sortee<type, arg> sortee(v, tosort);
 
+#if NPY_ARM_SELECTION_TUNING
     /*
      * Fast path for real floating-point types when pivot is not NaN.
      *
@@ -575,6 +576,11 @@ unguarded_partition_(type *v, npy_intp *tosort, const type pivot, npy_intp *ll,
      * DOUBLE_LT. Each comparison drops from potentially 5 instructions
      * (fcmpe + b.gt/b.mi + fcmp + fccmp + b.eq/b.ne) to just 2
      * (fcmpe + b.gt or fcmpe + b.lt).
+     *
+     * ARM-only: the instruction savings above are specific to the ARM
+     * (fcmp/fccmp) instruction set.  On x86 the compiler generates
+     * different code for DOUBLE_LT and the overhead is negligible, so
+     * this fast path is guarded to avoid affecting x86 (9654) execution.
      *
      * Only enabled for real floating-point types (float, double, long double).
      * Complex types lack operator<, operator>=, and npy_isnan.
@@ -598,6 +604,7 @@ unguarded_partition_(type *v, npy_intp *tosort, const type pivot, npy_intp *ll,
             return;
         }
     }
+#endif
 
     for (;;) {
         do {
