@@ -838,10 +838,7 @@ def histogram(a, bins=10, range=None, density=None, weights=None):
             with np.errstate(over='ignore', divide='ignore'):
                 norm_factor = norm_numerator / norm_denom
             norm_factor_safe = np.isfinite(norm_factor)
-        else:
-            norm_factor = norm_numerator / norm_denom
-            norm_factor_safe = True
-        
+
         if fast_float_index:
             edge_tol = 16 * np.finfo(bin_edges.dtype).eps * n_equal_bins
         else:
