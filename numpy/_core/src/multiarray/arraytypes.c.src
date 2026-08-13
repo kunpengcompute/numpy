@@ -4518,6 +4518,9 @@ set_typeinfo(PyObject *dict)
 
     // SIMD runtime dispatching
     #include "argfunc.dispatch.h"
+    #ifdef __aarch64__
+    #include "highway_argfunc.dispatch.h"
+    #endif
     /**begin repeat
      * #FROM = BYTE, UBYTE, SHORT, USHORT, INT, UINT,
      *         LONG, ULONG, LONGLONG, ULONGLONG,
