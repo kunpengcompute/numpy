@@ -9,7 +9,8 @@
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
 
-#if NPY_SIMD
+// Skip NumPy SIMD kernels for SVE targets (handled by highway_argfunc.dispatch.cpp)
+#if NPY_SIMD && !defined(NPY_HAVE_SVE)
 #if NPY_SIMD > 512 || NPY_SIMD < 0
     #error "the following 8/16-bit argmax kernel isn't applicable for larger SIMD"
     // TODO: add special loop for large SIMD width.
@@ -109,7 +110,63 @@ simd_@func@_@sfx@(npyv_lanetype_@sfx@ *ip, npy_intp len)
 }
 /**end repeat1**/
 /**end repeat**/
+
 #endif
+
+#ifndef __aarch64__
+
+NPY_NO_EXPORT int NPY_CPU_DISPATCH_CURFX(BOOL_argmax)
+(npy_bool *ip, npy_intp len, npy_intp *mindx, PyArrayObject *NPY_UNUSED(aip))
+
+{
+    npy_intp i = 0;
+#if NPY_SIMD
+    const npyv_u8 zero = npyv_zero_u8();
+    const int vstep = npyv_nlanes_u8;
+    const int wstep = vstep * 4;
+    for (npy_intp n = len & -wstep; i < n; i += wstep) {
+        npyv_u8 a = npyv_load_u8(ip + i + vstep*0);
+        npyv_u8 b = npyv_load_u8(ip + i + vstep*1);
+        npyv_u8 c = npyv_load_u8(ip + i + vstep*2);
+        npyv_u8 d = npyv_load_u8(ip + i + vstep*3);
+        npyv_b8 m_a = npyv_cmpeq_u8(a, zero);
+        npyv_b8 m_b = npyv_cmpeq_u8(b, zero);
+        npyv_b8 m_c = npyv_cmpeq_u8(c, zero);
+        npyv_b8 m_d = npyv_cmpeq_u8(d, zero);
+        npyv_b8 m_ab = npyv_and_b8(m_a, m_b);
+        npyv_b8 m_cd = npyv_and_b8(m_c, m_d);
+        npy_uint64 m = npyv_tobits_b8(npyv_and_b8(m_ab, m_cd));
+    #if NPY_SIMD == 512
+        if (m != NPY_MAX_UINT64) {
+    #else
+        if ((npy_int64)m != ((1LL << vstep) - 1)) {
+    #endif
+            break;
+        }
+    }
+    npyv_cleanup();
+#endif // NPY_SIMD
+    for (; i < len; ++i) {
+        if (ip[i]) {
+            *mindx = i;
+            return 0;
+        }
+    }
+    *mindx = 0;
+    return 0;
+}
+
+NPY_NO_EXPORT int NPY_CPU_DISPATCH_CURFX(BOOL_argmin)
+(npy_bool *ip, npy_intp len, npy_intp *mindx, PyArrayObject *NPY_UNUSED(aip))
+{
+    npy_bool *p = (npy_bool *)memchr(ip, 0, len * sizeof(*ip));
+    if (p == NULL) {
+        *mindx = 0;
+        return 0;
+    }
+    *mindx = p - ip;
+    return 0;
+}
 
 /**begin repeat
  * #sfx = u32, s32, u64, s64, f32, f64#
@@ -349,55 +406,4 @@ NPY_NO_EXPORT int NPY_CPU_DISPATCH_CURFX(@TYPE@_@func@)
 /**end repeat1**/
 /**end repeat**/
 
-NPY_NO_EXPORT int NPY_CPU_DISPATCH_CURFX(BOOL_argmax)
-(npy_bool *ip, npy_intp len, npy_intp *mindx, PyArrayObject *NPY_UNUSED(aip))
-
-{
-    npy_intp i = 0;
-#if NPY_SIMD
-    const npyv_u8 zero = npyv_zero_u8();
-    const int vstep = npyv_nlanes_u8;
-    const int wstep = vstep * 4;
-    for (npy_intp n = len & -wstep; i < n; i += wstep) {
-        npyv_u8 a = npyv_load_u8(ip + i + vstep*0);
-        npyv_u8 b = npyv_load_u8(ip + i + vstep*1);
-        npyv_u8 c = npyv_load_u8(ip + i + vstep*2);
-        npyv_u8 d = npyv_load_u8(ip + i + vstep*3);
-        npyv_b8 m_a = npyv_cmpeq_u8(a, zero);
-        npyv_b8 m_b = npyv_cmpeq_u8(b, zero);
-        npyv_b8 m_c = npyv_cmpeq_u8(c, zero);
-        npyv_b8 m_d = npyv_cmpeq_u8(d, zero);
-        npyv_b8 m_ab = npyv_and_b8(m_a, m_b);
-        npyv_b8 m_cd = npyv_and_b8(m_c, m_d);
-        npy_uint64 m = npyv_tobits_b8(npyv_and_b8(m_ab, m_cd));
-    #if NPY_SIMD == 512
-        if (m != NPY_MAX_UINT64) {
-    #else
-        if ((npy_int64)m != ((1LL << vstep) - 1)) {
-    #endif
-            break;
-        }
-    }
-    npyv_cleanup();
-#endif // NPY_SIMD
-    for (; i < len; ++i) {
-        if (ip[i]) {
-            *mindx = i;
-            return 0;
-        }
-    }
-    *mindx = 0;
-    return 0;
-}
-
-NPY_NO_EXPORT int NPY_CPU_DISPATCH_CURFX(BOOL_argmin)
-(npy_bool *ip, npy_intp len, npy_intp *mindx, PyArrayObject *NPY_UNUSED(aip))
-{
-    npy_bool *p = (npy_bool *)memchr(ip, 0, len * sizeof(*ip));
-    if (p == NULL) {
-        *mindx = 0;
-        return 0;
-    }
-    *mindx = p - ip;
-    return 0;
-}
+#endif
