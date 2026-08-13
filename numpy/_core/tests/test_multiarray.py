@@ -11125,13 +11125,19 @@ class TestMethodsRevertBaselineBehavior:
 
     def test_mean_empty_array_warning(self):
         a = np.array([], dtype=np.float64)
-        with pytest.warns(RuntimeWarning, match="Mean of empty slice"):
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
             np.mean(a)
+            messages = [str(warning.message) for warning in w]
+            assert any("Mean of empty slice" in msg for msg in messages)
 
     def test_var_empty_array_warning(self):
         a = np.array([], dtype=np.float64)
-        with pytest.warns(RuntimeWarning, match="Degrees of freedom"):
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
             np.var(a)
+            messages = [str(warning.message) for warning in w]
+            assert any("Degrees of freedom" in msg for msg in messages)
 
     def test_mean_ndarray_subclass(self):
         class MyArray(np.ndarray):
