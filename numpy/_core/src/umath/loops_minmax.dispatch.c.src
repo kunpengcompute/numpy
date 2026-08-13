@@ -469,9 +469,8 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
     #if defined(__aarch64__)
             npy_intp s1 = is1 / sizeof(STYPE);
             npy_intp s2 = is2 / sizeof(STYPE);
-            if ((s1 == 1 && s2 == 1) ||
-                (s1 == 1 && s2 == 0) ||
-                (s1 == 0 && s2 == 1))
+            npy_intp s3 = os1 / sizeof(STYPE);
+            if (((s1 == 0 && s2 == 1) || (s1 == 1 && s2 == 0)) && s3 == 1)
     #endif
             {
                 TO_SIMD_SFX(simd_binary_@intrin@)(
