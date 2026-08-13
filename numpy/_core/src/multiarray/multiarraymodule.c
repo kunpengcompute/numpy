@@ -4665,6 +4665,8 @@ static struct PyMethodDef array_module_methods[] = {
         METH_FASTCALL | METH_KEYWORDS, NULL},
     {"_histogramdd_uniform2d", (PyCFunction)arr_histogramdd_uniform2d,
         METH_FASTCALL | METH_KEYWORDS, NULL},
+    {"_fused_var_double_contig", (PyCFunction)arr_fused_var_double_contig,
+        METH_FASTCALL | METH_KEYWORDS, NULL},
     {"_monotonicity", (PyCFunction)arr__monotonicity,
         METH_VARARGS | METH_KEYWORDS, NULL},
     {"interp", (PyCFunction)arr_interp,

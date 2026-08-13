@@ -32,6 +32,14 @@ _IS_ARM = (
     _machine.startswith(("armv", "arm-"))
 )
 
+try:
+    from numpy._core._multiarray_umath import __cpu_features__, _fused_var_double_contig
+    _HAS_ARM_SIMD = (__cpu_features__.get('ASIMD', False) or
+                     __cpu_features__.get('SVE', False))
+except (ImportError, AttributeError):
+    _HAS_ARM_SIMD = False
+    _fused_var_double_contig = None
+
 # Complex types to -> (2,)float view for fast-path computation in _var()
 _complex_to_float = {
     nt.dtype(nt.csingle): nt.dtype(nt.single),
@@ -188,6 +196,20 @@ def _var(a, axis=None, dtype=None, out=None, ddof=0, keepdims=False, *,
             if keepdims:
                 return mu.zeros((1,) * arr.ndim, dtype=dtype or arr.dtype)
             return (dtype or arr.dtype).type(0)
+
+    if (_HAS_ARM_SIMD and _fused_var_double_contig is not None and
+            dtype is None and mean is None and where is True and ddof == 0 and
+            axis is None and arr.ndim == 1 and
+            arr.size > 0 and arr.flags.c_contiguous and
+            arr.dtype == np.dtype(np.float64) and
+            not isinstance(arr, np.matrix)):
+        var_val = _fused_var_double_contig(arr, ddof)
+        if out is not None:
+            out[...] = var_val
+            return out
+        if keepdims:
+            return mu.array([var_val], dtype=np.float64).reshape((1,) * arr.ndim)
+        return np.float64(var_val)
 
     if mean is not None:
         arrmean = mean

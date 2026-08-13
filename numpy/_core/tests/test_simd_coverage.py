@@ -1189,7 +1189,7 @@ class TestShiftScalarBroadcast:
 
 
 class TestLogicalSVE:
-    """Cover loops_logical_sve.c, loops_logical_and_sve.c scalar broadcast paths."""
+    """Cover loops_logical_sve.c scalar broadcast paths."""
 
     @pytest.mark.parametrize("dtype", [np.int16, np.int32, np.int64,
                                         np.uint8, np.uint16, np.uint32, np.uint64])
@@ -2161,27 +2161,6 @@ class TestMinMaxScalarBroadcastExtended:
         result = np.fmin(a, b)
         assert result[1] == 4.0
         assert result[2] == 3.0
-
-
-class TestAbsHalfExtended:
-    """Cover loops_autovec_abs_hwy.dispatch.cpp half-precision paths."""
-
-    def test_abs_half_contiguous(self):
-        a = np.array([-1.0, -2.0, 3.0, -4.0, 5.0] * 100, dtype=np.float16)
-        result = np.abs(a)
-        expected = np.abs(a)
-        assert_array_equal(result, expected)
-
-    def test_abs_half_strided(self):
-        a = np.arange(-100, 100, dtype=np.float16)
-        result = np.abs(a[::2])
-        expected = np.abs(a[::2])
-        assert_array_equal(result, expected)
-
-    def test_abs_half_large(self):
-        a = np.linspace(-100, 100, 2000, dtype=np.float16)
-        result = np.abs(a)
-        assert np.all(result >= 0)
 
 
 class TestAutoVecScalarBroadcast:

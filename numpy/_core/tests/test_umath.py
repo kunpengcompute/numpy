@@ -1086,6 +1086,50 @@ class TestCbrt:
 
 
 class TestPower:
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_float_power_array_zero_exponent(self, dtype):
+        base = np.linspace(0.5, 2.0, 100, dtype=dtype)
+        exponent = np.zeros(100, dtype=dtype)
+        with np.errstate(all="raise"):
+            assert_array_equal(np.power(base, exponent), np.ones_like(base))
+
+    @pytest.mark.parametrize(
+        "dtype,tiny_exponent", [(np.float32, 2.0**-30),
+                                  (np.float64, 2.0**-70)])
+    def test_float_power_tiny_exponent_no_underflow(self, dtype,
+                                                    tiny_exponent):
+        base = np.full(100, 2.0, dtype=dtype)
+        exponent = np.full(100, tiny_exponent, dtype=dtype)
+        with np.errstate(all="raise"):
+            result = np.power(base, exponent)
+        assert_array_equal(result, np.ones_like(base))
+
+    def test_float_power_mixed_tiny_exponent_lanes(self):
+        base = np.linspace(0.5, 2.0, 16, dtype=np.float64)
+        exponent = np.linspace(-2.0, 2.0, 16, dtype=np.float64)
+        exponent[::2] = 2.0**-70
+        with np.errstate(all="raise"):
+            result = np.power(base, exponent)
+        assert_array_equal(result[::2], np.ones(8))
+        assert_allclose(result[1::2], base[1::2] ** exponent[1::2],
+                        rtol=1e-14)
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_float_power_overflow_status(self, dtype):
+        base = np.full(100, 2.0, dtype=dtype)
+        exponent = np.full(100, 10000.0, dtype=dtype)
+        with np.errstate(all="raise"):
+            with pytest.raises(FloatingPointError, match="overflow"):
+                np.power(base, exponent)
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_float_power_underflow_status(self, dtype):
+        base = np.full(100, 2.0, dtype=dtype)
+        exponent = np.full(100, -10000.0, dtype=dtype)
+        with np.errstate(all="raise"):
+            with pytest.raises(FloatingPointError, match="underflow"):
+                np.power(base, exponent)
+
     def test_power_float(self):
         x = np.array([1., 2., 3.])
         assert_equal(x**0, [1., 1., 1.])
@@ -5262,3 +5306,326 @@ class TestScalarMathUfuncNormalPath:
         a = np.array([0.0, np.pi / 2, np.pi], dtype=np.float64)
         result = np.cos(a)
         assert_allclose(result, [1.0, 0.0, -1.0], atol=1e-15)
+
+
+class TestFusedVarDoubleContig:
+    """Tests for the ARM fused variance fast path."""
+
+    def test_var_basic(self):
+        a = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
+        assert_allclose(np.var(a), 2.0)
+
+    def test_var_large_random(self):
+        rng = np.random.RandomState(42)
+        a = rng.standard_normal(10000)
+        expected = ((a - a.mean()) ** 2).mean()
+        result = np.var(a)
+        assert_allclose(result, expected, rtol=1e-12)
+
+    def test_var_ddof_zero(self):
+        rng = np.random.RandomState(42)
+        a = rng.standard_normal(5000)
+        expected = ((a - a.mean()) ** 2).sum() / len(a)
+        result = np.var(a, ddof=0)
+        assert_allclose(result, expected, rtol=1e-12)
+
+    def test_var_ddof_nonzero_skips_fastpath(self):
+        rng = np.random.RandomState(42)
+        a = rng.standard_normal(5000)
+        expected = ((a - a.mean()) ** 2).sum() / (len(a) - 1)
+        result = np.var(a, ddof=1)
+        assert_allclose(result, expected, rtol=1e-12)
+
+    def test_std_basic(self):
+        a = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
+        assert_allclose(np.std(a), np.sqrt(2.0))
+
+    def test_std_large(self):
+        rng = np.random.RandomState(42)
+        a = rng.standard_normal(100000)
+        expected = np.sqrt(((a - a.mean()) ** 2).mean())
+        result = np.std(a)
+        assert_allclose(result, expected, rtol=1e-12)
+
+    def test_var_out_param(self):
+        a = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
+        out = np.empty((), dtype=np.float64)
+        result = np.var(a, out=out)
+        assert result is out
+        assert_allclose(out, 2.0)
+
+    def test_var_keepdims(self):
+        a = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
+        result = np.var(a, keepdims=True)
+        assert result.shape == (1,)
+        assert_allclose(result, [2.0])
+
+    def test_var_float32_not_fastpath(self):
+        a = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float32)
+        result = np.var(a)
+        assert_allclose(result, 2.0)
+
+    def test_var_dtype_param_not_fastpath(self):
+        a = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
+        result = np.var(a, dtype=np.float32)
+        assert result.dtype == np.float32
+        assert_allclose(result, 2.0)
+
+    def test_var_non_contiguous_not_fastpath(self):
+        full = np.arange(100, dtype=np.float64).reshape(10, 10)
+        sl = full[:, ::2]
+        expected = np.var(sl.copy())
+        result = np.var(sl)
+        assert_allclose(result, expected)
+
+    def test_var_2d_not_fastpath(self):
+        a = np.arange(100, dtype=np.float64).reshape(10, 10)
+        result = np.var(a)
+        expected = np.var(a.ravel())
+        assert_allclose(result, expected)
+
+    def test_var_with_axis_not_fastpath(self):
+        a = np.arange(100, dtype=np.float64).reshape(10, 10)
+        result = np.var(a, axis=0)
+        expected = np.var(a, axis=0)
+        assert_allclose(result, expected)
+
+    def test_var_single_element(self):
+        a = np.array([42.0], dtype=np.float64)
+        assert np.var(a) == 0.0
+
+    def test_var_constant_array(self):
+        a = np.full(1000, 3.14, dtype=np.float64)
+        assert_allclose(np.var(a), 0.0, atol=1e-25)
+
+    def test_var_negative_values(self):
+        a = np.array([-1.0, -2.0, -3.0, -4.0, -5.0], dtype=np.float64)
+        assert_allclose(np.var(a), 2.0)
+
+    def test_var_mixed_sign(self):
+        a = np.array([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=np.float64)
+        assert_allclose(np.var(a), 2.0)
+
+    def test_var_large_16m(self):
+        rng = np.random.RandomState(42)
+        a = rng.standard_normal(4000 * 4000)
+        expected = ((a - a.mean()) ** 2).mean()
+        result = np.var(a)
+        assert_allclose(result, expected, rtol=1e-10)
+
+    def test_fused_var_c_direct(self):
+        try:
+            from numpy._core._multiarray_umath import _fused_var_double_contig
+        except ImportError:
+            pytest.skip("_fused_var_double_contig not available")
+        a = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
+        assert_allclose(_fused_var_double_contig(a, 0), 2.0)
+
+    def test_fused_var_c_ddof(self):
+        try:
+            from numpy._core._multiarray_umath import _fused_var_double_contig
+        except ImportError:
+            pytest.skip("_fused_var_double_contig not available")
+        a = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
+        assert_allclose(_fused_var_double_contig(a, 1), 2.5)
+
+    def test_fused_var_c_empty_raises(self):
+        try:
+            from numpy._core._multiarray_umath import _fused_var_double_contig
+        except ImportError:
+            pytest.skip("_fused_var_double_contig not available")
+        a = np.array([], dtype=np.float64)
+        with pytest.raises(ValueError, match="empty"):
+            _fused_var_double_contig(a, 0)
+
+    def test_var_where_param_not_fastpath(self):
+        a = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
+        mask = np.array([True, True, False, True, True])
+        result = np.var(a, where=mask)
+        expected = np.var(a[mask])
+        assert_allclose(result, expected)
+
+    def test_var_mean_param_not_fastpath(self):
+        a = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
+        m = np.mean(a)
+        result = np.var(a, mean=m)
+        expected = np.var(a)
+        assert_allclose(result, expected)
+
+    def test_fused_var_c_invalid_ddof_raises(self):
+        try:
+            from numpy._core._multiarray_umath import _fused_var_double_contig
+        except ImportError:
+            pytest.skip("_fused_var_double_contig not available")
+        a = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+        with pytest.raises(TypeError, match="cannot be interpreted"):
+            _fused_var_double_contig(a, 'abc')
+
+    def test_fused_var_c_ddof_too_large_raises(self):
+        try:
+            from numpy._core._multiarray_umath import _fused_var_double_contig
+        except ImportError:
+            pytest.skip("_fused_var_double_contig not available")
+        a = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+        with pytest.raises(ValueError, match="ddof"):
+            _fused_var_double_contig(a, 3)
+
+    def test_fused_var_c_invalid_array_raises(self):
+        try:
+            from numpy._core._multiarray_umath import _fused_var_double_contig
+        except ImportError:
+            pytest.skip("_fused_var_double_contig not available")
+        with pytest.raises((ValueError, TypeError)):
+            _fused_var_double_contig("not_an_array", 0)
+
+    def test_has_arm_simd_attribute(self):
+        import numpy._core._methods as m
+        assert hasattr(m, '_HAS_ARM_SIMD')
+        assert isinstance(m._HAS_ARM_SIMD, bool)
+
+    def test_fused_var_module_available(self):
+        try:
+            from numpy._core._multiarray_umath import _fused_var_double_contig
+            assert _fused_var_double_contig is not None
+        except ImportError:
+            pass
+
+    def test_fused_var_c_missing_ddof_raises(self):
+        try:
+            from numpy._core._multiarray_umath import _fused_var_double_contig
+        except ImportError:
+            pytest.skip("_fused_var_double_contig not available")
+        a = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+        with pytest.raises(TypeError, match="missing required"):
+            _fused_var_double_contig(a)
+
+    def test_has_arm_simd_except_path_coverage(self):
+        import importlib
+        import numpy._core._methods as impl
+        original_has_arm_simd = impl._HAS_ARM_SIMD
+        import numpy._core._multiarray_umath as ma
+        original_cpu_features = getattr(ma, '__cpu_features__', None)
+        try:
+            if hasattr(ma, '__cpu_features__'):
+                del ma.__cpu_features__
+            importlib.reload(impl)
+            assert impl._HAS_ARM_SIMD is False
+            assert impl._fused_var_double_contig is None
+        finally:
+            if original_cpu_features is not None:
+                ma.__cpu_features__ = original_cpu_features
+            importlib.reload(impl)
+        assert impl._HAS_ARM_SIMD == original_has_arm_simd
+
+
+class TestMultiKthHighwaySelect:
+    """Tests for multi-kth Highway QSelect dispatch on ARM."""
+
+    def test_partition_multi_kth_float64(self):
+        a = np.array([5.0, 3.0, 8.0, 1.0, 9.0, 2.0, 7.0, 4.0, 6.0, 10.0])
+        kths = [2, 4, 7]
+        result = np.partition(a, kths)
+        for k in kths:
+            assert np.all(result[:k] <= result[k])
+            assert np.all(result[k+1:] >= result[k])
+
+    def test_partition_multi_kth_int64(self):
+        a = np.arange(100, dtype=np.int64)[::-1]
+        kths = [24, 49, 74]
+        result = np.partition(a, kths)
+        for k in kths:
+            assert np.all(result[:k] <= result[k])
+            assert np.all(result[k+1:] >= result[k])
+
+    def test_partition_multi_kth_large_random(self):
+        rng = np.random.RandomState(42)
+        a = rng.standard_normal(5000)
+        kths = [1249, 2499, 3749, 4749]
+        result = np.partition(a, kths)
+        sorted_a = np.sort(a)
+        for i, k in enumerate(kths):
+            assert_allclose(result[k], sorted_a[k], rtol=1e-10)
+
+    def test_percentile_multi_kth_returns_values(self):
+        rng = np.random.RandomState(42)
+        a = rng.standard_normal(2000)
+        result = np.percentile(a, [25, 50, 75, 95, 99])
+        assert len(result) == 5
+        assert result[0] <= result[1] <= result[2] <= result[3] <= result[4]
+
+    def test_partition_single_kth_not_affected(self):
+        a = np.array([5.0, 3.0, 8.0, 1.0, 9.0])
+        result = np.partition(a, 2)
+        assert np.all(result[:2] <= result[2])
+        assert np.all(result[3:] >= result[2])
+
+    def test_partition_small_array_not_fastpath(self):
+        a = np.array([5.0, 3.0, 8.0, 1.0])
+        result = np.partition(a, [1, 2])
+        for k in [1, 2]:
+            assert np.all(result[:k] <= result[k])
+            assert np.all(result[k+1:] >= result[k])
+
+    def test_partition_multi_kth_float32(self):
+        a = np.array([5.0, 3.0, 8.0, 1.0, 9.0, 2.0, 7.0], dtype=np.float32)
+        kths = [1, 3, 5]
+        result = np.partition(a, kths)
+        for k in kths:
+            assert np.all(result[:k] <= result[k])
+            assert np.all(result[k+1:] >= result[k])
+
+    def test_partition_multi_kth_int32(self):
+        a = np.array([5, 3, 8, 1, 9, 2, 7, 4, 6], dtype=np.int32)
+        kths = [2, 4, 6]
+        result = np.partition(a, kths)
+        for k in kths:
+            assert np.all(result[:k] <= result[k])
+            assert np.all(result[k+1:] >= result[k])
+
+    def test_partition_multi_kth_with_duplicates(self):
+        a = np.array([3.0, 1.0, 3.0, 2.0, 3.0, 1.0, 2.0])
+        kths = [2, 4]
+        result = np.partition(a, kths)
+        for k in kths:
+            assert np.all(result[:k] <= result[k])
+            assert np.all(result[k+1:] >= result[k])
+
+    def test_partition_multi_kth_all_same(self):
+        a = np.full(2000, 5.0)
+        kths = [499, 999, 1499]
+        result = np.partition(a, kths)
+        for k in kths:
+            assert result[k] == 5.0
+
+    def test_partition_multi_kth_descending(self):
+        a = np.arange(2000, dtype=np.float64)[::-1]
+        kths = [499, 999, 1499]
+        result = np.partition(a, kths)
+        for k in kths:
+            assert np.all(result[:k] <= result[k])
+            assert np.all(result[k+1:] >= result[k])
+
+    def test_partition_multi_kth_ascending(self):
+        a = np.arange(2000, dtype=np.float64)
+        kths = [499, 999, 1499]
+        result = np.partition(a, kths)
+        for k in kths:
+            assert np.all(result[:k] <= result[k])
+            assert np.all(result[k+1:] >= result[k])
+
+    def test_partition_multi_kth_16m(self):
+        rng = np.random.RandomState(42)
+        a = rng.standard_normal(4000 * 4000)
+        kths = [999999, 7999999, 15999999]
+        result = np.partition(a, kths)
+        sorted_a = np.sort(a)
+        for i, k in enumerate(kths):
+            assert_allclose(result[k], sorted_a[k], rtol=1e-10)
+
+    def test_argpartition_multi_kth(self):
+        a = np.array([5.0, 3.0, 8.0, 1.0, 9.0, 2.0, 7.0])
+        kths = [2, 4]
+        result = np.argpartition(a, kths)
+        for k in kths:
+            assert np.all(a[result[:k]] <= a[result[k]])
+            assert np.all(a[result[k+1:]] >= a[result[k]])

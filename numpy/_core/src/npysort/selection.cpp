@@ -116,6 +116,29 @@ inline bool argquickselect_dispatch(T* v, npy_intp* arg, npy_intp num, npy_intp 
     return false;
 }
 
+template<typename T>
+inline bool highway_quickselect_dispatch(T* v, npy_intp num, npy_intp kth)
+{
+#ifndef __CYGWIN__
+#if defined(__aarch64__) || defined(__powerpc64__) || defined(__PPC64__)
+    if constexpr (
+        (std::is_integral_v<T> || std::is_floating_point_v<T>) &&
+        (sizeof(T) == sizeof(uint32_t) || sizeof(T) == sizeof(uint64_t))) {
+        using TF = typename np::meta::FixedWidth<T>::Type;
+        void (*dispfunc)(TF*, npy_intp, npy_intp) = nullptr;
+        #include "highway_qsort.dispatch.h"
+        NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::highway::qsort_simd::template QSelect, <TF>);
+        if (dispfunc) {
+            (*dispfunc)(reinterpret_cast<TF*>(v), num, kth);
+            return true;
+        }
+    }
+#endif
+#endif
+    (void)v; (void)num; (void)kth;
+    return false;
+}
+
 template <typename Tag, bool arg, typename type>
 NPY_NO_EXPORT int
 introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth, npy_intp *pivots, npy_intp *npiv);
@@ -556,6 +579,7 @@ unguarded_partition_(type *v, npy_intp *tosort, const type pivot, npy_intp *ll,
     Idx<arg> idx(tosort);
     Sortee<type, arg> sortee(v, tosort);
 
+#if NPY_ARM_SELECTION_TUNING
     /*
      * Fast path for real floating-point types when pivot is not NaN.
      *
@@ -575,6 +599,11 @@ unguarded_partition_(type *v, npy_intp *tosort, const type pivot, npy_intp *ll,
      * DOUBLE_LT. Each comparison drops from potentially 5 instructions
      * (fcmpe + b.gt/b.mi + fcmp + fccmp + b.eq/b.ne) to just 2
      * (fcmpe + b.gt or fcmpe + b.lt).
+     *
+     * ARM-only: the instruction savings above are specific to the ARM
+     * (fcmp/fccmp) instruction set.  On x86 the compiler generates
+     * different code for DOUBLE_LT and the overhead is negligible, so
+     * this fast path is guarded to avoid affecting x86 (9654) execution.
      *
      * Only enabled for real floating-point types (float, double, long double).
      * Complex types lack operator<, operator>=, and npy_isnan.
@@ -598,6 +627,7 @@ unguarded_partition_(type *v, npy_intp *tosort, const type pivot, npy_intp *ll,
             return;
         }
     }
+#endif
 
     for (;;) {
         do {
@@ -1231,6 +1261,35 @@ introselect_noarg(void *v, npy_intp num, npy_intp kth, npy_intp *pivots,
     if ((nkth == 1) && (quickselect_dispatch((T *)v, num, kth))) {
         return 0;
     }
+#if NPY_ARM_SELECTION_TUNING
+    if (nkth > 1 && num >= 1024) {
+        npy_intp low = 0, high = num - 1;
+        npy_intp saved_npiv = (npiv != NULL) ? *npiv : 0;
+        if (pivots != NULL && npiv != NULL) {
+            while (*npiv > 0) {
+                if (pivots[*npiv - 1] > kth) {
+                    high = pivots[*npiv - 1] - 1;
+                    break;
+                }
+                else if (pivots[*npiv - 1] == kth) {
+                    store_pivot(kth, kth, pivots, npiv);
+                    return 0;
+                }
+                low = pivots[*npiv - 1] + 1;
+                *npiv -= 1;
+            }
+        }
+        npy_intp span = high - low + 1;
+        if (span >= 1024 && highway_quickselect_dispatch(
+                    (T *)((char *)v + low * sizeof(T)), span, kth - low)) {
+            store_pivot(kth, kth, pivots, npiv);
+            return 0;
+        }
+        if (npiv != NULL) {
+            *npiv = saved_npiv;
+        }
+    }
+#endif
     return introselect_<Tag, false>((typename Tag::type *)v, nullptr, num, kth,
                                     pivots, npiv);
 }

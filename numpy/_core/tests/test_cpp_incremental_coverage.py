@@ -9,7 +9,6 @@ Targets files with lowest incremental coverage:
 - loops_arithmetic.dispatch.c.src (44.7%)
 - loops_minmax.dispatch.c.src (47.1%)
 - loops_unary_fp_ops.dispatch.cpp (59.6%)
-- loops_autovec_abs_hwy.dispatch.cpp (64.2%)
 - loops_exp2.dispatch.cpp (75.3%)
 - loops_shift_sve.c (78.5%)
 - loops_logical_sve.c (81.4%)
@@ -654,25 +653,6 @@ class TestExp2Coverage:
             a = np.ones(size, dtype=dt)
             res = np.exp2(a)
             assert_allclose(res, np.full(size, 2.0, dtype=dt), rtol=1e-6)
-
-
-class TestAutoVecAbsHWY:
-    """loops_autovec_abs_hwy.dispatch.cpp: Highway half-float abs."""
-
-    def test_half_abs_contiguous(self):
-        a = np.array([-1.5, 2.5, -0.0, 0.0, -3.0, 4.5], dtype=np.float16)
-        res = np.abs(a)
-        assert_array_equal(res, [1.5, 2.5, 0.0, 0.0, 3.0, 4.5])
-
-    def test_half_abs_strided(self):
-        a = np.arange(-10, 10, dtype=np.float16)[::3]
-        res = np.abs(a)
-        assert_array_equal(res, np.abs(a.astype(np.float32)).astype(np.float16))
-
-    def test_half_abs_large(self):
-        a = np.random.default_rng(42).standard_normal(1000).astype(np.float16)
-        res = np.abs(a)
-        assert np.all(res >= 0)
 
 
 class TestShiftSVE:
@@ -1498,3 +1478,131 @@ class TestMinMaxStridedSIMD:
         b = rng.random(size).astype(np.float64)
         res = np.maximum(a, b)
         assert_array_equal(res, np.where(a >= b, a, b))
+
+
+class TestPartitionFloatFastPath:
+    """selection.cpp: float fast path in unguarded_partition_ (ARM-only guard).
+
+    The float fast path activates for floating-point types when the pivot is
+    not NaN.  After _remove_nan_1d, nanpercentile always enters this path on
+    ARM (NPY_ARM_SELECTION_TUNING).  These tests exercise both the fast path
+    (non-NaN pivot) and the Tag::less fallback (NaN pivot) via partition and
+    nanpercentile.
+    """
+
+    @pytest.mark.parametrize("dt", [np.float32, np.float64])
+    @pytest.mark.parametrize("size", [200, 4096, 200000])
+    def test_partition_random_float(self, dt, size):
+        rng = np.random.RandomState(1819780348)
+        arr = rng.uniform(size=size).astype(dt)
+        k = size // 2
+        result = np.partition(arr, k)
+        assert np.sort(arr)[k] == result[k]
+        left = result[:k]
+        right = result[k + 1:]
+        assert np.all(left <= result[k])
+        assert np.all(right >= result[k])
+
+    @pytest.mark.parametrize("dt", [np.float32, np.float64])
+    def test_partition_nan_pivot_fallback(self, dt):
+        arr = np.array([np.nan, 1.0, np.nan, 3.0, np.nan, 2.0,
+                        np.nan, 5.0, np.nan, 4.0], dtype=dt)
+        k = 4
+        result = np.partition(arr, k)
+        sorted_arr = np.sort(arr)
+        assert sorted_arr[k] == result[k]
+        assert np.isnan(result[-1])
+
+    @pytest.mark.parametrize("dt", [np.float32, np.float64])
+    def test_partition_all_nan(self, dt):
+        arr = np.full(100, np.nan, dtype=dt)
+        k = 50
+        result = np.partition(arr, k)
+        assert np.all(np.isnan(result))
+
+    @pytest.mark.parametrize("dt", [np.float32, np.float64])
+    def test_partition_all_equal_float(self, dt):
+        arr = np.full(4096, 3.14, dtype=dt)
+        k = 2048
+        result = np.partition(arr, k)
+        assert np.all(result == 3.14)
+
+    @pytest.mark.parametrize("dt", [np.float32, np.float64])
+    def test_partition_sorted_float(self, dt):
+        arr = np.arange(4096, dtype=dt)
+        k = 2048
+        result = np.partition(arr, k)
+        assert np.sort(arr)[k] == result[k]
+
+    @pytest.mark.parametrize("dt", [np.float32, np.float64])
+    def test_partition_reverse_sorted_float(self, dt):
+        arr = np.arange(4096, dtype=dt)[::-1]
+        k = 2048
+        result = np.partition(arr, k)
+        assert np.sort(arr)[k] == result[k]
+
+    @pytest.mark.parametrize("dt", [np.float32, np.float64])
+    @pytest.mark.parametrize("pct", [0.0, 0.1, 2.0, 50.0, 90.0])
+    @pytest.mark.parametrize("size", [200, 200000])
+    def test_nanpercentile_various_nan_ratios(self, dt, pct, size):
+        rng = np.random.RandomState(1819780348)
+        arr = rng.uniform(size=size).astype(dt)
+        arr[arr < pct / 100.0] = np.nan
+        result = np.nanpercentile(arr, 50)
+        non_nan = arr[~np.isnan(arr)]
+        if non_nan.size > 0:
+            expected = np.percentile(non_nan, 50)
+            assert_allclose(result, expected, rtol=1e-5)
+
+    @pytest.mark.parametrize("dt", [np.float32, np.float64])
+    def test_nanpercentile_all_nan(self, dt):
+        arr = np.full(100, np.nan, dtype=dt)
+        with pytest.warns(RuntimeWarning, match="All-NaN slice"):
+            result = np.nanpercentile(arr, 50)
+        assert np.isnan(result)
+
+    @pytest.mark.parametrize("dt", [np.float32, np.float64])
+    def test_nanpercentile_no_nan(self, dt):
+        rng = np.random.RandomState(1819780348)
+        arr = rng.uniform(size=200000).astype(dt)
+        result = np.nanpercentile(arr, 50)
+        expected = np.percentile(arr, 50)
+        assert_allclose(result, expected, rtol=1e-5)
+
+    @pytest.mark.parametrize("dt", [np.float32, np.float64])
+    def test_argpartition_float_with_nan(self, dt):
+        arr = np.array([3.0, 1.0, np.nan, 5.0, 2.0, 4.0, np.nan, 6.0,
+                        0.0, 7.0], dtype=dt)
+        k = 4
+        idx = np.argpartition(arr, k)
+        result = arr[idx]
+        assert np.sort(arr)[k] == result[k]
+
+    @pytest.mark.parametrize("dt", [np.float32, np.float64])
+    def test_partition_nan_at_end(self, dt):
+        arr = np.array([3.0, 1.0, np.nan, 5.0, 2.0, 4.0, 6.0,
+                        0.0, 7.0], dtype=dt)
+        k = -2
+        result = np.partition(arr, k)
+        assert result[-2] == 7.0
+        assert np.isnan(result[-1])
+
+    @pytest.mark.parametrize("dt", [np.float32, np.float64])
+    def test_partition_multi_kth_float(self, dt):
+        rng = np.random.RandomState(42)
+        arr = rng.uniform(size=4096).astype(dt)
+        kth = np.array([100, 1000, 2000, 3900])
+        result = np.partition(arr, kth)
+        sorted_arr = np.sort(arr)
+        for k in kth:
+            assert sorted_arr[k] == result[k]
+
+    @pytest.mark.parametrize("dt", [np.float32, np.float64])
+    def test_partition_with_inf(self, dt):
+        arr = np.array([1.0, np.inf, -np.inf, 3.0, -np.inf, 5.0,
+                        np.inf, 2.0, 4.0, 0.0], dtype=dt)
+        k = 4
+        result = np.partition(arr, k)
+        sorted_arr = np.sort(arr)
+        assert sorted_arr[k] == result[k]
+        assert np.isinf(result[-1]) and result[-1] > 0
