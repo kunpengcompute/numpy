@@ -55,8 +55,8 @@
  * #SIGNED = 1, 0, 1, 0, 1, 0, 1, 0, 1, 0#
  * #c = hh,uhh,h,uh,,u,l,ul,ll,ull#
  * #big = 0, 0, 0, 0, 0, 0, 1, 1, 1, 1#
- * #use_sve_lshift_scalar = 1, 1, 1, 1, 0, 0, 1, 1, 1, 1#
- * #use_sve_rshift_scalar = 1, 1, 1, 1, 0, 0, 1, 1, 1, 1#
+ * #use_sve_lshift_scalar = 1, 1, 1, 1, 0, 0, 0, 0, 0, 0#
+ * #use_sve_rshift_scalar = 1, 1, 1, 1, 0, 0, 1, 1, 0, 0#
  * #is_uint = 0*5, 1, 0*4#
  */
 
@@ -88,11 +88,6 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_reciprocal)
 #if @big@ && @UNROLL@
 AUTO_VEC_UNROLL_LOOPS
 #endif
-#if defined(__aarch64__) && (__GNUC__ < 12 || (__GNUC__ == 12 && __GNUC_MINOR__ <= 2))
-#if @is_add@ && @is_uint@
-__attribute__((aligned(16)))
-#endif
-#endif
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
@@ -109,7 +104,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_left_shift)
 (char **args, npy_intp const *dimensions, npy_intp const *steps,
                   void *NPY_UNUSED(func))
 {
-#if defined(__aarch64__)
+#if defined(__aarch64__) && @use_sve_lshift_scalar@
     if (IS_BINARY_CONT(@type@, @type@) &&
             (abs_ptrdiff(args[2], args[0]) == 0 ||
              abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE) &&
@@ -123,8 +118,6 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_left_shift)
 #endif
         return;
     }
-#endif
-#if defined(__aarch64__) && @use_sve_lshift_scalar@
     if (IS_BINARY_CONT_S1(@type@, @type@) &&
             (abs_ptrdiff(args[2], args[1]) == 0 ||
              abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) &&
@@ -149,7 +142,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_right_shift)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
 #ifndef NPY_DO_NOT_OPTIMIZE_@TYPE@_right_shift
-#if defined(__aarch64__)
+#if defined(__aarch64__) && @use_sve_rshift_scalar@
     if (IS_BINARY_CONT(@type@, @type@) &&
             (abs_ptrdiff(args[2], args[0]) == 0 ||
              abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE) &&
@@ -160,8 +153,6 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_right_shift)
                 args, dimensions[0], (int)sizeof(@type@), @SIGNED@);
         return;
     }
-#endif
-#if defined(__aarch64__) && @use_sve_rshift_scalar@
     if (IS_BINARY_CONT_S1(@type@, @type@) &&
             (abs_ptrdiff(args[2], args[1]) == 0 ||
              abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE) &&
@@ -235,7 +226,6 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
 /**begin repeat1
  * #kind = logical_and, logical_or#
  * #OP = &&, ||#
- * #use_sve_scalar_and = 1, 0#
  * #use_sve_scalar_or = 0, 1#
  */
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
@@ -245,24 +235,6 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
      * gcc vectorization of this is not good (PR60575) but manual integer
      * vectorization is too tedious to be worthwhile
      */
-#if defined(__aarch64__) && @use_sve_scalar_and@
-    if ((sizeof(@type@) == 4 || sizeof(@type@) == sizeof(npy_long)) &&
-            IS_BINARY_CONT_S1(@type@, npy_bool) &&
-            abs_ptrdiff(args[2], args[1]) >= AUTOVEC_OVERLAP_SIZE &&
-            npy_logical_and_sve_scalar_available()) {
-        npy_logical_and_sve_scalar_in0(
-                args, dimensions, steps, (int)sizeof(@type@));
-        return;
-    }
-    if ((sizeof(@type@) == 4 || sizeof(@type@) == sizeof(npy_long)) &&
-            IS_BINARY_CONT_S2(@type@, npy_bool) &&
-            abs_ptrdiff(args[2], args[0]) >= AUTOVEC_OVERLAP_SIZE &&
-            npy_logical_and_sve_scalar_available()) {
-        npy_logical_and_sve_scalar_in1(
-                args, dimensions, steps, (int)sizeof(@type@));
-        return;
-    }
-#endif
 #if defined(__aarch64__) && @use_sve_scalar_or@
     if (sizeof(@type@) > 1 &&
             IS_BINARY_CONT_S1(@type@, npy_bool) &&
@@ -425,18 +397,6 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(BOOL_@kind@)
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_absolute)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
-#if defined(__aarch64__)
-    if (IS_UNARY_CONT(npy_half, npy_half) && npy_highway_absolute_half_available()) {
-        npy_highway_HALF_absolute_contig(args, dimensions[0]);
-        return;
-    }
-
-    if (steps[0] % sizeof(npy_half) == 0 && steps[1] % sizeof(npy_half) == 0 &&
-            npy_highway_absolute_half_strided_available()) {
-        npy_highway_HALF_absolute_strided(args, steps[0], steps[1], dimensions[0]);
-        return;
-    }
-#endif
     UNARY_LOOP_FAST(npy_half, npy_half, *out = in&0x7fffu);
 }
 
@@ -456,3 +416,4 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_isinf)
     NPY_CPU_DISPATCH_CURFX(ULONGLONG_isinf)(args, dimensions, steps, func);
 }
 /**end repeat**/
+
