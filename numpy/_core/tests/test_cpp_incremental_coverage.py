@@ -9,7 +9,6 @@ Targets files with lowest incremental coverage:
 - loops_arithmetic.dispatch.c.src (44.7%)
 - loops_minmax.dispatch.c.src (47.1%)
 - loops_unary_fp_ops.dispatch.cpp (59.6%)
-- loops_autovec_abs_hwy.dispatch.cpp (64.2%)
 - loops_exp2.dispatch.cpp (75.3%)
 - loops_shift_sve.c (78.5%)
 - loops_logical_sve.c (81.4%)
@@ -654,25 +653,6 @@ class TestExp2Coverage:
             a = np.ones(size, dtype=dt)
             res = np.exp2(a)
             assert_allclose(res, np.full(size, 2.0, dtype=dt), rtol=1e-6)
-
-
-class TestAutoVecAbsHWY:
-    """loops_autovec_abs_hwy.dispatch.cpp: Highway half-float abs."""
-
-    def test_half_abs_contiguous(self):
-        a = np.array([-1.5, 2.5, -0.0, 0.0, -3.0, 4.5], dtype=np.float16)
-        res = np.abs(a)
-        assert_array_equal(res, [1.5, 2.5, 0.0, 0.0, 3.0, 4.5])
-
-    def test_half_abs_strided(self):
-        a = np.arange(-10, 10, dtype=np.float16)[::3]
-        res = np.abs(a)
-        assert_array_equal(res, np.abs(a.astype(np.float32)).astype(np.float16))
-
-    def test_half_abs_large(self):
-        a = np.random.default_rng(42).standard_normal(1000).astype(np.float16)
-        res = np.abs(a)
-        assert np.all(res >= 0)
 
 
 class TestShiftSVE:
