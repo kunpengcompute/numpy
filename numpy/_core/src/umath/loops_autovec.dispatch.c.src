@@ -7,10 +7,8 @@
 #include "loops.h"
 // Provides the various *_LOOP macros
 #include "fast_loop_macros.h"
-#include "loops_autovec_abs_hwy.h"
 #include "loops_bitwise_sve.h"
 #include "loops_logical_sve.h"
-#include "loops_logical_and_sve.h"
 #include "loops_shift_sve.h"
 #include <string.h>
 
@@ -57,7 +55,6 @@
  * #big = 0, 0, 0, 0, 0, 0, 1, 1, 1, 1#
  * #use_sve_lshift_scalar = 1, 1, 1, 1, 0, 0, 0, 0, 0, 0#
  * #use_sve_rshift_scalar = 1, 1, 1, 1, 0, 0, 1, 1, 0, 0#
- * #is_uint = 0*5, 1, 0*4#
  */
 
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_positive)
@@ -83,7 +80,6 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_reciprocal)
  * #kind = add, subtract, multiply#
  * #OP = +, -, *#
  * #UNROLL = 0, 0, 1#
- * #is_add = 1, 0, 0#
  */
 #if @big@ && @UNROLL@
 AUTO_VEC_UNROLL_LOOPS

@@ -504,30 +504,6 @@ class TestLogicalSVE:
         assert np.all(r[1:])
 
 
-class TestAbsoluteFloat16Highway:
-    """loops_autovec_abs_hwy.dispatch.cpp"""
-
-    def test_absolute_float16_contiguous(self):
-        a = np.linspace(-10, 10, N, dtype=np.float16)
-        r = np.absolute(a)
-        assert r.dtype == np.float16
-        assert np.all(r >= 0)
-
-    def test_absolute_float16_strided(self):
-        a = np.zeros(N * 2, dtype=np.float16)
-        vals = np.linspace(-10, 10, N, dtype=np.float16)
-        a[::2] = vals
-        r = np.absolute(a[::2])
-        assert r.shape == (N,)
-        assert np.all(r >= 0)
-
-    def test_absolute_float16_large(self):
-        rng = np.random.default_rng(42)
-        a = rng.standard_normal(N * 4).astype(np.float16)
-        r = np.absolute(a)
-        assert np.all(r >= 0)
-
-
 class TestScalarFastPath:
     """ufunc_object.c scalar fast path (lines 4394-4448)"""
 
@@ -1411,12 +1387,6 @@ class TestAutovecReduceAndSVEComprehensive:
         assert result.dtype == dt
 
     @pytest.mark.parametrize("dt", [np.uint16, np.uint32, np.uint64])
-    def test_logical_and_sve_scalar(self, dt):
-        arr = np.array([0, 1, 2, 3], dtype=dt)
-        result = np.logical_and(dt(5), arr)
-        assert result.dtype == np.bool_
-
-    @pytest.mark.parametrize("dt", [np.uint16, np.uint32, np.uint64])
     def test_logical_or_sve_scalar(self, dt):
         arr = np.array([0, 1, 0, 1], dtype=dt)
         result = np.logical_or(dt(0), arr)
@@ -1892,13 +1862,6 @@ class TestSVEScalarPathsComprehensive:
         arr = np.arange(64, dtype=dt)
         result = np.bitwise_xor(scalar, arr)
         assert result.dtype == dt
-
-    @pytest.mark.parametrize("dt", [np.int16, np.uint16, np.int32, np.uint32,
-                                     np.int64, np.uint64])
-    def test_logical_and_sve_scalar_all_types(self, dt):
-        arr = np.array([0, 1, 2, 3, 0, 5], dtype=dt)
-        result = np.logical_and(dt(3), arr)
-        assert result.dtype == np.bool_
 
     @pytest.mark.parametrize("dt", [np.int16, np.uint16, np.int32, np.uint32,
                                      np.int64, np.uint64])
