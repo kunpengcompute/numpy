@@ -964,13 +964,6 @@ foreach gen_mtargets : [
     ] : []
   ],
   [
-    'loops_autovec_abs_hwy.dispatch.h',
-    'src/umath/loops_autovec_abs_hwy.dispatch.cpp',
-    use_highway ? [
-      SVE, ASIMD, NEON,
-    ] : []
-  ],
-  [
     'loops_complex_maxmin.dispatch.h',
     'src/umath/loops_complex_maxmin.dispatch.cpp',
     use_highway ? [
@@ -1365,12 +1358,9 @@ src_umath = umath_gen_headers + [
   # Highway SIMD complex maximum/minimum (dispatched via multi_targets below)
    'src/umath/loops_complex_maxmin.h',
    # Highway SIMD floor division
-  'src/umath/loops_arithmetic_floor_hwy.h',
-  'src/umath/loops_arithmetic_floor_hwy_avail.c',
-  # Highway SIMD half-float absolute
-  'src/umath/loops_autovec_abs_hwy.h',
-  'src/umath/loops_autovec_abs_hwy_avail.c',
-  # For testing. Eventually, should use public API and be separate:
+   'src/umath/loops_arithmetic_floor_hwy.h',
+   'src/umath/loops_arithmetic_floor_hwy_avail.c',
+   # For testing. Eventually, should use public API and be separate:
   'src/umath/_scaled_float_dtype.c',
 ]
 
@@ -1383,9 +1373,6 @@ if cpu_family == 'aarch64'
     # AArch64 SVE logical specializations
     'src/umath/loops_logical_sve.c',
     'src/umath/loops_logical_sve.h',
-    # AArch64 SVE logical_and scalar-input specialization
-    'src/umath/loops_logical_and_sve.c',
-    'src/umath/loops_logical_and_sve.h',
     # AArch64 logical_not specializations
     'src/umath/loops_logical_not_aarch64.c',
     'src/umath/loops_logical_not_aarch64.h',
