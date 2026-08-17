@@ -794,6 +794,20 @@ PyArray_CreateSortedStridePerm(int ndim, npy_intp const *strides,
         out_strideperm[i].stride = strides[i];
     }
 
+    /* Avoid the qsort setup cost for the common two-dimensional case. */
+    if (ndim <= 1) {
+        return;
+    }
+    if (ndim == 2) {
+        if (_npy_stride_sort_item_comparator(
+                &out_strideperm[0], &out_strideperm[1]) > 0) {
+            npy_stride_sort_item tmp = out_strideperm[0];
+            out_strideperm[0] = out_strideperm[1];
+            out_strideperm[1] = tmp;
+        }
+        return;
+    }
+
     /* Sort them */
     qsort(out_strideperm, ndim, sizeof(npy_stride_sort_item),
                                     &_npy_stride_sort_item_comparator);

@@ -161,6 +161,121 @@ class TestChanges:
 class TestCasting:
     size = 1500  # Best larger than NPY_LOWLEVEL_BUFFER_BLOCKSIZE * itemsize
 
+    @pytest.mark.parametrize("inner", [32, 33, 65, 100, 101])
+    @pytest.mark.parametrize("reverse_rows", [False, True])
+    @pytest.mark.parametrize("unaligned", [False, True])
+    @pytest.mark.parametrize(
+            ("from_dtype", "to_dtype"),
+            [("int32", "int16"), ("int64", "int16"),
+             ("int64", "int32")])
+    def test_2d_integer_narrowing(
+            self, from_dtype, to_dtype, unaligned, reverse_rows, inner):
+        info = np.iinfo(from_dtype)
+        candidates = [
+                info.min, info.min + 1, -(1 << 32) - 1, -(1 << 32),
+                -(1 << 31) - 1, -(1 << 31), -65537, -65536, -32769,
+                -32768, -1, 0, 1, 32767, 32768, 65535, 65536,
+                (1 << 31) - 1, 1 << 31, (1 << 32) - 1, 1 << 32,
+                info.max - 1, info.max]
+        values = np.array(
+                [value for value in candidates
+                 if info.min <= value <= info.max], dtype=from_dtype)
+
+        flat = np.resize(values, 100 * inner)
+        expected = flat.astype(to_dtype).reshape(100, inner)
+
+        itemsize = np.dtype(from_dtype).itemsize
+        if unaligned:
+            raw = np.empty(100 * (inner + 7) * itemsize + 1, dtype="uint8")
+            backing = raw[1:].view(from_dtype).reshape(100, inner + 7)
+        else:
+            backing = np.empty((100, inner + 7), dtype=from_dtype)
+        arr = backing[:, :inner]
+        arr[...] = flat.reshape(100, inner)
+        if reverse_rows:
+            arr = arr[::-1]
+            expected = expected[::-1]
+
+        with np.errstate(all="raise"):
+            actual = arr.astype(to_dtype)
+        assert_array_equal(actual, expected, strict=True)
+
+    @pytest.mark.parametrize("inner", [32, 33, 65, 100, 101])
+    @pytest.mark.parametrize("outer", [1, 2, 3, 4, 5, 6, 7, 8, 9])
+    @pytest.mark.parametrize("reverse_rows", [False, True])
+    @pytest.mark.parametrize("unaligned", [False, True])
+    @pytest.mark.parametrize(
+            ("from_dtype", "to_dtype"),
+            [("int16", "float32"), ("int16", "float64"),
+             ("int16", "int32"), ("int16", "int64"),
+             ("int32", "float32"), ("int32", "float64"),
+             ("int32", "int64"), ("int64", "float64"),
+             ("float32", "float64"), ("float32", "int64")])
+    def test_2d_paired_casts(
+            self, from_dtype, to_dtype, unaligned, reverse_rows,
+            outer, inner):
+        if np.issubdtype(np.dtype(from_dtype), np.integer):
+            info = np.iinfo(from_dtype)
+            candidates = [
+                    info.min, info.min + 1, -(1 << 24) - 1, -(1 << 24),
+                    -1, 0, 1, (1 << 24) - 1, 1 << 24, (1 << 24) + 1,
+                    info.max - 1, info.max]
+            values = np.array(
+                    [value for value in candidates
+                     if info.min <= value <= info.max], dtype=from_dtype)
+        elif to_dtype == "int64":
+            values = np.array([
+                    -(2.0 ** 62), -(2.0 ** 31), -1.5, -0.0, 0.0, 1.5,
+                    2.0 ** 31, 2.0 ** 62], dtype=from_dtype)
+        else:
+            # Include signed zero, subnormals, infinities, and a quiet NaN.
+            values = np.array([
+                    0xff800000, 0xff7fffff, 0xbf800000, 0x80000001,
+                    0x80000000, 0x00000000, 0x00000001, 0x3f800000,
+                    0x7f7fffff, 0x7f800000, 0x7fc00001],
+                    dtype="uint32").view("float32")
+
+        data = np.resize(values, outer * inner).reshape(outer, inner)
+        # Keep rows distinguishable even when inner is a multiple of len(values).
+        data[:, 0] = np.arange(outer, dtype=from_dtype) + 1
+        expected = data.ravel().astype(to_dtype).reshape(outer, inner)
+
+        itemsize = np.dtype(from_dtype).itemsize
+        if unaligned:
+            raw = np.empty(outer * (inner + 7) * itemsize + 1, dtype="uint8")
+            backing = raw[1:].view(from_dtype).reshape(outer, inner + 7)
+        else:
+            backing = np.empty((outer, inner + 7), dtype=from_dtype)
+        arr = backing[:, :inner]
+        arr[...] = data
+        if reverse_rows:
+            arr = arr[::-1]
+            expected = expected[::-1]
+
+        with np.errstate(all="raise"):
+            actual = arr.astype(to_dtype)
+        assert_array_equal(actual, expected, strict=True)
+
+    @pytest.mark.parametrize("reverse_rows", [False, True])
+    @pytest.mark.parametrize("unaligned", [False, True])
+    def test_2d_paired_cast_signaling_nan(self, unaligned, reverse_rows):
+        inner = 33
+        itemsize = np.dtype("float32").itemsize
+        if unaligned:
+            raw = np.empty(2 * (inner + 7) * itemsize + 1, dtype="uint8")
+            backing = raw[1:].view("float32").reshape(2, inner + 7)
+        else:
+            backing = np.empty((2, inner + 7), dtype="float32")
+        arr = backing[:, :inner]
+        arr.fill(1)
+        arr.view("uint32")[0, 0] = 0x7f800001
+        if reverse_rows:
+            arr = arr[::-1]
+
+        with np.errstate(invalid="raise"):
+            with pytest.raises(FloatingPointError, match="invalid"):
+                arr.astype("float64")
+
     def get_data(self, dtype1, dtype2):
         if dtype2 is None or dtype1.itemsize >= dtype2.itemsize:
             length = self.size // dtype1.itemsize

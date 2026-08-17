@@ -108,6 +108,12 @@ def check_operations(dtype, value):
 
     yield direct_cast_nd_strided
 
+    def direct_cast_2d_inner_contiguous():
+        arr = np.full((100, 1000), fill_value=value)[:100, :100]
+        arr.astype(dtype)
+
+    yield direct_cast_2d_inner_contiguous
+
     def boolean_array_assignment():
         arr = np.empty(3, dtype=dtype)
         arr[[True, False, True]] = np.array([value, value])
