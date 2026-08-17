@@ -28,6 +28,16 @@
 #include "gil_utils.h"
 
 /*
+ * AArch64 scalar and Advanced SIMD load/store instructions support unaligned
+ * addresses. Enable typed copy kernels for unaligned buffers as well, avoiding
+ * the byte-at-a-time fallback without requiring alignment peeling. Keep this
+ * disabled on other architectures because compiler vectorization may introduce
+ * stricter alignment requirements.
+ */
+#ifdef __aarch64__
+#define NPY_USE_UNALIGNED_ACCESS 1
+#else
+/*
  * x86 platform works with unaligned access but the compiler is allowed to
  * assume all data is aligned to its size by the C standard. This means it can
  * vectorize instructions peeling only by the size of the type, if the data is
@@ -36,6 +46,12 @@
  * So this flag can only be enabled if autovectorization is disabled.
  */
 #define NPY_USE_UNALIGNED_ACCESS 0
+#endif
+
+typedef struct {
+    npy_uint64 a;
+    npy_uint64 b;
+} npy_copy_uint128;
 
 #define _NPY_NOP1(x) (x)
 #define _NPY_NOP2(x) (x)
@@ -102,12 +118,9 @@
  */
 
 /*
- * On aarch64, non-swap strided copy kernels are provided by
- * strided_copy_kernels.cpp with optimized typed pointer access.
- * Only swap variants are still generated here for all platforms.
+ * When unaligned typed access is supported, the aligned variants can also
+ * service unaligned buffers, so separate unaligned variants are unnecessary.
  */
-#if !defined(__aarch64__) || @is_swap@
-
 #if (@elsize@ >= @minelsize@) && \
     (@elsize@ > 1 || @is_aligned@) && \
     (!NPY_USE_UNALIGNED_ACCESS || @is_aligned@)
@@ -137,7 +150,7 @@ static int
     npy_intp dst_stride = strides[1];
 #endif
 
-#if @is_aligned@
+#if @is_aligned@ && !NPY_USE_UNALIGNED_ACCESS
     /* sanity check */
     assert(N == 0 || npy_is_aligned(dst, NPY_ALIGNOF_UINT(@type@)));
     assert(N == 0 || npy_is_aligned(src, NPY_ALIGNOF_UINT(@type@)));
@@ -151,8 +164,16 @@ static int
         (*((@type@ *)dst)) = @swap@@elsize@(*((@type@ *)src));
 #  else
 #    if @is_swap@ == 0
+#      if NPY_USE_UNALIGNED_ACCESS
+        /*
+         * A constant-size copy lets the compiler use one native 128-bit
+         * load/store pair instead of two scalar 64-bit pairs.
+         */
+        memmove(dst, src, 16);
+#      else
         (*((npy_uint64 *)dst)) = (*((npy_uint64 *)src));
         (*((npy_uint64 *)dst + 1)) = (*((npy_uint64 *)src + 1));
+#      endif
 #    elif @is_swap@ == 1
         (*((npy_uint64 *)dst)) = _NPY_SWAP8(*((npy_uint64 *)src + 1));
         (*((npy_uint64 *)dst + 1)) = _NPY_SWAP8(*((npy_uint64 *)src));
@@ -201,7 +222,11 @@ static int
  * but it profits from vectorization enabled with -O3
  */
 #if (@src_contig@ == 0) && @is_aligned@
+#if @elsize@ == 16 && defined(__aarch64__)
+static NPY_GCC_OPT_3 NPY_GCC_UNROLL_LOOPS int
+#else
 static NPY_GCC_OPT_3 int
+#endif
 @prefix@_@oper@_size@elsize@_srcstride0(
         PyArrayMethod_Context *context, char *const *args,
         const npy_intp *dimensions, const npy_intp *strides,
@@ -217,13 +242,15 @@ static NPY_GCC_OPT_3 int
 #  if !(@elsize@ == 1 && @dst_contig@)
     @type@ temp;
 #  endif
+#elif @is_swap@ == 0 && NPY_USE_UNALIGNED_ACCESS
+    npy_copy_uint128 temp128;
 #else
     npy_uint64 temp0, temp1;
 #endif
     if (N == 0) {
         return 0;
     }
-#if @is_aligned@ && @elsize@ != 16
+#if @is_aligned@ && @elsize@ != 16 && !NPY_USE_UNALIGNED_ACCESS
     /* sanity check */
     assert(N == 0 || npy_is_aligned(dst, NPY_ALIGNOF_UINT(@type@)));
     assert(N == 0 || npy_is_aligned(src, NPY_ALIGNOF_UINT(@type@)));
@@ -236,8 +263,12 @@ static NPY_GCC_OPT_3 int
     temp = @swap@@elsize@(*((@type@ *)src));
 #  else
 #    if @is_swap@ == 0
+#      if NPY_USE_UNALIGNED_ACCESS
+        temp128 = *((npy_copy_uint128 *)src);
+#      else
         temp0 = (*((npy_uint64 *)src));
         temp1 = (*((npy_uint64 *)src + 1));
+#      endif
 #    elif @is_swap@ == 1
         temp0 = _NPY_SWAP8(*((npy_uint64 *)src + 1));
         temp1 = _NPY_SWAP8(*((npy_uint64 *)src));
@@ -251,8 +282,12 @@ static NPY_GCC_OPT_3 int
 #  if @elsize@ != 16
         *((@type@ *)dst) = temp;
 #  else
+#    if @is_swap@ == 0 && NPY_USE_UNALIGNED_ACCESS
+        *((npy_copy_uint128 *)dst) = temp128;
+#    else
         *((npy_uint64 *)dst) = temp0;
         *((npy_uint64 *)dst + 1) = temp1;
+#    endif
 #  endif
 #  if @dst_contig@
         dst += @elsize@;
@@ -268,17 +303,11 @@ static NPY_GCC_OPT_3 int
 
 #endif/* @elsize@ >= @minelsize@ */
 
-#endif // !defined(__aarch64__) || @is_swap@
 
 /**end repeat2**/
 /**end repeat1**/
 /**end repeat**/
 
-/*
- * On aarch64, _strided_to_strided, _contig_to_contig, and
- * PyArray_GetStridedCopyFn are provided by strided_copy_kernels.cpp.
- */
-#if !defined(__aarch64__)
 static int
 _strided_to_strided(
         PyArrayMethod_Context *context, char *const *args,
@@ -299,7 +328,6 @@ _strided_to_strided(
     return 0;
 }
 
-#endif // !defined(__aarch64__)
 
 /*
  * NOTE: This function is currently unused. It would currently be used for
@@ -378,7 +406,6 @@ _swap_pair_strided_to_strided(
     return 0;
 }
 
-#if !defined(__aarch64__)
 static int
 _contig_to_contig(
         PyArrayMethod_Context *context, char *const *args,
@@ -537,7 +564,6 @@ PyArray_GetStridedCopyFn(int aligned, npy_intp src_stride,
 
     return &_strided_to_strided;
 }
-#endif // !defined(__aarch64__)
 
 /*
  * PyArray_GetStridedCopySwapFn and PyArray_GetStridedCopySwapPairFn are
@@ -1096,7 +1122,7 @@ static GCC_CAST_OPT_LEVEL int
     _TYPE2 dst_value;
 #endif
 
-#if @aligned@
+#if @aligned@ && !NPY_USE_UNALIGNED_ACCESS
    /* sanity check */
     assert(N == 0 || npy_is_aligned(src, NPY_ALIGNOF(_TYPE1)));
     assert(N == 0 || npy_is_aligned(dst, NPY_ALIGNOF(_TYPE2)));
