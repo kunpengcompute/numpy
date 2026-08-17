@@ -1351,16 +1351,6 @@ src_multiarray = multiarray_gen_headers + [
   'src/multiarray/fnv.c',
 ]
 
-if cpu_family == 'aarch64'
-  src_multiarray += [
-    # AArch64 optimized strided copy kernels.
-    # On aarch64, NEON and scalar load/store instructions natively support
-    # unaligned memory access, enabling optimized typed pointer access
-    # regardless of alignment.
-    'src/multiarray/strided_copy_kernels.cpp',
-  ]
-endif
-
 src_umath = umath_gen_headers + [
   src_file.process('src/umath/funcs.inc.src'),
   src_file.process('src/umath/loops.c.src'),

@@ -2171,7 +2171,7 @@ array_subscript(PyArrayObject *self, PyObject *op)
             indices[0].type == HAS_FANCY &&
             indices[1].type == HAS_ELLIPSIS &&
             indices[1].value == PyArray_NDIM(self) - 1 &&
-            PyArray_NDIM(self) > 1) {
+            PyArray_IS_C_CONTIGUOUS(self) && PyArray_NDIM(self) > 1) {
         PyArrayObject *ind = (PyArrayObject *)indices[0].object;
 
         NPY_ARRAYMETHOD_FLAGS transfer_flags;
@@ -2199,6 +2199,7 @@ array_subscript(PyArrayObject *self, PyObject *op)
     if ((index_type == (HAS_SLICE | HAS_FANCY) ||
             index_type == (HAS_SLICE | HAS_FANCY | HAS_ELLIPSIS)) &&
             (index_num == 2 || index_num == 3) &&
+            PyArray_IS_C_CONTIGUOUS(self) &&
             indices[0].type == HAS_SLICE &&
             indices[1].type == HAS_FANCY &&
             (index_num == 2 ||
@@ -2651,6 +2652,7 @@ array_assign_subscript(PyArrayObject *self, PyObject *ind, PyObject *op)
             (index_num == 2 ||
                     (indices[2].type == HAS_ELLIPSIS &&
                      indices[2].value == PyArray_NDIM(self) - 2)) &&
+            PyArray_IS_C_CONTIGUOUS(self) &&
             PyArray_EquivTypes(PyArray_DESCR(self), PyArray_DESCR(tmp_arr))) {
         PyArrayObject *ind = (PyArrayObject *)indices[1].object;
 
@@ -2682,6 +2684,7 @@ array_assign_subscript(PyArrayObject *self, PyObject *ind, PyObject *op)
             indices[1].type == HAS_ELLIPSIS &&
             indices[1].value == PyArray_NDIM(self) - 1 &&
             PyArray_NDIM(self) > 1 &&
+            PyArray_IS_C_CONTIGUOUS(self) &&
             PyArray_EquivTypes(PyArray_DESCR(self), PyArray_DESCR(tmp_arr))) {
         PyArrayObject *ind = (PyArrayObject *)indices[0].object;
 
