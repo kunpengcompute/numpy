@@ -24,6 +24,15 @@ BoostKit NumPy 是基于上游社区 NumPy 的鲲鹏平台性能优化项目，�
 
 具体构建依赖请以 `pyproject.toml`、`meson.build` 和 `doc/source/building` 中的说明为准。
 
+## KML FFT 快速开始
+
+如需在鲲鹏服务器上安装 KML、构建带 KML FFT 后端的 BoostKit NumPy，
+并验证 `kmlfft` 已经实际生效，请参阅
+[KML FFT 构建与使用指南](KML_FFT_GUIDE_CN.md)。
+
+指南同时提供完整 HPCKit 安装和从 HPCKit 中只提取 KML 的极简安装
+方式，适合第一次接触 HPCKit、KML 或 NumPy 源码构建的用户。
+
 ## 特性概览
 
 ### ARM64 / 鲲鹏性能优化
