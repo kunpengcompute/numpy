@@ -677,7 +677,6 @@ HWY_INLINE hn::Vec<D> pow_hwy_impl(D d, hn::Vec<D> x, hn::Vec<D> y)
 
 #define V_POWF_SIGN_BIAS (1 << (5 + 11))
 #define V_POWF_SMALL_BOUND 0x1p-126f
-#define V_POWF_INF_BITS 0x7f800000
 
 template <class D>
 HWY_INLINE auto IsZeroInfNanF(D d, hn::Vec<hn::RebindToUnsigned<D>> i)
@@ -700,7 +699,6 @@ HWY_INLINE auto IsZeroInfNanF(D d, hn::Vec<hn::RebindToUnsigned<D>> i)
 #define V_POWF_SMALL_NORM 0x1p23f
 #define V_POWF_OFF 0x3f35d000
 #define V_POWF_MANTISSA_MASK 0x007fffff
-#define V_POWF_INF_BITS 0x7f800000
 
 // float pow tables (matching optimized-routines sv_powf_inline.h)
 #define V_POWF_EXP2_TABLE_BITS 5
@@ -761,7 +759,7 @@ static const npy_double __powf_exp2_poly[3] = {
 template <class D64>
 HWY_INLINE hn::Vec<D64> PowfCoreExt(
     D64 d64, hn::Vec<hn::RebindToUnsigned<D64>> i, hn::Vec<D64> z, hn::Vec<hn::RebindToSigned<D64>> k,
-    hn::Vec<D64> y, hn::Vec<hn::RebindToUnsigned<D64>> sign_bias, hn::Vec<D64> *pylogx)
+    hn::Vec<D64> y, hn::Vec<hn::RebindToUnsigned<D64>> sign_bias)
 {
     using DU64 = hn::RebindToUnsigned<D64>;
     using DS64 = hn::RebindToSigned<D64>;
@@ -784,12 +782,20 @@ HWY_INLINE hn::Vec<D64> PowfCoreExt(
     logx = hn::MulAdd(r, logx, hn::Set(d64, __powf_log2_poly[2]));
     logx = hn::MulAdd(r, logx, hn::Set(d64, __powf_log2_poly[3]));
     logx = hn::MulAdd(r, logx, y0);
-    *pylogx = hn::Mul(y, logx);
+    VD64 ylogx = hn::Mul(y, logx);
+
+    // Keep extreme lanes within the range supported by the exponent bit
+    // construction.  The boundary values still narrow naturally to zero or
+    // infinity, raising the corresponding underflow or overflow exception.
+    VD64 core_ylogx = hn::Min(
+            hn::Max(ylogx,
+                    hn::Set(d64, (npy_double)V_POWF_UFLOW_BOUND)),
+            hn::Set(d64, (npy_double)V_POWF_OFLOW_BOUND));
 
     // exp2(x) = 2^(k/N) * 2^r
-    VD64 kd = hn::Round(*pylogx);
+    VD64 kd = hn::Round(core_ylogx);
     VU64 ki = hn::BitCast(du64, hn::ConvertTo(ds64, kd));
-    r = hn::Sub(*pylogx, kd);
+    r = hn::Sub(core_ylogx, kd);
 
     VU64 ki_idx = hn::And(ki, hn::Set(du64, (uint64_t)(V_POWF_EXP2_N - 1)));
     VU64 t = hn::GatherIndex(du64, __powf_exp2_tab, hn::BitCast(ds64, ki_idx));
@@ -808,7 +814,7 @@ HWY_INLINE hn::Vec<D64> PowfCoreExt(
 // Widen vector to double precision and compute core on both halves.
 // Only available on SVE where Highway supports proper DemoteTo from double to float.
 template <class D32>
-HWY_INLINE hn::Vec<D32> powf_core(D32 d, hn::Vec<D32> *ylogx_out, hn::Vec<hn::RebindToUnsigned<D32>> tmp,
+HWY_INLINE hn::Vec<D32> powf_core(D32 d, hn::Vec<hn::RebindToUnsigned<D32>> tmp,
                                        hn::Vec<D32> iz, hn::Vec<D32> y, hn::Vec<hn::RebindToSigned<D32>> k,
                                        hn::Vec<hn::RebindToUnsigned<D32>> sign_bias)
 {
@@ -838,13 +844,11 @@ HWY_INLINE hn::Vec<D32> powf_core(D32 d, hn::Vec<D32> *ylogx_out, hn::Vec<hn::Re
     auto sign_bias_lo = hn::PromoteLowerTo(du64, sign_bias);
     auto sign_bias_hi = hn::PromoteUpperTo(du64, sign_bias);
 
-    hn::Vec<D64> ylogx_lo, ylogx_hi;
-    hn::Vec<D64> lo = PowfCoreExt(d64, idx_lo, iz_lo, k_lo, y_lo, sign_bias_lo, &ylogx_lo);
-    hn::Vec<D64> hi = PowfCoreExt(d64, idx_hi, iz_hi, k_hi, y_hi, sign_bias_hi, &ylogx_hi);
+    hn::Vec<D64> lo = PowfCoreExt(
+            d64, idx_lo, iz_lo, k_lo, y_lo, sign_bias_lo);
+    hn::Vec<D64> hi = PowfCoreExt(
+            d64, idx_hi, iz_hi, k_hi, y_hi, sign_bias_hi);
 
-    auto ylogx_lo_32 = hn::DemoteTo(dh, ylogx_lo);
-    auto ylogx_hi_32 = hn::DemoteTo(dh, ylogx_hi);
-    *ylogx_out = hn::Combine(d, ylogx_hi_32, ylogx_lo_32);
     auto lo_32 = hn::DemoteTo(dh, lo);
     auto hi_32 = hn::DemoteTo(dh, hi);
     return hn::Combine(d, hi_32, lo_32);
@@ -905,16 +909,8 @@ HWY_INLINE hn::Vec<D> powf_hwy_impl(D d, hn::Vec<D> x, hn::Vec<D> y)
     VD iz = hn::BitCast(d, hn::Sub(vix, top));
     VS k = hn::ShiftRight<23 - V_POWF_EXP2_TABLE_BITS>(hn::BitCast(ds, top));
 
-    // Compute core in extended precision and return intermediate ylogx results.
-    VD ylogx;
-    VD ret = powf_core(d, &ylogx, tmp, iz, y_comp, k, sign_bias);
-
-    // Handle exp special cases of underflow and overflow.
-    VU sign = hn::ShiftLeft<20 - V_POWF_EXP2_TABLE_BITS>(sign_bias);
-    VD ret_oflow = hn::BitCast(d, hn::Or(sign, hn::Set(du, V_POWF_INF_BITS)));
-    VD ret_uflow = hn::BitCast(d, sign);
-    ret = hn::IfThenElse(hn::Le(ylogx, hn::Set(d, V_POWF_UFLOW_BOUND)), ret_uflow, ret);
-    ret = hn::IfThenElse(hn::Gt(ylogx, hn::Set(d, V_POWF_OFLOW_BOUND)), ret_oflow, ret);
+    // Compute the core in extended precision.
+    VD ret = powf_core(d, tmp, iz, y_comp, k, sign_bias);
     // Cases of finite y and finite negative x.
     ret = hn::IfThenElse(yint_or_xpos, ret, hn::Set(d, NPY_NANF));
 
@@ -1214,7 +1210,9 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_power)
     }
 #endif
 
+#ifdef __aarch64__
 scalar:
+#endif
     BINARY_LOOP {
         const npy_float in1 = *(npy_float *)ip1;
         const npy_float in2 = *(npy_float *)ip2;
