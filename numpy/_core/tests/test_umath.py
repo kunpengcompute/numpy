@@ -1131,20 +1131,23 @@ class TestPower:
                 np.power(base, exponent)
 
     @pytest.mark.parametrize(
-        "extreme,error,expected",
-        [(10000.0, "overflow", np.inf),
-         (-10000.0, "underflow", 0.0)],
+        "base_value,extreme,error,expected",
+        [(2.0, 10000.0, "overflow", np.inf),
+         (2.0, -10000.0, "underflow", 0.0),
+         (-2.0, 10001.0, "overflow", -np.inf),
+         (-2.0, -10001.0, "underflow", -0.0)],
     )
-    def test_float_power_mixed_extreme_status(self, extreme, error,
-                                              expected):
-        base = np.full(100, 2.0, dtype=np.float32)
+    def test_float_power_mixed_extreme_status(self, base_value, extreme,
+                                              error, expected):
+        base = np.full(100, base_value, dtype=np.float32)
         exponent = np.ones(100, dtype=np.float32)
         exponent[::2] = extreme
 
         with np.errstate(all="ignore"):
             result = np.power(base, exponent)
         assert_array_equal(result[::2], expected)
-        assert_array_equal(result[1::2], 2.0)
+        assert_array_equal(np.signbit(result[::2]), np.signbit(expected))
+        assert_array_equal(result[1::2], base_value)
 
         with np.errstate(all="raise"):
             with pytest.raises(FloatingPointError, match=error):

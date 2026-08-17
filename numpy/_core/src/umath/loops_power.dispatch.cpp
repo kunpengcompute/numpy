@@ -677,7 +677,6 @@ HWY_INLINE hn::Vec<D> pow_hwy_impl(D d, hn::Vec<D> x, hn::Vec<D> y)
 
 #define V_POWF_SIGN_BIAS (1 << (5 + 11))
 #define V_POWF_SMALL_BOUND 0x1p-126f
-#define V_POWF_INF_BITS 0x7f800000
 
 template <class D>
 HWY_INLINE auto IsZeroInfNanF(D d, hn::Vec<hn::RebindToUnsigned<D>> i)
@@ -700,7 +699,6 @@ HWY_INLINE auto IsZeroInfNanF(D d, hn::Vec<hn::RebindToUnsigned<D>> i)
 #define V_POWF_SMALL_NORM 0x1p23f
 #define V_POWF_OFF 0x3f35d000
 #define V_POWF_MANTISSA_MASK 0x007fffff
-#define V_POWF_INF_BITS 0x7f800000
 
 // float pow tables (matching optimized-routines sv_powf_inline.h)
 #define V_POWF_EXP2_TABLE_BITS 5
