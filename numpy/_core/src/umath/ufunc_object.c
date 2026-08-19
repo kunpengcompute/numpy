@@ -68,6 +68,11 @@
 #include "number.h"
 #include "scalartypes.h"  // for is_anyscalar_exact and scalar_value
 
+#if defined(__aarch64__)
+#include "loops.h"
+#include "npy_cpu_features.h"
+#endif
+
 /********** PRINTF DEBUG TRACING **************/
 #define NPY_UF_DBG_TRACING 0
 
@@ -2498,6 +2503,134 @@ finish_loop:
 
 #if defined(__aarch64__)
 /*
+ * Try a fused cast-and-add path for native, aligned bool/int64/uint64 input
+ * reduced into float64.  Full contiguous reductions and C-contiguous
+ * trailing-axis reductions are handled by the AArch64 SIMD kernel.
+ *
+ * Returns:
+ *      1 on success; ``*out_result`` holds the new result array.
+ *      0 if any precondition is unmet (caller should run the slow path);
+ *        ``*out_result`` is NULL and no error is set.
+ *     -1 on hard error during the fast path; ``*out_result`` is NULL and
+ *        a Python error is set.
+ */
+static inline int
+try_reduce_cast_add_contiguous(
+        PyUFuncObject *ufunc, PyArrayObject *arr,
+        PyArray_Descr *const *descrs,
+        PyArrayObject *out, PyArrayObject *wheremask, PyObject *initial,
+        int ndim, int naxes, const npy_bool *axis_flags, int keepdims,
+        PyArrayObject **out_result)
+{
+    if (!((PyObject *)ufunc == n_ops.add
+            && out == NULL && wheremask == NULL && initial == NULL
+            && keepdims == 0
+            && PyArray_ISALIGNED(arr)
+            && PyArray_ISNOTSWAPPED(arr)
+            && descrs[0]->type_num == NPY_DOUBLE
+            && descrs[0] == descrs[1]
+            && descrs[1] == descrs[2]
+            && PyDataType_ISNOTSWAPPED(descrs[0]))) {
+        return 0;
+    }
+
+    int typenum = PyArray_TYPE(arr);
+    if (!(typenum == NPY_BOOL || typenum == NPY_INT64
+            || typenum == NPY_UINT64)) {
+        return 0;
+    }
+
+    int result_ndim;
+    npy_intp reduce_count;
+    if (naxes == ndim) {
+        if (!PyArray_ISONESEGMENT(arr)) {
+            return 0;
+        }
+        result_ndim = 0;
+        reduce_count = PyArray_SIZE(arr);
+    }
+    else {
+        /*
+         * A C-contiguous array whose reduced axes are a trailing suffix is a
+         * sequence of independent contiguous reductions.  This covers e.g.
+         * a 2-D ``axis=-1`` reduction without changing the elementwise add
+         * dispatcher or the accumulate/reduceat implementations.
+         */
+        if (!(naxes > 0 && ndim > naxes
+                && PyArray_CheckExact(arr)
+                && PyArray_IS_C_CONTIGUOUS(arr))) {
+            return 0;
+        }
+        result_ndim = ndim - naxes;
+        for (int idim = 0; idim < ndim; idim++) {
+            npy_bool expected = idim >= result_ndim;
+            if (axis_flags[idim] != expected) {
+                return 0;
+            }
+        }
+        reduce_count = 1;
+        for (int idim = result_ndim; idim < ndim; idim++) {
+            npy_intp dim = PyArray_DIM(arr, idim);
+            if (dim != 0 && reduce_count > NPY_MAX_INTP / dim) {
+                return 0;
+            }
+            reduce_count *= dim;
+        }
+    }
+    if (reduce_count == 0) {
+        /* Let the general reduction path create the correctly signed identity. */
+        return 0;
+    }
+
+    Py_INCREF(descrs[0]);
+    PyArrayObject *result = (PyArrayObject *)PyArray_NewFromDescr(
+            &PyArray_Type, descrs[0], result_ndim,
+            result_ndim == 0 ? NULL : PyArray_DIMS(arr),
+            NULL, NULL, 0, NULL);
+    if (result == NULL) {
+        return -1;
+    }
+
+    npy_intp result_count = PyArray_SIZE(result);
+    if (result_count == 0) {
+        *out_result = result;
+        return 1;
+    }
+
+    const char *src = PyArray_BYTES(arr);
+    npy_double *dst = (npy_double *)PyArray_BYTES(result);
+    npy_intp itemsize = PyArray_ITEMSIZE(arr);
+    if (reduce_count > NPY_MAX_INTP / itemsize) {
+        Py_DECREF(result);
+        return 0;
+    }
+    npy_intp src_step = reduce_count * itemsize;
+    int handled = 1;
+    NPY_BEGIN_THREADS_DEF;
+    /* Match the reduction wrapper's handling of stale floating-point flags. */
+    npy_clear_floatstatus_barrier((char *)arr);
+    NPY_BEGIN_THREADS_THRESHOLDED(PyArray_SIZE(arr));
+    for (npy_intp i = 0; i < result_count; i++) {
+        handled = NPY_CPU_DISPATCH_CALL(
+                DOUBLE_add_reduce_cast_contiguous,
+                (src, reduce_count, typenum, dst + i));
+        if (!handled) {
+            break;
+        }
+        src += src_step;
+    }
+    NPY_END_THREADS;
+    if (!handled) {
+        Py_DECREF(result);
+        return 0;
+    }
+
+    *out_result = result;
+    return 1;
+}
+
+
+/*
  * Try a fast path that bypasses NpyIter / PyUFunc_ReduceWrapper for full
  * reductions (axis=None) over a trivially iterable, aligned input where no
  * casting is required.  The strided reduce loop is called directly on the
@@ -2663,9 +2796,14 @@ PyUFunc_Reduce(PyUFuncObject *ufunc,
 
 #if defined(__aarch64__)
     PyArrayObject *result = NULL;
-    int fast_status = try_reduce_contiguous(
-            &context, arr, descrs, out, wheremask, initial,
-            ndim, naxes, keepdims, errormask, &result);
+    int fast_status = try_reduce_cast_add_contiguous(
+            ufunc, arr, descrs, out, wheremask, initial,
+            ndim, naxes, axis_flags, keepdims, &result);
+    if (fast_status == 0) {
+        fast_status = try_reduce_contiguous(
+                &context, arr, descrs, out, wheremask, initial,
+                ndim, naxes, keepdims, errormask, &result);
+    }
     if (fast_status == 0) {
         /* Fast path did not apply; run the full reduction. */
         result = PyUFunc_ReduceWrapper(&context,
