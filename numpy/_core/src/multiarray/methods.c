@@ -1,5 +1,8 @@
 #define NPY_NO_DEPRECATED_API NPY_API_VERSION
 #define _MULTIARRAYMODULE
+#if defined(__aarch64__)
+#define _UMATHMODULE
+#endif
 
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
@@ -35,6 +38,12 @@
 #include "methods.h"
 #include "alloc.h"
 #include "array_api_standard.h"
+
+#if defined(__aarch64__) && NPY_HAVE_HIGHWAY && \
+        NPY_BYTE_ORDER == NPY_LITTLE_ENDIAN
+#include "cast_hwy.h"
+#include "umathmodule.h"
+#endif
 
 #include <stdarg.h>
 
@@ -822,7 +831,26 @@ array_astype(PyArrayObject *self,
         }
     }
 
-    if (!PyArray_CanCastArrayTo(self, dtype, casting)) {
+#if defined(__aarch64__) && NPY_HAVE_HIGHWAY && \
+        NPY_BYTE_ORDER == NPY_LITTLE_ENDIAN
+    /*
+     * Batch small, inner-contiguous 2-D casts into one Highway NEON call.
+     * The size limit bounds the work done while holding the GIL.
+     */
+    int hwy_candidate = casting == NPY_UNSAFE_CASTING &&
+            npy_cast_hwy_supports(PyArray_TYPE(self), dtype->type_num) &&
+            PyArray_CheckExact(self) &&
+            PyArray_NDIM(self) == 2 && PyArray_DIM(self, 0) > 0 &&
+            PyArray_DIM(self, 1) >= 32 &&
+            PyArray_SIZE(self) <= 32768 &&
+            PyArray_STRIDE(self, 1) == PyArray_ITEMSIZE(self) &&
+            PyArray_ISNBO(PyArray_DESCR(self)->byteorder) &&
+            PyArray_ISNBO(dtype->byteorder);
+#else
+    int hwy_candidate = 0;
+#endif
+
+    if (!hwy_candidate && !PyArray_CanCastArrayTo(self, dtype, casting)) {
         PyErr_Clear();
         npy_set_invalid_cast_error(
                 PyArray_DESCR(self), dtype, casting, PyArray_NDIM(self) == 0);
@@ -834,8 +862,26 @@ array_astype(PyArrayObject *self,
 
     /* This steals the reference to dtype */
     Py_INCREF(dtype);
-    ret = (PyArrayObject *)PyArray_NewLikeArray(
-                                self, order, dtype, subok);
+#if defined(__aarch64__) && NPY_HAVE_HIGHWAY && \
+        NPY_BYTE_ORDER == NPY_LITTLE_ENDIAN
+    int hwy_c_order = 0;
+    if (hwy_candidate && order == NPY_KEEPORDER) {
+        npy_intp row_bytes = PyArray_DIM(self, 1) * PyArray_ITEMSIZE(self);
+        /* Non-overlapping rows make axis 1 fastest, hence KEEPORDER is C. */
+        hwy_c_order = PyArray_STRIDE(self, 0) >= row_bytes ||
+                PyArray_STRIDE(self, 0) <= -row_bytes;
+    }
+    if (hwy_c_order) {
+        ret = (PyArrayObject *)PyArray_NewFromDescr(
+                &PyArray_Type, dtype, PyArray_NDIM(self), PyArray_DIMS(self),
+                NULL, NULL, NPY_CORDER, NULL);
+    }
+    else
+#endif
+    {
+        ret = (PyArrayObject *)PyArray_NewLikeArray(
+                                    self, order, dtype, subok);
+    }
     if (ret == NULL) {
         Py_DECREF(dtype);
         return NULL;
@@ -849,6 +895,33 @@ array_astype(PyArrayObject *self,
         ((PyArrayObject_fields *)ret)->descr = dtype;
     }
     int success;
+#if defined(__aarch64__) && NPY_HAVE_HIGHWAY && \
+        NPY_BYTE_ORDER == NPY_LITTLE_ENDIAN
+    int hwy_astype = hwy_candidate && PyArray_CheckExact(ret) &&
+            out_ndim == 2 &&
+            PyArray_DIM(self, 0) == PyArray_DIM(ret, 0) &&
+            PyArray_DIM(self, 1) == PyArray_DIM(ret, 1) &&
+            PyArray_STRIDE(ret, 1) == PyArray_ITEMSIZE(ret) &&
+            PyArray_ISNBO(PyArray_DESCR(ret)->byteorder);
+
+    if (hwy_astype) {
+        npy_clear_floatstatus_barrier((char *)&self);
+
+        success = npy_cast_hwy_2d(
+                PyArray_TYPE(self), PyArray_TYPE(ret),
+                PyArray_BYTES(self), PyArray_STRIDE(self, 0),
+                PyArray_BYTES(ret), PyArray_STRIDE(ret, 0),
+                PyArray_DIM(self, 1), PyArray_DIM(self, 0));
+
+        if (success >= 0) {
+            int fpes = npy_get_floatstatus_barrier((char *)&self);
+            if (fpes && PyUFunc_GiveFloatingpointErrors("cast", fpes) < 0) {
+                success = -1;
+            }
+        }
+    }
+    else
+#endif
     if (((int)casting & NPY_SAME_VALUE_CASTING_FLAG) > 0) {
         success = PyArray_AssignArray(ret, self, NULL, casting);
     } else {

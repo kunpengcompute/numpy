@@ -882,6 +882,34 @@ if cpu_family == 'aarch64'
   endif
 endif
 
+if cpu_family == 'aarch64' and use_highway
+  mtargets = mod_features.multi_targets(
+    'cast_hwy.dispatch.h',
+    multiarray_gen_headers + ['src/multiarray/cast_hwy.dispatch.cpp'],
+    # NEON/ASIMD is part of the AArch64 baseline. Do not enable SVE here.
+    dispatch: [NEON],
+    baseline: CPU_BASELINE,
+    prefix: 'NPY_',
+    dependencies: [py_dep, np_core_dep],
+    c_args: c_args_common + max_opt,
+    cpp_args: cpp_args_common + max_opt,
+    include_directories: [
+      'include',
+      'src/common',
+      'src/multiarray',
+      'src/multiarray/stringdtype',
+      'src/npymath',
+      'src/umath',
+      'src/highway',
+    ]
+  )
+  if not is_variable('multiarray_umath_mtargets')
+    multiarray_umath_mtargets = mtargets
+  else
+    multiarray_umath_mtargets.extend(mtargets)
+  endif
+endif
+
 # Build npysort dispatch-able sources
 # -----------------------------------
 foreach gen_mtargets : [
