@@ -33,6 +33,8 @@
  *  #c = f, #
  *  #C = F, #
  *  #VECTOR = NPY_SIMD_F32, NPY_SIMD_F64#
+ *  #is_f32 = 1, 0#
+ *  #nlanes = 4, 2#
  */
 /**begin repeat1
  * Arithmetic
@@ -43,6 +45,59 @@
  * # is_div = 0*3, 1#
  * # is_mul = 0*2, 1, 0#
  */
+#if @VECTOR@ && @PW@ && defined(__aarch64__) && npyv_nlanes_@sfx@ == @nlanes@
+/* Preserve the eight accumulators and 128-element tree in pairwise_sum. */
+static inline @type@
+arm_simd_pairwise_sum_@sfx@(const @type@ *a, npy_intp n)
+{
+    if (n < 8) {
+        @type@ res = -0.0@c@;
+        for (npy_intp i = 0; i < n; ++i) {
+            res += a[i];
+        }
+        return res;
+    }
+    if (n <= PW_BLOCKSIZE) {
+        const npy_intp vstep = npyv_nlanes_@sfx@;
+        npyv_@sfx@ acc0 = npyv_load_@sfx@(a);
+        npyv_@sfx@ acc1 = npyv_load_@sfx@(a + vstep);
+#if !@is_f32@
+        npyv_@sfx@ acc2 = npyv_load_@sfx@(a + vstep * 2);
+        npyv_@sfx@ acc3 = npyv_load_@sfx@(a + vstep * 3);
+#endif
+        npy_intp i;
+
+        for (i = 8; i < n - (n % 8); i += 8) {
+            acc0 = npyv_add_@sfx@(acc0, npyv_load_@sfx@(a + i));
+            acc1 = npyv_add_@sfx@(
+                    acc1, npyv_load_@sfx@(a + i + vstep));
+#if !@is_f32@
+            acc2 = npyv_add_@sfx@(
+                    acc2, npyv_load_@sfx@(a + i + vstep * 2));
+            acc3 = npyv_add_@sfx@(
+                    acc3, npyv_load_@sfx@(a + i + vstep * 3));
+#endif
+        }
+
+#if @is_f32@
+        @type@ sum = npyv_sum_@sfx@(acc0) + npyv_sum_@sfx@(acc1);
+#else
+        @type@ sum = (npyv_sum_@sfx@(acc0) + npyv_sum_@sfx@(acc1)) +
+                      (npyv_sum_@sfx@(acc2) + npyv_sum_@sfx@(acc3));
+#endif
+        for (; i < n; ++i) {
+            sum += a[i];
+        }
+        return sum;
+    }
+
+    npy_intp n2 = n / 2;
+    n2 -= n2 % 8;
+    return arm_simd_pairwise_sum_@sfx@(a, n2) +
+           arm_simd_pairwise_sum_@sfx@(a + n2, n - n2);
+}
+#endif
+
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
@@ -52,6 +107,19 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
     // reduce
     if (ssrc0 == 0 && ssrc0 == sdst && src0 == dst) {
     #if @PW@
+#if @VECTOR@ && defined(__aarch64__) && npyv_nlanes_@sfx@ == @nlanes@
+        if (ssrc1 == sizeof(@type@) && len >= 8) {
+            @type@ sum = arm_simd_pairwise_sum_@sfx@(
+                    (const @type@ *)src1, len);
+            if (!NPY_UNLIKELY(npy_isnan(sum))) {
+                *((@type@ *)src0) @OP@= sum;
+                npyv_cleanup();
+                return;
+            }
+            /* Preserve the original path's NaN payload selection. */
+            npyv_cleanup();
+        }
+#endif
         *((@type@*)src0) @OP@= @TYPE@_pairwise_sum(src1, len, ssrc1);
     #else
         @type@ acc = *((@type@*)src0);
