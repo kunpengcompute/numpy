@@ -3415,6 +3415,7 @@ unicode_arrtype_dealloc(PyObject *v)
  * #TYPE = BYTE, SHORT, INT, LONG, LONGLONG, UBYTE, USHORT, UINT, ULONG,
  *         ULONGLONG, HALF, FLOAT, DOUBLE, LONGDOUBLE, CFLOAT, CDOUBLE,
  *         CLONGDOUBLE, STRING, UNICODE#
+ * #is_integer = 1*10, 0*9#
  */
 
 /* used as a pattern for testing token equality */
@@ -3423,6 +3424,32 @@ unicode_arrtype_dealloc(PyObject *v)
 static PyObject *
 @name@_arrtype_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 {
+#if @is_integer@ && defined(__aarch64__)
+    /*
+     * On AArch64, integer conversion already has a checked scalar
+     * implementation.  For the exact one-argument builtin call, use it
+     * directly instead of constructing a temporary 0-D array and converting
+     * that array back to a scalar.
+     */
+    if (type == &Py@Name@ArrType_Type && kwds == NULL
+            && PyTuple_CheckExact(args) && PyTuple_GET_SIZE(args) == 1) {
+        PyObject *value_obj = PyTuple_GET_ITEM(args, 0);
+        if (PyLong_CheckExact(value_obj)) {
+            npy_@name@ value;
+            if (@TYPE@_setitem(NULL, value_obj, (char *)&value) < 0) {
+                return NULL;
+            }
+            Py@Name@ScalarObject *scalar =
+                    (Py@Name@ScalarObject *)type->tp_alloc(type, 0);
+            if (scalar == NULL) {
+                return NULL;
+            }
+            scalar->obval = value;
+            return (PyObject *)scalar;
+        }
+    }
+#endif
+
     /* allow base-class (if any) to do conversion */
 #if defined(_@TYPE@_IS_UNICODE)
     PyObject *from_superclass = PyUnicode_Type.tp_new(type, args, kwds);
