@@ -308,6 +308,10 @@ NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT void @TYPE@_@kind@,
 /**end repeat**/
 
 #include "loops_arithm_fp.dispatch.h"
+#if defined(__aarch64__)
+NPY_CPU_DISPATCH_DECLARE(NPY_NO_EXPORT int DOUBLE_add_reduce_cast_contiguous,
+    (const char *src, npy_intp count, int typenum, npy_double *result))
+#endif
 /**begin repeat
  *  #TYPE = FLOAT, DOUBLE#
  */

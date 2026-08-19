@@ -10,12 +10,133 @@
 // Provides the various *_LOOP macros
 #include "fast_loop_macros.h"
 
+#if defined(__aarch64__) && NPY_SIMD_F64 && npyv_nlanes_f64 == 2
+/**begin repeat
+ * #itype = npy_int64, npy_uint64#
+ * #isfx = s64, u64#
+ * #cvt = vcvtq_f64_s64, vcvtq_f64_u64#
+ */
+static inline npy_double
+arm_simd_pairwise_cast_sum_@isfx@(const @itype@ *a, npy_intp n)
+{
+    if (n < 8) {
+        npy_double res = -0.0;
+        for (npy_intp i = 0; i < n; ++i) {
+            res += (npy_double)a[i];
+        }
+        return res;
+    }
+    if (n <= PW_BLOCKSIZE) {
+        npyv_f64 acc0 = @cvt@(npyv_load_@isfx@(a));
+        npyv_f64 acc1 = @cvt@(npyv_load_@isfx@(a + 2));
+        npyv_f64 acc2 = @cvt@(npyv_load_@isfx@(a + 4));
+        npyv_f64 acc3 = @cvt@(npyv_load_@isfx@(a + 6));
+        npy_intp i;
+
+        for (i = 8; i < n - (n % 8); i += 8) {
+            acc0 = npyv_add_f64(
+                    acc0, @cvt@(npyv_load_@isfx@(a + i)));
+            acc1 = npyv_add_f64(
+                    acc1, @cvt@(npyv_load_@isfx@(a + i + 2)));
+            acc2 = npyv_add_f64(
+                    acc2, @cvt@(npyv_load_@isfx@(a + i + 4)));
+            acc3 = npyv_add_f64(
+                    acc3, @cvt@(npyv_load_@isfx@(a + i + 6)));
+        }
+
+        npy_double res = (npyv_sum_f64(acc0) + npyv_sum_f64(acc1)) +
+                         (npyv_sum_f64(acc2) + npyv_sum_f64(acc3));
+        for (; i < n; ++i) {
+            res += (npy_double)a[i];
+        }
+        return res;
+    }
+
+    npy_intp n2 = n / 2;
+    n2 -= n2 % 8;
+    return arm_simd_pairwise_cast_sum_@isfx@(a, n2) +
+           arm_simd_pairwise_cast_sum_@isfx@(a + n2, n - n2);
+}
+/**end repeat**/
+
+static inline npy_double
+arm_simd_bool_sum_f64(const npy_bool *a, npy_intp n)
+{
+    const npy_intp vstep = npyv_nlanes_u8;
+    const npyv_u8 ones = npyv_setall_u8(1);
+    npy_uint64 count = 0;
+    npy_intp i = 0;
+
+    while (n - i >= 4 * vstep) {
+        npy_intp rounds = (n - i) / (4 * vstep);
+        if (rounds > 63) {
+            rounds = 63;
+        }
+        npyv_u8 acc0 = npyv_zero_u8();
+        npyv_u8 acc1 = npyv_zero_u8();
+        npyv_u8 acc2 = npyv_zero_u8();
+        npyv_u8 acc3 = npyv_zero_u8();
+        for (npy_intp j = 0; j < rounds; j++, i += 4 * vstep) {
+            acc0 = npyv_add_u8(acc0, npyv_min_u8(
+                    npyv_load_u8((const npy_uint8 *)a + i), ones));
+            acc1 = npyv_add_u8(acc1, npyv_min_u8(
+                    npyv_load_u8((const npy_uint8 *)a + i + vstep), ones));
+            acc2 = npyv_add_u8(acc2, npyv_min_u8(
+                    npyv_load_u8((const npy_uint8 *)a + i + 2 * vstep), ones));
+            acc3 = npyv_add_u8(acc3, npyv_min_u8(
+                    npyv_load_u8((const npy_uint8 *)a + i + 3 * vstep), ones));
+        }
+        npyv_u8 acc = npyv_add_u8(
+                npyv_add_u8(acc0, acc1), npyv_add_u8(acc2, acc3));
+        count += npyv_sumup_u8(acc);
+    }
+    for (; n - i >= vstep; i += vstep) {
+        npyv_u8 values = npyv_load_u8((const npy_uint8 *)a + i);
+        count += npyv_sumup_u8(npyv_min_u8(values, ones));
+    }
+    for (; i < n; ++i) {
+        count += a[i] != 0;
+    }
+    return (npy_double)count;
+}
+#endif
+
+
+#if defined(__aarch64__)
+NPY_NO_EXPORT int
+NPY_CPU_DISPATCH_CURFX(DOUBLE_add_reduce_cast_contiguous)(
+        const char *src, npy_intp count, int typenum, npy_double *result)
+{
+#if NPY_SIMD_F64 && npyv_nlanes_f64 == 2
+    switch (typenum) {
+        case NPY_BOOL:
+            *result = arm_simd_bool_sum_f64((const npy_bool *)src, count);
+            break;
+        case NPY_INT64:
+            *result = arm_simd_pairwise_cast_sum_s64(
+                    (const npy_int64 *)src, count);
+            break;
+        case NPY_UINT64:
+            *result = arm_simd_pairwise_cast_sum_u64(
+                    (const npy_uint64 *)src, count);
+            break;
+        default:
+            return 0;
+    }
+    npyv_cleanup();
+    return 1;
+#else
+    return 0;
+#endif
+}
+#endif
+
 /**
  * TODO:
  *  - Improve the implementation of SIMD complex absolute,
  *    current one kinda slow and it can be optimized by
  *    at least avoiding the division and keep sqrt.
- *  - Vectorize reductions
+ *  - Vectorize remaining reductions
  *  - Add support for ASIMD/VCMLA through universal intrinsics.
  */
 
