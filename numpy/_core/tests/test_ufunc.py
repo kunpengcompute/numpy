@@ -2630,6 +2630,38 @@ class TestUfunc:
         assert_array_equal(
             np.add.reduceat(arr_be, [1]), np.add.reduceat(arr_le, [1]))
 
+    @pytest.mark.parametrize(
+        "ufunc,dtype",
+        [
+            (np.add, np.float64),
+            (np.multiply, np.int16),
+            (np.maximum, np.float32),
+            (np.minimum, np.int32),
+            (np.bitwise_or, np.uint64),
+            (np.logical_and, np.bool_),
+        ],
+    )
+    def test_reduce_contiguous_matches_out_fallback(self, ufunc, dtype):
+        values = (np.arange(3 * 43) % 7 + 1).astype(dtype).reshape(3, 43)
+        if dtype is np.bool_:
+            values = (np.arange(3 * 43) % 3 != 0).reshape(3, 43)
+        actual = ufunc.reduce(values, axis=None)
+        out = np.empty((), dtype=np.asarray(actual).dtype)
+        expected = ufunc.reduce(values, axis=None, out=out)
+        assert_equal(actual, expected)
+
+    def test_reduce_contiguous_order_and_identity(self):
+        base = np.arange(257, dtype=np.float64)
+        for values in [base[::2], base[::-1], np.broadcast_to(3.0, 129)]:
+            actual = np.subtract.reduce(values)
+            out = np.empty((), dtype=actual.dtype)
+            expected = np.subtract.reduce(values, out=out)
+            assert_equal(actual, expected)
+
+        assert np.maximum.reduce(np.array([3.0])) == 3.0
+        with pytest.raises(ValueError, match="not reorderable"):
+            np.subtract.reduce(base[:6].reshape(2, 3), axis=None)
+
     def test_reducelike_out_promotes(self):
         # Check that the out argument to reductions is considered for
         # promotion.  See also gh-20455.
