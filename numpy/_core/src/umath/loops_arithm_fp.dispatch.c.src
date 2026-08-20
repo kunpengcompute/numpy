@@ -14,8 +14,14 @@
 /**begin repeat
  * #itype = npy_int64, npy_uint64#
  * #isfx = s64, u64#
- * #cvt = vcvtq_f64_s64, vcvtq_f64_u64#
  */
+static inline npyv_f64
+simd_load_cast_@isfx@_f64(const @itype@ *a)
+{
+    /* NPY SIMD has no numeric 64-bit integer-to-f64 conversion primitive. */
+    return npyv_set_f64((npy_double)a[0], (npy_double)a[1]);
+}
+
 static inline npy_double
 arm_simd_pairwise_cast_sum_@isfx@(const @itype@ *a, npy_intp n)
 {
@@ -27,21 +33,21 @@ arm_simd_pairwise_cast_sum_@isfx@(const @itype@ *a, npy_intp n)
         return res;
     }
     if (n <= PW_BLOCKSIZE) {
-        npyv_f64 acc0 = @cvt@(npyv_load_@isfx@(a));
-        npyv_f64 acc1 = @cvt@(npyv_load_@isfx@(a + 2));
-        npyv_f64 acc2 = @cvt@(npyv_load_@isfx@(a + 4));
-        npyv_f64 acc3 = @cvt@(npyv_load_@isfx@(a + 6));
+        npyv_f64 acc0 = simd_load_cast_@isfx@_f64(a);
+        npyv_f64 acc1 = simd_load_cast_@isfx@_f64(a + 2);
+        npyv_f64 acc2 = simd_load_cast_@isfx@_f64(a + 4);
+        npyv_f64 acc3 = simd_load_cast_@isfx@_f64(a + 6);
         npy_intp i;
 
         for (i = 8; i < n - (n % 8); i += 8) {
             acc0 = npyv_add_f64(
-                    acc0, @cvt@(npyv_load_@isfx@(a + i)));
+                    acc0, simd_load_cast_@isfx@_f64(a + i));
             acc1 = npyv_add_f64(
-                    acc1, @cvt@(npyv_load_@isfx@(a + i + 2)));
+                    acc1, simd_load_cast_@isfx@_f64(a + i + 2));
             acc2 = npyv_add_f64(
-                    acc2, @cvt@(npyv_load_@isfx@(a + i + 4)));
+                    acc2, simd_load_cast_@isfx@_f64(a + i + 4));
             acc3 = npyv_add_f64(
-                    acc3, @cvt@(npyv_load_@isfx@(a + i + 6)));
+                    acc3, simd_load_cast_@isfx@_f64(a + i + 6));
         }
 
         npy_double res = (npyv_sum_f64(acc0) + npyv_sum_f64(acc1)) +

@@ -14,6 +14,7 @@ import numpy._core._rational_tests as _rational_tests
 import numpy._core._umath_tests as umt
 import numpy._core.umath as ncu
 import numpy.linalg._umath_linalg as uml
+from numpy._core._simd import clear_floatstatus, get_floatstatus
 from numpy.exceptions import AxisError
 from numpy.testing import (
     HAS_REFCOUNT,
@@ -2733,6 +2734,13 @@ class TestUfunc:
         assert_array_max_ulp(actual, expected, maxulp=2)
 
     @pytest.mark.parametrize("dtype", [np.bool_, np.int64, np.uint64])
+    def test_add_reduce_cast_floatstatus(self, dtype):
+        values = self._cast_reduce_data(dtype, 129)
+        clear_floatstatus()
+        np.add.reduce(values, dtype=np.float64)
+        assert get_floatstatus() == 0
+
+    @pytest.mark.parametrize("dtype", [np.bool_, np.int64, np.uint64])
     @pytest.mark.parametrize(
         "shape,axis,order",
         [
@@ -2758,9 +2766,13 @@ class TestUfunc:
     @pytest.mark.parametrize("dtype", [np.bool_, np.int64, np.uint64])
     def test_add_reduce_cast_fallback_layouts(self, dtype):
         base = self._cast_reduce_data(dtype, 2 * 3 * 129)
+        matrix = base.reshape(6, 129)
 
         cases = [
             ("strided", base[::2], None),
+            ("negative-stride", base[::-2], None),
+            ("column", matrix[:, 1], None),
+            ("zero-stride", np.broadcast_to(base[1:2], 129), None),
             ("middle-axis", base.reshape(2, 129, 3), 1),
             (
                 "fortran-partial",
@@ -2781,7 +2793,9 @@ class TestUfunc:
             ])
         for name, values, axis in cases:
             actual = np.add.reduce(values, axis=axis, dtype=np.float64)
-            expected = np.add.reduce(values.astype(np.float64), axis=axis)
+            expected = np.empty_like(actual)
+            np.add.reduce(
+                values, axis=axis, dtype=np.float64, out=expected)
             self._assert_float64_bits_equal(actual, expected, name)
 
     def test_add_reduce_cast_fallback_keywords(self):
