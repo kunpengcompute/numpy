@@ -2543,6 +2543,10 @@ try_reduce_cast_add_contiguous(
     int result_ndim;
     npy_intp reduce_count;
     if (naxes == ndim) {
+        /*
+         * Unlike PyArray_TRIVIALLY_ITERABLE, this does not accept arbitrary
+         * 1-D strides.  Either contiguity flag guarantees one linear segment.
+         */
         if (!PyArray_ISONESEGMENT(arr)) {
             return 0;
         }
@@ -2609,6 +2613,10 @@ try_reduce_cast_add_contiguous(
     NPY_BEGIN_THREADS_DEF;
     /* Match the reduction wrapper's handling of stale floating-point flags. */
     npy_clear_floatstatus_barrier((char *)arr);
+    /*
+     * The largest possible integer sum is below 2**127.  Conversion and
+     * addition can therefore only set inexact, which NumPy does not monitor.
+     */
     NPY_BEGIN_THREADS_THRESHOLDED(PyArray_SIZE(arr));
     for (npy_intp i = 0; i < result_count; i++) {
         handled = NPY_CPU_DISPATCH_CALL(
