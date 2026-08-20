@@ -463,6 +463,64 @@ class TestAdd:
         a['a'] = -1
         assert_equal(a['b'].sum(), 0)
 
+    @pytest.mark.parametrize(
+        "dtype,uint_dtype",
+        [(np.float32, np.uint32), (np.float64, np.uint64)],
+    )
+    @pytest.mark.parametrize("size", [7, 8, 9, 128, 129, ncu.BUFSIZE + 1])
+    def test_reduce_contiguous_matches_strided(
+            self, dtype, uint_dtype, size):
+        indices = np.arange(size, dtype=np.int64)
+        values = ((indices % 19) - 9).astype(dtype)
+        values[::3] *= dtype(0.125)
+        values[::11] *= dtype(1e6)
+
+        storage = np.empty(size * 2, dtype=dtype)
+        strided = storage[::2]
+        strided[...] = values
+
+        actual = np.add.reduce(values)
+        expected = np.add.reduce(strided)
+        assert_equal(actual.view(uint_dtype), expected.view(uint_dtype))
+
+    @pytest.mark.parametrize(
+        "dtype,uint_dtype,payloads",
+        [
+            (np.float32, np.uint32, (0x7fc01234, 0xffc04321)),
+            (
+                np.float64,
+                np.uint64,
+                (0x7ff8000000001234, 0xfff8000000004321),
+            ),
+        ],
+    )
+    def test_reduce_nan_payload_matches_strided(
+            self, dtype, uint_dtype, payloads):
+        values = np.ones(129, dtype=dtype)
+        values.view(uint_dtype)[[7, 128]] = payloads
+
+        storage = np.empty(values.size * 2, dtype=dtype)
+        strided = storage[::2]
+        strided[...] = values
+
+        with np.errstate(invalid="ignore"):
+            actual = np.add.reduce(values)
+            expected = np.add.reduce(strided)
+        assert_equal(actual.view(uint_dtype), expected.view(uint_dtype))
+
+    @pytest.mark.skipif(IS_WASM, reason="fp errors don't work in wasm")
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_reduce_contiguous_invalid_fpe(self, dtype):
+        values = np.ones(129, dtype=dtype)
+        values[0] = np.inf
+        values[8] = -np.inf
+
+        with np.errstate(invalid="raise"):
+            with pytest.raises(
+                    FloatingPointError,
+                    match="invalid value encountered in reduce"):
+                np.add.reduce(values)
+
 
 class TestDivision:
     def test_division_int(self):

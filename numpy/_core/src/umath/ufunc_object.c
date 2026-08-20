@@ -68,6 +68,11 @@
 #include "number.h"
 #include "scalartypes.h"  // for is_anyscalar_exact and scalar_value
 
+#if defined(__aarch64__)
+#include "loops.h"
+#include "npy_cpu_features.h"
+#endif
+
 /********** PRINTF DEBUG TRACING **************/
 #define NPY_UF_DBG_TRACING 0
 
@@ -2496,23 +2501,262 @@ finish_loop:
     return retval;
 }
 
+#if defined(__aarch64__)
 /*
- * The implementation of the reduction operators with the new iterator
- * turned into a bit of a long function here, but I think the design
- * of this part needs to be changed to be more like einsum, so it may
- * not be worth refactoring it too much.  Consider this timing:
+ * Try a fused cast-and-add path for native, aligned bool/int64/uint64 input
+ * reduced into float64.  Full contiguous reductions and C-contiguous
+ * trailing-axis reductions are handled by the AArch64 SIMD kernel.
  *
- * >>> a = arange(10000)
- *
- * >>> timeit sum(a)
- * 10000 loops, best of 3: 17 us per loop
- *
- * >>> timeit einsum("i->",a)
- * 100000 loops, best of 3: 13.5 us per loop
- *
- * The axes must already be bounds-checked by the calling function,
- * this function does not validate them.
+ * Returns:
+ *      1 on success; ``*out_result`` holds the new result array.
+ *      0 if any precondition is unmet (caller should run the slow path);
+ *        ``*out_result`` is NULL and no error is set.
+ *     -1 on hard error during the fast path; ``*out_result`` is NULL and
+ *        a Python error is set.
  */
+static inline int
+try_reduce_cast_add_contiguous(
+        PyUFuncObject *ufunc, PyArrayObject *arr,
+        PyArray_Descr *const *descrs,
+        PyArrayObject *out, PyArrayObject *wheremask, PyObject *initial,
+        int ndim, int naxes, const npy_bool *axis_flags, int keepdims,
+        PyArrayObject **out_result)
+{
+    if (!((PyObject *)ufunc == n_ops.add
+            && out == NULL && wheremask == NULL && initial == NULL
+            && keepdims == 0
+            && PyArray_ISALIGNED(arr)
+            && PyArray_ISNOTSWAPPED(arr)
+            && descrs[0]->type_num == NPY_DOUBLE
+            && descrs[0] == descrs[1]
+            && descrs[1] == descrs[2]
+            && PyDataType_ISNOTSWAPPED(descrs[0]))) {
+        return 0;
+    }
+
+    int typenum = PyArray_TYPE(arr);
+    if (!(typenum == NPY_BOOL || typenum == NPY_INT64
+            || typenum == NPY_UINT64)) {
+        return 0;
+    }
+
+    int result_ndim;
+    npy_intp reduce_count;
+    if (naxes == ndim) {
+        /*
+         * Unlike PyArray_TRIVIALLY_ITERABLE, this does not accept arbitrary
+         * 1-D strides.  Either contiguity flag guarantees one linear segment.
+         */
+        if (!PyArray_ISONESEGMENT(arr)) {
+            return 0;
+        }
+        result_ndim = 0;
+        reduce_count = PyArray_SIZE(arr);
+    }
+    else {
+        /*
+         * A C-contiguous array whose reduced axes are a trailing suffix is a
+         * sequence of independent contiguous reductions.  This covers e.g.
+         * a 2-D ``axis=-1`` reduction without changing the elementwise add
+         * dispatcher or the accumulate/reduceat implementations.
+         */
+        if (!(naxes > 0 && ndim > naxes
+                && PyArray_CheckExact(arr)
+                && PyArray_IS_C_CONTIGUOUS(arr))) {
+            return 0;
+        }
+        result_ndim = ndim - naxes;
+        for (int idim = 0; idim < ndim; idim++) {
+            npy_bool expected = idim >= result_ndim;
+            if (axis_flags[idim] != expected) {
+                return 0;
+            }
+        }
+        reduce_count = 1;
+        for (int idim = result_ndim; idim < ndim; idim++) {
+            npy_intp dim = PyArray_DIM(arr, idim);
+            if (dim != 0 && reduce_count > NPY_MAX_INTP / dim) {
+                return 0;
+            }
+            reduce_count *= dim;
+        }
+    }
+    if (reduce_count == 0) {
+        /* Let the general reduction path create the correctly signed identity. */
+        return 0;
+    }
+
+    Py_INCREF(descrs[0]);
+    PyArrayObject *result = (PyArrayObject *)PyArray_NewFromDescr(
+            &PyArray_Type, descrs[0], result_ndim,
+            result_ndim == 0 ? NULL : PyArray_DIMS(arr),
+            NULL, NULL, 0, NULL);
+    if (result == NULL) {
+        return -1;
+    }
+
+    npy_intp result_count = PyArray_SIZE(result);
+    if (result_count == 0) {
+        *out_result = result;
+        return 1;
+    }
+
+    const char *src = PyArray_BYTES(arr);
+    npy_double *dst = (npy_double *)PyArray_BYTES(result);
+    npy_intp itemsize = PyArray_ITEMSIZE(arr);
+    if (reduce_count > NPY_MAX_INTP / itemsize) {
+        Py_DECREF(result);
+        return 0;
+    }
+    npy_intp src_step = reduce_count * itemsize;
+    int handled = 1;
+    NPY_BEGIN_THREADS_DEF;
+    /* Match the reduction wrapper's handling of stale floating-point flags. */
+    npy_clear_floatstatus_barrier((char *)arr);
+    /*
+     * The largest possible integer sum is below 2**127.  Conversion and
+     * addition can therefore only set inexact, which NumPy does not monitor.
+     */
+    NPY_BEGIN_THREADS_THRESHOLDED(PyArray_SIZE(arr));
+    for (npy_intp i = 0; i < result_count; i++) {
+        handled = NPY_CPU_DISPATCH_CALL(
+                DOUBLE_add_reduce_cast_contiguous,
+                (src, reduce_count, typenum, dst + i));
+        if (!handled) {
+            break;
+        }
+        src += src_step;
+    }
+    NPY_END_THREADS;
+    if (!handled) {
+        Py_DECREF(result);
+        return 0;
+    }
+
+    *out_result = result;
+    return 1;
+}
+
+
+/*
+ * Try a fast path that bypasses NpyIter / PyUFunc_ReduceWrapper for full
+ * reductions (axis=None) over a trivially iterable, aligned input where no
+ * casting is required.  The strided reduce loop is called directly on the
+ * input buffer and writes into a freshly allocated 0-d result.
+ *
+ * Returns:
+ *      1 on success; ``*out_result`` holds the new 0-d result.
+ *      0 if any precondition is unmet (caller should run the slow path);
+ *        ``*out_result`` is NULL and no error is set.
+ *     -1 on hard error during the fast path; ``*out_result`` is NULL and
+ *        a Python error is set.
+ */
+static inline int
+try_reduce_contiguous(
+        PyArrayMethod_Context *context, PyArrayObject *arr,
+        PyArray_Descr *const *descrs,
+        PyArrayObject *out, PyArrayObject *wheremask, PyObject *initial,
+        int ndim, int naxes, int keepdims,
+        int errormask,
+        PyArrayObject **out_result)
+{
+    NPY_BEGIN_THREADS_DEF;
+    *out_result = NULL;
+
+    PyArrayMethodObject *ufuncimpl = context->method;
+    if (!(out == NULL && wheremask == NULL && initial == NULL && keepdims == 0
+            && naxes == ndim
+            && PyArray_TRIVIALLY_ITERABLE(arr)
+            && PyArray_ISALIGNED(arr)
+            && PyArray_DESCR(arr) == descrs[1]
+            && descrs[0] == descrs[1]
+            && !PyDataType_REFCHK(descrs[0])
+            && (ndim <= 1
+                || (ufuncimpl->flags & NPY_METH_IS_REORDERABLE)))) {
+        return 0;
+    }
+    npy_intp count = PyArray_SIZE(arr);
+    if (count == 0) {
+        /* Let the slow path handle empty (it knows the proper semantics). */
+        return 0;
+    }
+
+    /* Allocate the 0-d result first so the loop can write into it. */
+    Py_INCREF(descrs[0]);
+    PyArrayObject *result = (PyArrayObject *)PyArray_NewFromDescr(
+            &PyArray_Type, descrs[0], 0, NULL, NULL, NULL, 0, NULL);
+    if (result == NULL) {
+        return -1;
+    }
+    char *accum = PyArray_BYTES(result);
+    int has_initial = 0;
+    if (ufuncimpl->get_reduction_initial != NULL) {
+        has_initial = ufuncimpl->get_reduction_initial(
+                context, /*reduction_is_empty=*/0, accum);
+        if (has_initial < 0) {
+            Py_DECREF(result);
+            return -1;
+        }
+    }
+
+    /*
+     * For C/F-contiguous N-D arrays the stride is always elsize; for 1-D
+     * arrays we need the actual stride to handle non-contiguous slices.
+     */
+    npy_intp arr_stride = PyArray_TRIVIAL_PAIR_ITERATION_STRIDE(count, arr);
+    char *src = PyArray_BYTES(arr);
+    if (!has_initial) {
+        /*
+         * No identity available -- seed the accumulator with arr[0] and
+         * reduce over arr[1:].
+         */
+        memcpy(accum, src, descrs[1]->elsize);
+        src += arr_stride;
+        count -= 1;
+    }
+    if (count == 0) {
+        /* Single-element input with no identity -- accum already holds arr[0]. */
+        *out_result = result;
+        return 1;
+    }
+
+    npy_intp strides[3] = {0, arr_stride, 0};
+    PyArrayMethod_StridedLoop *strided_loop;
+    NpyAuxData *auxdata = NULL;
+    NPY_ARRAYMETHOD_FLAGS flags = 0;
+    if (ufuncimpl->get_strided_loop(context, /*aligned=*/1,
+            /*move_references=*/0, strides,
+            &strided_loop, &auxdata, &flags) < 0) {
+        Py_DECREF(result);
+        return -1;
+    }
+    int needs_fperr = !(flags & NPY_METH_NO_FLOATINGPOINT_ERRORS);
+    if (needs_fperr) {
+        npy_clear_floatstatus_barrier((char *)context);
+    }
+    if (!(flags & NPY_METH_REQUIRES_PYAPI)) {
+        NPY_BEGIN_THREADS_THRESHOLDED(count);
+    }
+    char *data[3] = {accum, src, accum};
+    int res = strided_loop(context, data, &count, strides, auxdata);
+    NPY_END_THREADS;
+    NPY_AUXDATA_FREE(auxdata);
+    if (res == 0 && PyErr_Occurred()) {
+        res = -1;
+    }
+    if (res == 0 && needs_fperr) {
+        res = _check_ufunc_fperr(errormask, "reduce");
+    }
+    if (res < 0) {
+        Py_DECREF(result);
+        return -1;
+    }
+    *out_result = result;
+    return 1;
+}
+#endif
+
+
 static PyArrayObject *
 PyUFunc_Reduce(PyUFuncObject *ufunc,
         PyArrayObject *arr, PyArrayObject *out,
@@ -2558,10 +2802,28 @@ PyUFunc_Reduce(PyUFuncObject *ufunc,
     context.caller = (PyObject *)ufunc;
     context.method = ufuncimpl;
 
+#if defined(__aarch64__)
+    PyArrayObject *result = NULL;
+    int fast_status = try_reduce_cast_add_contiguous(
+            ufunc, arr, descrs, out, wheremask, initial,
+            ndim, naxes, axis_flags, keepdims, &result);
+    if (fast_status == 0) {
+        fast_status = try_reduce_contiguous(
+                &context, arr, descrs, out, wheremask, initial,
+                ndim, naxes, keepdims, errormask, &result);
+    }
+    if (fast_status == 0) {
+        /* Fast path did not apply; run the full reduction. */
+        result = PyUFunc_ReduceWrapper(&context,
+                arr, out, wheremask, axis_flags, keepdims,
+                initial, reduce_loop, buffersize, ufunc_name, errormask);
+    }
+#else
     PyArrayObject *result = PyUFunc_ReduceWrapper(&context,
             arr, out, wheremask, axis_flags, keepdims,
             initial, reduce_loop, buffersize, ufunc_name, errormask);
-
+#endif
+    /* Fall through to shared cleanup of `descrs`. */
     for (int i = 0; i < 3; i++) {
         Py_DECREF(descrs[i]);
     }

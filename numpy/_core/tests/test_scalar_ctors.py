@@ -71,6 +71,10 @@ class TestExtraArgs:
             np.void(b'test', garbage=True)
 
 
+int_types = [np.byte, np.short, np.intc, np.long, np.longlong]
+uint_types = [np.ubyte, np.ushort, np.uintc, np.ulong, np.ulonglong]
+
+
 class TestFromInt:
     def test_intp(self):
         # Ticket #99
@@ -80,9 +84,63 @@ class TestFromInt:
         with pytest.raises(OverflowError):
             np.uint64(-2)
 
+    @pytest.mark.parametrize("scalar_type", int_types + uint_types)
+    def test_builtin_integer_boundaries(self, scalar_type):
+        info = np.iinfo(scalar_type)
+        for value in [0, 1, int(info.min), int(info.max)]:
+            result = scalar_type(value)
+            assert type(result) is scalar_type
+            assert int(result) == value
 
-int_types = [np.byte, np.short, np.intc, np.long, np.longlong]
-uint_types = [np.ubyte, np.ushort, np.uintc, np.ulong, np.ulonglong]
+        with pytest.raises(OverflowError):
+            scalar_type(int(info.min) - 1)
+        with pytest.raises(OverflowError):
+            scalar_type(int(info.max) + 1)
+        with pytest.raises(OverflowError):
+            scalar_type(2**1000)
+
+    @pytest.mark.parametrize("scalar_type", int_types + uint_types)
+    def test_builtin_integer_fallbacks(self, scalar_type):
+        class IntSubclass(int):
+            pass
+
+        class HasIndex:
+            def __index__(self):
+                return 4
+
+        for value, expected in [
+            (True, 1),
+            (IntSubclass(3), 3),
+            (HasIndex(), 4),
+            (np.int64(5), 5),
+            (np.array(6), 6),
+        ]:
+            result = scalar_type(value)
+            assert type(result) is scalar_type
+            assert int(result) == expected
+
+        result = scalar_type([1, 2])
+        assert type(result) is np.ndarray
+        assert result.dtype.type is scalar_type
+        assert_equal(result, [1, 2])
+
+    def test_builtin_integer_subclass(self):
+        class Int64Subclass(np.int64):
+            pass
+
+        result = Int64Subclass(3)
+        assert type(result) is Int64Subclass
+        assert result == 3
+
+    def test_builtin_integer_argument_parsing(self):
+        assert np.int64() == 0
+        assert np.int64(3, **{}) == 3
+        with pytest.raises(TypeError):
+            np.int64(1, 2)
+        with pytest.raises(TypeError):
+            np.int64(value=3)
+
+
 float_types = [np.half, np.single, np.double, np.longdouble]
 cfloat_types = [np.csingle, np.cdouble, np.clongdouble]
 

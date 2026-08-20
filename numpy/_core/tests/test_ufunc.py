@@ -14,6 +14,7 @@ import numpy._core._rational_tests as _rational_tests
 import numpy._core._umath_tests as umt
 import numpy._core.umath as ncu
 import numpy.linalg._umath_linalg as uml
+from numpy._core._simd import clear_floatstatus, get_floatstatus
 from numpy.exceptions import AxisError
 from numpy.testing import (
     HAS_REFCOUNT,
@@ -24,6 +25,7 @@ from numpy.testing import (
     assert_almost_equal,
     assert_array_almost_equal,
     assert_array_equal,
+    assert_array_max_ulp,
     assert_equal,
     assert_no_warnings,
     assert_raises,
@@ -2629,6 +2631,199 @@ class TestUfunc:
         assert_array_equal(np.add.accumulate(arr_be), np.add.accumulate(arr_le))
         assert_array_equal(
             np.add.reduceat(arr_be, [1]), np.add.reduceat(arr_le, [1]))
+
+    @pytest.mark.parametrize(
+        "ufunc,dtype",
+        [
+            (np.add, np.float64),
+            (np.multiply, np.int16),
+            (np.maximum, np.float32),
+            (np.minimum, np.int32),
+            (np.bitwise_or, np.uint64),
+            (np.logical_and, np.bool_),
+        ],
+    )
+    def test_reduce_contiguous_matches_out_fallback(self, ufunc, dtype):
+        values = (np.arange(3 * 43) % 7 + 1).astype(dtype).reshape(3, 43)
+        if dtype is np.bool_:
+            values = (np.arange(3 * 43) % 3 != 0).reshape(3, 43)
+        actual = ufunc.reduce(values, axis=None)
+        out = np.empty((), dtype=np.asarray(actual).dtype)
+        expected = ufunc.reduce(values, axis=None, out=out)
+        assert_equal(actual, expected)
+
+    def test_reduce_contiguous_order_and_identity(self):
+        base = np.arange(257, dtype=np.float64)
+        for values in [base[::2], base[::-1], np.broadcast_to(3.0, 129)]:
+            actual = np.subtract.reduce(values)
+            out = np.empty((), dtype=actual.dtype)
+            expected = np.subtract.reduce(values, out=out)
+            assert_equal(actual, expected)
+
+        assert np.maximum.reduce(np.array([3.0])) == 3.0
+        with pytest.raises(ValueError, match="not reorderable"):
+            np.subtract.reduce(base[:6].reshape(2, 3), axis=None)
+
+    @staticmethod
+    def _cast_reduce_data(dtype, size):
+        if dtype is np.bool_:
+            raw = np.resize(
+                np.array([0, 1, 2, 127, 255], dtype=np.uint8), size)
+            return raw.view(np.bool_)
+
+        if dtype is np.int64:
+            values = [
+                np.iinfo(dtype).min,
+                -(2**53 + 3),
+                -3,
+                0,
+                5,
+                2**53 + 1,
+                np.iinfo(dtype).max,
+            ]
+        else:
+            values = [
+                0,
+                1,
+                2**53 - 1,
+                2**53 + 1,
+                2**63 + 3,
+                np.iinfo(dtype).max,
+            ]
+        return np.resize(np.array(values, dtype=dtype), size)
+
+    @staticmethod
+    def _assert_float64_bits_equal(actual, expected, err_msg=""):
+        assert np.asarray(actual).dtype == np.dtype(np.float64)
+        assert_array_equal(
+            np.asarray(actual).view(np.uint64),
+            np.asarray(expected).view(np.uint64),
+            err_msg=err_msg,
+        )
+
+    @pytest.mark.parametrize("dtype", [np.bool_, np.int64, np.uint64])
+    @pytest.mark.parametrize(
+        "size", [0, 7, 8, 9, 128, 129, ncu.BUFSIZE + 1])
+    def test_add_reduce_cast_contiguous(self, dtype, size):
+        values = self._cast_reduce_data(dtype, size)
+        if size > 129 and dtype is np.int64:
+            values = (np.arange(size, dtype=np.int64) % 17) - 8
+        elif size > 129 and dtype is np.uint64:
+            values = np.arange(size, dtype=np.uint64) % 17
+
+        actual = np.add.reduce(values, dtype=np.float64)
+        expected = np.add.reduce(values.astype(np.float64))
+        self._assert_float64_bits_equal(actual, expected)
+
+        if dtype is np.bool_:
+            assert actual == np.count_nonzero(values)
+
+    @pytest.mark.parametrize("dtype", [np.int64, np.uint64])
+    def test_add_reduce_cast_large_integer_rounding(self, dtype):
+        rng = np.random.default_rng(91274)
+        if dtype is np.int64:
+            values = rng.integers(
+                -(2**63), 2**63 - 1, size=ncu.BUFSIZE + 1, dtype=dtype)
+        else:
+            values = rng.integers(
+                0, 2**64 - 1, size=ncu.BUFSIZE + 1, dtype=dtype)
+
+        actual = np.add.reduce(values, dtype=np.float64)
+        out = np.empty((), dtype=np.float64)
+        expected = np.add.reduce(values, dtype=np.float64, out=out)
+        assert_array_max_ulp(actual, expected, maxulp=2)
+
+    @pytest.mark.parametrize("dtype", [np.bool_, np.int64, np.uint64])
+    def test_add_reduce_cast_floatstatus(self, dtype):
+        values = self._cast_reduce_data(dtype, 129)
+        clear_floatstatus()
+        np.add.reduce(values, dtype=np.float64)
+        assert get_floatstatus() == 0
+
+    @pytest.mark.parametrize("dtype", [np.bool_, np.int64, np.uint64])
+    @pytest.mark.parametrize(
+        "shape,axis,order",
+        [
+            pytest.param((2, 3, 129), -1, "C", id="last-axis"),
+            pytest.param((2, 3, 129), (1, 2), "C", id="axis-suffix"),
+            pytest.param((3, 129), None, "F", id="fortran-full"),
+            pytest.param((), None, "C", id="scalar"),
+            pytest.param((2, 0), -1, "C", id="empty-reduction"),
+            pytest.param((0, 3), -1, "C", id="empty-output"),
+        ],
+    )
+    def test_add_reduce_cast_axes_and_empty_outputs(
+            self, dtype, shape, axis, order):
+        size = int(np.prod(shape, dtype=np.intp))
+        values = self._cast_reduce_data(dtype, size).reshape(shape)
+        if order == "F":
+            values = np.asfortranarray(values)
+
+        actual = np.add.reduce(values, axis=axis, dtype=np.float64)
+        expected = np.add.reduce(values.astype(np.float64), axis=axis)
+        self._assert_float64_bits_equal(actual, expected)
+
+    @pytest.mark.parametrize("dtype", [np.bool_, np.int64, np.uint64])
+    def test_add_reduce_cast_fallback_layouts(self, dtype):
+        base = self._cast_reduce_data(dtype, 2 * 3 * 129)
+        matrix = base.reshape(6, 129)
+
+        cases = [
+            ("strided", base[::2], None),
+            ("negative-stride", base[::-2], None),
+            ("column", matrix[:, 1], None),
+            ("zero-stride", np.broadcast_to(base[1:2], 129), None),
+            ("middle-axis", base.reshape(2, 129, 3), 1),
+            (
+                "fortran-partial",
+                np.asfortranarray(base[:2 * 129].reshape(2, 129)),
+                -1,
+            ),
+        ]
+        if np.dtype(dtype).itemsize > 1:
+            swapped = base[:129].astype(np.dtype(dtype).newbyteorder())
+            raw = np.empty(
+                129 * np.dtype(dtype).itemsize + 1, dtype=np.uint8)
+            misaligned = np.ndarray((129,), dtype=dtype, buffer=raw, offset=1)
+            misaligned[...] = base[:129]
+            assert not misaligned.flags.aligned
+            cases.extend([
+                ("swapped", swapped, None),
+                ("misaligned", misaligned, None),
+            ])
+        for name, values, axis in cases:
+            actual = np.add.reduce(values, axis=axis, dtype=np.float64)
+            expected = np.empty_like(actual)
+            np.add.reduce(
+                values, axis=axis, dtype=np.float64, out=expected)
+            self._assert_float64_bits_equal(actual, expected, name)
+
+    def test_add_reduce_cast_fallback_keywords(self):
+        values = self._cast_reduce_data(np.int64, 3 * 129).reshape(3, 129)
+        cast_values = values.astype(np.float64)
+        where = np.arange(values.size).reshape(values.shape) % 3 != 0
+
+        actual = np.add.reduce(
+            values, axis=-1, dtype=np.float64, where=where)
+        expected = np.add.reduce(cast_values, axis=-1, where=where)
+        self._assert_float64_bits_equal(actual, expected, "where")
+
+        actual = np.add.reduce(
+            values, axis=-1, dtype=np.float64, initial=3.5)
+        expected = np.add.reduce(cast_values, axis=-1, initial=3.5)
+        self._assert_float64_bits_equal(actual, expected, "initial")
+
+        actual = np.add.reduce(
+            values, axis=-1, dtype=np.float64, keepdims=True)
+        expected = np.add.reduce(cast_values, axis=-1, keepdims=True)
+        self._assert_float64_bits_equal(actual, expected, "keepdims")
+
+        out = np.empty(3, dtype=np.float64)
+        result = np.add.reduce(
+            values, axis=-1, dtype=np.float64, out=out)
+        assert result is out
+        expected = np.add.reduce(cast_values, axis=-1)
+        self._assert_float64_bits_equal(out, expected, "out")
 
     def test_reducelike_out_promotes(self):
         # Check that the out argument to reductions is considered for
