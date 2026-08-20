@@ -1261,35 +1261,15 @@ introselect_noarg(void *v, npy_intp num, npy_intp kth, npy_intp *pivots,
     if ((nkth == 1) && (quickselect_dispatch((T *)v, num, kth))) {
         return 0;
     }
-#if NPY_ARM_SELECTION_TUNING
-    if (nkth > 1 && num >= 1024) {
-        npy_intp low = 0, high = num - 1;
-        npy_intp saved_npiv = (npiv != NULL) ? *npiv : 0;
-        if (pivots != NULL && npiv != NULL) {
-            while (*npiv > 0) {
-                if (pivots[*npiv - 1] > kth) {
-                    high = pivots[*npiv - 1] - 1;
-                    break;
-                }
-                else if (pivots[*npiv - 1] == kth) {
-                    store_pivot(kth, kth, pivots, npiv);
-                    return 0;
-                }
-                low = pivots[*npiv - 1] + 1;
-                *npiv -= 1;
-            }
-        }
-        npy_intp span = high - low + 1;
-        if (span >= 1024 && highway_quickselect_dispatch(
-                    (T *)((char *)v + low * sizeof(T)), span, kth - low)) {
-            store_pivot(kth, kth, pivots, npiv);
-            return 0;
-        }
-        if (npiv != NULL) {
-            *npiv = saved_npiv;
-        }
-    }
-#endif
+    /*
+     * Multi-kth Highway QSelect dispatch removed (was added in !154).
+     * It stored only the terminal kth via store_pivot and dropped all
+     * intermediate upper-bound pivots, so every next kth re-scanned a
+     * ~(n - prev_kth) span: multi-kth selection degraded from ~O(n)
+     * to O(n * nkth) (500k x 1001 quantiles: ~4ms -> ~560ms on 920B).
+     * introselect_ below accumulates pivots and keeps multi-kth ~O(n).
+     * The nkth == 1 dispatch above (quickselect_dispatch) is unchanged.
+     */
     return introselect_<Tag, false>((typename Tag::type *)v, nullptr, num, kth,
                                     pivots, npiv);
 }
