@@ -1292,6 +1292,12 @@ if have_blas
   ]
 endif
 
+is_x86_family = cpu_family == 'x86' or cpu_family == 'x86_64'
+lowlevel_strided_loops_src = src_file.process(
+  'src/multiarray/lowlevel_strided_loops.c.src',
+)
+
+# Keep x86 scalar transfers behind the generated multiarray prefix.
 src_multiarray = multiarray_gen_headers + [
   'src/multiarray/abstractdtypes.c',
   'src/multiarray/alloc.c',
@@ -1333,7 +1339,7 @@ src_multiarray = multiarray_gen_headers + [
   'src/multiarray/item_selection.c',
   'src/multiarray/iterators.c',
   'src/multiarray/legacy_dtype_implementation.c',
-  src_file.process('src/multiarray/lowlevel_strided_loops.c.src'),
+] + (is_x86_family ? [] : [lowlevel_strided_loops_src]) + [
   'src/multiarray/mapping.c',
   'src/multiarray/methods.c',
   'src/multiarray/multiarraymodule.c',
@@ -1345,6 +1351,7 @@ src_multiarray = multiarray_gen_headers + [
   'src/multiarray/number.c',
   'src/multiarray/refcount.c',
   src_file.process('src/multiarray/scalartypes.c.src'),
+] + (is_x86_family ? [lowlevel_strided_loops_src] : []) + [
   'src/multiarray/sequence.c',
   'src/multiarray/scalarapi.c',
   'src/multiarray/shape.c',
