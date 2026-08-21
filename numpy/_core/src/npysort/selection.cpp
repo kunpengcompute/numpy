@@ -1265,15 +1265,79 @@ introselect_noarg(void *v, npy_intp num, npy_intp kth, npy_intp *pivots,
     if ((nkth == 1) && (quickselect_dispatch((T *)v, num, kth))) {
         return 0;
     }
+#if NPY_ARM_SELECTION_TUNING
     /*
-     * Multi-kth Highway QSelect dispatch removed (was added in !154).
-     * It stored only the terminal kth via store_pivot and dropped all
-     * intermediate upper-bound pivots, so every next kth re-scanned a
-     * ~(n - prev_kth) span: multi-kth selection degraded from ~O(n)
-     * to O(n * nkth) (500k x 1001 quantiles: ~4ms -> ~560ms on 920B).
-     * introselect_ below accumulates pivots and keeps multi-kth ~O(n).
-     * The nkth == 1 dispatch above (quickselect_dispatch) is unchanged.
+     * Multi-kth Highway QSelect dispatch, guarded to spread-out kth
+     * sets.  The dispatch runs one SIMD select over the current span
+     * and stores only the terminal kth via store_pivot; it does not
+     * build the intermediate upper-bound pivot structure that
+     * introselect_ leaves behind.  That is the right trade only when
+     * the requested kth values are far apart (spread kth sets, e.g.
+     * np.percentile(x, [25, 50, 75, 95, 99])): there the pivot
+     * structure would not narrow the next kth's span anyway, and the
+     * SIMD select is several times cheaper per element than the
+     * scalar quickselect (measured on Kunpeng 920B, 16M float64:
+     * percentile 342ms -> 134ms).
+     *
+     * For dense kth sets (e.g. np.quantile with 1001 quantiles, or
+     * pandas.qcut) the unguarded dispatch degenerated to O(n * nkth)
+     * because every kth re-scanned the ~(n - prev_kth) span: 500k
+     * elements x 1001 quantiles went from ~4ms to ~560ms.  The delta
+     * guard below keeps such cases on introselect_, whose pivot stack
+     * narrows dense kth sets to ~O(n) total.
+     *
+     * delta = kth - low is the distance from the last consumed pivot
+     * (previous kth) to the requested kth; num / 32 bounds the total
+     * dispatched work at ~16 * num SIMD element visits even for
+     * adversarial inputs.
+     *
+     * The sampled_monotonic_ check keeps ordered inputs (sorted,
+     * reversed or patterned arrays, e.g. the arange-repeat data of the
+     * algorithms.Quantile benchmarks) on introselect_, whose ordered
+     * fast paths beat the SIMD select there (measured 1.31ms vs
+     * 2.18ms for a single int64 quantile on 500k ordered elements);
+     * the SIMD select only wins on unordered (random) data.
      */
+    if (nkth > 1 && num >= 1024) {
+        npy_intp low = 0, high = num - 1;
+        npy_intp saved_npiv = (npiv != NULL) ? *npiv : 0;
+        if (pivots != NULL && npiv != NULL) {
+            while (*npiv > 0) {
+                if (pivots[*npiv - 1] > kth) {
+                    high = pivots[*npiv - 1] - 1;
+                    break;
+                }
+                else if (pivots[*npiv - 1] == kth) {
+                    store_pivot(kth, kth, pivots, npiv);
+                    return 0;
+                }
+                low = pivots[*npiv - 1] + 1;
+                *npiv -= 1;
+            }
+        }
+        npy_intp span = high - low + 1;
+        const npy_intp delta = kth - low;
+        /*
+         * delta < 3 (the dumb_select_ window-edge case, e.g. the ceil
+         * half of an interpolation pair) also dispatches: dumb_select_
+         * is an O(span) scalar scan there anyway, so the SIMD select
+         * is never worse and matches the span it would have scanned.
+         */
+        const bool dispatch_kth =
+                (delta >= num / 32 && delta >= 1024) || delta < 3;
+        if (span >= 1024 && dispatch_kth &&
+                !sampled_monotonic_<Tag, false, typename Tag::type>(
+                        (typename Tag::type *)v, nullptr, low, high) &&
+                highway_quickselect_dispatch(
+                    (T *)((char *)v + low * sizeof(T)), span, kth - low)) {
+            store_pivot(kth, kth, pivots, npiv);
+            return 0;
+        }
+        if (npiv != NULL) {
+            *npiv = saved_npiv;
+        }
+    }
+#endif
     return introselect_<Tag, false>((typename Tag::type *)v, nullptr, num, kth,
                                     pivots, npiv);
 }
