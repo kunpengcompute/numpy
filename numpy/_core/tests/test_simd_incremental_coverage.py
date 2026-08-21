@@ -4,7 +4,7 @@ Targets Highway/SVE/NEON code paths on aarch64.
 """
 import pytest
 import numpy as np
-from numpy.testing import assert_array_equal, assert_allclose
+from numpy.testing import IS_WASM, assert_allclose, assert_array_equal
 
 
 N = 2048
@@ -1778,6 +1778,121 @@ class TestFloat16Comprehensive:
         result = np.rad2deg(a[::3])
         expected = np.rad2deg(a[::3].astype(np.float32)).astype(np.float16)
         assert_allclose(result, expected, rtol=1e-2)
+
+
+class TestAddReduceContiguous:
+    """Exercise the contiguous add reduction fast path."""
+
+    @staticmethod
+    def _array(shape, dtype, order="C"):
+        size = int(np.prod(shape))
+        values = (np.arange(size, dtype=np.int64) % 17) - 8
+        values = values.reshape(shape, order=order)
+        return np.array(values, dtype=dtype, order=order)
+
+    @staticmethod
+    def _reference(a, axis, initial=5, keepdims=False):
+        # An explicit where array forces the generic reduction path.  The
+        # integer-valued inputs are also exactly representable as float.
+        return np.add.reduce(
+            a, axis=axis, initial=initial, keepdims=keepdims,
+            where=np.ones(a.shape, dtype=bool),
+        )
+
+    @staticmethod
+    def _float64_output_at_offset(shape, offset):
+        size = int(np.prod(shape))
+        storage = np.empty(size + 8, dtype=np.float64)
+        start = ((offset - storage.ctypes.data) & 63) // storage.itemsize
+        out = storage[start:start + size].reshape(shape)
+        assert out.ctypes.data % 64 == offset
+        return out
+
+    @pytest.mark.parametrize(
+        "dtype,shape,axis,order,keepdims",
+        [
+            (np.float32, (2, 3, 43, 257), (1, 2), "C", True),
+            (np.int16, (129, 257), 0, "C", False),
+            (np.int32, (257, 129, 2), 1, "F", False),
+            (np.int64, (129, 257), 0, "C", False),
+        ],
+    )
+    def test_add_reduce_contiguous_fast_paths(
+            self, dtype, shape, axis, order, keepdims):
+        # All cases map to rows=129 and inner=257, which covers full vector
+        # blocks plus both row and column tails.  The shapes also cover C/F
+        # order, adjacent axes, keepdims, and outer_count greater than one.
+        a = self._array(shape, dtype, order)
+        expected = self._reference(a, axis, keepdims=keepdims)
+
+        actual = np.add.reduce(
+            a, axis=axis, initial=5, keepdims=keepdims,
+        )
+
+        assert_array_equal(actual, expected)
+        if order == "F":
+            assert a.flags.f_contiguous
+            assert actual.flags.f_contiguous
+
+    def test_add_reduce_float64_alignment(self):
+        # Each reduced block is 129 x 257.  Output planes at offsets 16 and
+        # 24 modulo 64 exercise the even alignment peel and odd-peel fallback.
+        a = self._array((2, 129, 257), np.float64)
+        expected = self._reference(a, axis=1)
+        out = self._float64_output_at_offset((2, 257), 16)
+        assert out[0].ctypes.data % 64 == 16
+        assert out[1].ctypes.data % 64 == 24
+
+        actual = np.add.reduce(a, axis=1, initial=5, out=out)
+
+        assert actual is out
+        assert_array_equal(actual, expected)
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    def test_add_reduce_power_of_two_inner(self, dtype):
+        # This is exactly the fast-path work threshold.  The small power-of-two
+        # row stride is accepted, but suppresses float software prefetching.
+        a = self._array((2, 64, 512), dtype)
+        expected = self._reference(a, axis=1)
+
+        actual = np.add.reduce(a, axis=1, initial=5)
+
+        assert_array_equal(actual, expected)
+
+    def test_add_reduce_overlapping_output(self):
+        a = self._array((129, 257), np.int64)
+        expected = self._reference(a, axis=0)
+        out = a[0]
+
+        actual = np.add.reduce(a, axis=0, initial=5, out=out)
+
+        assert actual is out
+        assert_array_equal(actual, expected)
+
+    def test_add_reduce_fallback_layouts(self):
+        cases = [
+            (self._array((0, 8), np.int64), 0),
+            (self._array((4, 8), np.int64), ()),
+            (self._array((4, 8), np.int64), 0),
+            (self._array((8, 8, 8, 65), np.int64), (0, 2)),
+            (self._array((129, 514), np.int64)[:, ::2], 0),
+            (self._array((64, 2048), np.float64), 0),
+        ]
+        for a, axis in cases:
+            expected = self._reference(a, axis)
+            actual = np.add.reduce(a, axis=axis, initial=5)
+            assert_array_equal(actual, expected)
+
+    @pytest.mark.skipif(IS_WASM, reason="fp errors don't work in wasm")
+    def test_add_reduce_floatingpoint_error(self):
+        a = np.ones((129, 257), dtype=np.float64)
+        a[:2] = np.finfo(np.float64).max
+
+        with np.errstate(over="raise"):
+            with pytest.raises(
+                    FloatingPointError,
+                    match="overflow encountered in reduce"):
+                np.add.reduce(a, axis=0)
 
 
 class TestArmReduceComprehensive:
