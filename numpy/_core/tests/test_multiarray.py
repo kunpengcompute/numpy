@@ -3328,6 +3328,44 @@ class TestMethods:
         for i in range(d0.shape[1]):
             self.assert_partitioned(p[:, i], kth)
 
+    def test_partition_multi_kth_descending(self):
+        # Regression test for multi-kth partition on descending inputs.
+        # A buggy aarch64 SIMD partition left elements greater than the
+        # pivot on the left side of the span, which only became visible
+        # once the multi-kth quickselect path consumed the pivot stack
+        # across successive kth calls: np.partition on descending data
+        # returned wrong results, e.g. for
+        # np.partition(np.arange(n)[::-1], [0, n // 1000]).
+        for n in (4096, 20000, 500000):
+            for dt in (np.int64, np.float64):
+                d = np.arange(n, dtype=dt)[::-1].copy()
+                # minimal failing shape: kth 0 followed by an interior kth
+                kth = [0, n // 1000]
+                p = np.partition(d, kth)
+                self.assert_partitioned(p, kth)
+                assert_array_equal(p[kth], np.sort(d)[kth])
+                # dense kth set (quantile-style, as produced by
+                # np.quantile / pandas.qcut)
+                q = np.linspace(0, 1, 101)
+                kth_dense = np.unique(np.concatenate([
+                    np.floor(q * (n - 1)).astype(np.intp),
+                    np.ceil(q * (n - 1)).astype(np.intp)]))
+                p = np.partition(d, kth_dense)
+                self.assert_partitioned(p, kth_dense)
+                assert_array_equal(p[kth_dense], np.sort(d)[kth_dense])
+
+        # spread kth sets on unordered data (dispatched to the SIMD
+        # quickselect on aarch64 builds) must stay correct as well
+        rng = np.random.default_rng(12345)
+        n = 200000
+        for dt in (np.int64, np.float64):
+            d = (rng.integers(0, 2**62, n).astype(dt) if dt == np.int64
+                 else rng.random(n))
+            kth = [n // 4, n // 2, 3 * n // 4, n - 10]
+            p = np.partition(d, kth)
+            self.assert_partitioned(p, kth)
+            assert_array_equal(p[kth], np.sort(d)[kth])
+
     def test_partition_cdtype(self):
         d = np.array([('Galahad', 1.7, 38), ('Arthur', 1.8, 41),
                    ('Lancelot', 1.9, 38)],
