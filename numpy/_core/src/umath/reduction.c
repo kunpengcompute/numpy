@@ -28,6 +28,17 @@
 #include "reduction.h"
 #include "extobj.h"  /* for _check_ufunc_fperr */
 
+#if defined(__aarch64__)
+#include "number.h"
+#include "npy_cpu_dispatch.h"
+#include "loops_arithmetic.dispatch.h"
+
+NPY_CPU_DISPATCH_DECLARE(
+    NPY_NO_EXPORT int npy_add_reduce_contiguous,
+    (PyArrayObject *operand, PyArrayObject *result,
+     npy_intp outer_count, npy_intp rows, npy_intp inner_count))
+#endif
+
 
 /*
  * Count the number of dimensions selected in 'axis_flags'
@@ -45,6 +56,144 @@ count_axes(int ndim, const npy_bool *axis_flags)
     }
     return naxes;
 }
+
+
+#if defined(__aarch64__)
+/*
+ * Return the logical (outer, rows, inner) view of a zero-copy contiguous
+ * reduction.  The reduced axes may be any non-empty adjacent block.  For C
+ * order, dimensions after that block form the contiguous inner vectors.  For
+ * Fortran order, dimensions before it form those vectors.  This covers any
+ * single axis and any set of adjacent axes at arbitrary dimensionality.
+ */
+static int
+get_contiguous_reduce_blocks(
+        PyArrayObject *operand, PyArrayObject *result,
+        const npy_bool *axis_flags, npy_intp *outer_count,
+        npy_intp *rows, npy_intp *inner_count)
+{
+    int ndim = PyArray_NDIM(operand);
+    npy_intp total = PyArray_SIZE(operand);
+    npy_intp output_size = PyArray_SIZE(result);
+    if (total <= 0 || output_size <= 0 || total % output_size != 0) {
+        return 0;
+    }
+
+    int first_axis = 0;
+    while (first_axis < ndim && !axis_flags[first_axis]) {
+        first_axis++;
+    }
+    if (first_axis == ndim) {
+        return 0;
+    }
+    int last_axis = ndim - 1;
+    while (!axis_flags[last_axis]) {
+        last_axis--;
+    }
+    for (int axis = first_axis; axis <= last_axis; axis++) {
+        if (!axis_flags[axis]) {
+            return 0;
+        }
+    }
+
+    npy_intp inner = 1;
+    if (PyArray_IS_C_CONTIGUOUS(operand) &&
+            PyArray_IS_C_CONTIGUOUS(result)) {
+        for (int axis = last_axis + 1; axis < ndim; axis++) {
+            inner *= PyArray_DIM(operand, axis);
+        }
+    }
+    else if (PyArray_IS_F_CONTIGUOUS(operand) &&
+            PyArray_IS_F_CONTIGUOUS(result)) {
+        for (int axis = 0; axis < first_axis; axis++) {
+            inner *= PyArray_DIM(operand, axis);
+        }
+    }
+    else {
+        return 0;
+    }
+
+    if (output_size % inner != 0) {
+        return 0;
+    }
+    *outer_count = output_size / inner;
+    *rows = total / output_size;
+    *inner_count = inner;
+    return 1;
+}
+
+
+static int
+add_reduce_contiguous_worthwhile(
+        PyArrayObject *operand, npy_intp rows, npy_intp inner_count)
+{
+    if (rows < 4 || inner_count < 8 || rows * inner_count < 32768) {
+        return 0;
+    }
+
+    int input_type = PyArray_TYPE(operand);
+    if (input_type == NPY_FLOAT || input_type == NPY_DOUBLE) {
+        /*
+         * Short float reductions do not amortize the blocked kernel.  Also
+         * avoid large power-of-two row strides, which can make the four input
+         * streams and output contend for the same AArch64 L1 cache sets.
+         */
+        size_t row_bytes = (size_t)inner_count * PyArray_ITEMSIZE(operand);
+        if (rows < 64 || (row_bytes >= 16384 &&
+                (row_bytes & (row_bytes - 1)) == 0)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+
+/*
+ * Execute a single-threaded SIMD kernel after NumPy has resolved descriptors,
+ * allocated the result, and assigned the reduction identity/initial value.
+ * Iterator buffer allocation remains delayed, which also lets narrow signed
+ * integers widen directly into the int64 accumulator without a cast buffer.
+ */
+static int
+try_add_reduce_contiguous(
+        PyArrayMethod_Context *context, PyArrayObject *operand,
+        PyArrayObject *result, PyArrayObject *wheremask,
+        const npy_bool *axis_flags, char *initial_buf,
+        int needs_api)
+{
+    int input_type = PyArray_TYPE(operand);
+    int result_type = PyArray_TYPE(result);
+    int supported_dtype =
+            (input_type == NPY_FLOAT && result_type == NPY_FLOAT) ||
+            (input_type == NPY_DOUBLE && result_type == NPY_DOUBLE) ||
+            ((input_type == NPY_INT16 || input_type == NPY_INT32 ||
+              input_type == NPY_INT64) && result_type == NPY_INT64);
+    if (context->caller != n_ops.add || wheremask != NULL ||
+            initial_buf == NULL || needs_api ||
+            !PyArray_CheckExact(operand) || !PyArray_CheckExact(result) ||
+            result_type != context->descriptors[0]->type_num ||
+            !supported_dtype ||
+            !PyArray_ISALIGNED(operand) || !PyArray_ISALIGNED(result) ||
+            !PyArray_ISNOTSWAPPED(operand) || !PyArray_ISNOTSWAPPED(result)) {
+        return 0;
+    }
+
+    npy_intp outer_count;
+    npy_intp rows;
+    npy_intp inner_count;
+    if (!get_contiguous_reduce_blocks(
+            operand, result, axis_flags, &outer_count, &rows, &inner_count) ||
+            arrays_overlap(operand, result) ||
+            !add_reduce_contiguous_worthwhile(
+                    operand, rows, inner_count)) {
+        return 0;
+    }
+
+    return NPY_CPU_DISPATCH_CALL(
+            npy_add_reduce_contiguous,
+            (operand, result, outer_count, rows, inner_count));
+}
+#endif
 
 /*
  * This function initializes a result array for a reduction operation
@@ -399,26 +548,35 @@ PyUFunc_ReduceWrapper(PyArrayMethod_Context *context,
         }
     }
 
-    if (!NpyIter_Reset(iter, NULL)) {
-        goto fail;
-    }
+    int fast_path_done = 0;
+#if defined(__aarch64__)
+    fast_path_done = try_add_reduce_contiguous(
+            context, operand, result, wheremask, axis_flags, initial_buf,
+            needs_api);
+#endif
 
-    if (!empty_iteration) {
-        NpyIter_IterNextFunc *iternext;
-        char **dataptr;
-        npy_intp *countptr;
-
-        iternext = NpyIter_GetIterNext(iter, NULL);
-        if (iternext == NULL) {
+    if (!fast_path_done) {
+        if (!NpyIter_Reset(iter, NULL)) {
             goto fail;
         }
-        dataptr = NpyIter_GetDataPtrArray(iter);
-        countptr = NpyIter_GetInnerLoopSizePtr(iter);
 
-        if (loop(context, strided_loop, auxdata,
-                iter, dataptr, strideptr, countptr, iternext,
-                needs_api, skip_first_count) < 0) {
-            goto fail;
+        if (!empty_iteration) {
+            NpyIter_IterNextFunc *iternext;
+            char **dataptr;
+            npy_intp *countptr;
+
+            iternext = NpyIter_GetIterNext(iter, NULL);
+            if (iternext == NULL) {
+                goto fail;
+            }
+            dataptr = NpyIter_GetDataPtrArray(iter);
+            countptr = NpyIter_GetInnerLoopSizePtr(iter);
+
+            if (loop(context, strided_loop, auxdata,
+                    iter, dataptr, strideptr, countptr, iternext,
+                    needs_api, skip_first_count) < 0) {
+                goto fail;
+            }
         }
     }
 
