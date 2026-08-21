@@ -2,6 +2,8 @@
 #define _MULTIARRAYMODULE
 #define NPY_NO_DEPRECATED_API NPY_API_VERSION
 
+#include <stdint.h>
+
 #include "simd/simd.h"
 #include "loops_utils.h"
 #include "loops.h"
@@ -10,6 +12,279 @@
 #include "fast_loop_macros.h"
 #include "loops_arithmetic_floor_hwy.h"
 #include "numpy/libdivide/libdivide.h"
+
+
+//###############################################################################
+//## Add reduction
+//###############################################################################
+#if defined(__aarch64__) && defined(NPY_HAVE_NEON)
+/*
+ * Single-threaded kernels for reducing a physically contiguous
+ * (outer, rows, inner) view into an already initialized result.  The caller
+ * guarantees rows >= 4, inner >= 8, and native, aligned, non-overlapping
+ * arrays with supported dtypes.
+ */
+
+/**begin repeat
+ * #work_type = npy_float, npy_double, npy_uint64#
+ * #name = f32, f64, i64#
+ * #sfx = f32, f64, u64#
+ * #vtype = float32x4_t, float64x2_t, uint64x2_t#
+ * #lanes = 4, 2, 2#
+ * #prefetch_power2_cols = 0, 0, 1#
+ * #use_alignment = 0, 1, 0#
+ * #row_block = 4, 4, 2#
+ */
+NPY_NOINLINE void
+add_reduce_contiguous_@name@(
+        const @work_type@ *__restrict src, @work_type@ *__restrict dst,
+        npy_intp rows, npy_intp cols)
+{
+    const npy_intp step = @lanes@ * 4;
+    npy_intp row = 0;
+
+    for (; row + @row_block@ <= rows; row += @row_block@) {
+        const @work_type@ *s0 = src + (row + 0) * cols;
+        const @work_type@ *s1 = src + (row + 1) * cols;
+#if @row_block@ == 4
+        const @work_type@ *s2 = src + (row + 2) * cols;
+        const @work_type@ *s3 = src + (row + 3) * cols;
+#endif
+        const @work_type@ *next =
+                (@prefetch_power2_cols@ || (cols & (cols - 1)) != 0) &&
+                row + 2 * @row_block@ <= rows ?
+                src + (row + @row_block@) * cols : NULL;
+        npy_intp col = 0;
+
+#if @use_alignment@
+        npy_intp peel = ((0 - (uintptr_t)dst) & 63) /
+                sizeof(*dst);
+        if ((peel & 1) != 0) {
+            peel = 0;
+        }
+        for (; col < peel; col++) {
+            @work_type@ acc = dst[col];
+            acc += s0[col];
+            acc += s1[col];
+            acc += s2[col];
+            acc += s3[col];
+            dst[col] = acc;
+        }
+#endif
+
+        for (; col + step <= cols; col += step) {
+            if (next != NULL) {
+                /**begin repeat1
+                 * #stream = 0, 1, 2, 3#
+                 */
+#if @stream@ < @row_block@
+                NPY_PREFETCH(next + col + @stream@ * cols, 0, 3);
+#endif
+                /**end repeat1**/
+            }
+
+            /**begin repeat1
+             * #lane = 0, 1, 2, 3#
+             */
+            @vtype@ a@lane@ = vld1q_@sfx@(
+                    dst + col + @lane@ * @lanes@);
+            /**end repeat1**/
+
+            /**begin repeat1
+             * #stream = 0, 1, 2, 3#
+             */
+#if @stream@ < @row_block@
+                /**begin repeat2
+                 * #lane = 0, 1, 2, 3#
+                 */
+            a@lane@ = vaddq_@sfx@(a@lane@,
+                    vld1q_@sfx@(
+                            s@stream@ + col + @lane@ * @lanes@));
+                /**end repeat2**/
+#endif
+            /**end repeat1**/
+
+            /**begin repeat1
+             * #lane = 0, 1, 2, 3#
+             */
+            vst1q_@sfx@(dst + col + @lane@ * @lanes@, a@lane@);
+            /**end repeat1**/
+        }
+        for (; col < cols; col++) {
+            @work_type@ acc = dst[col];
+            acc += s0[col];
+            acc += s1[col];
+#if @row_block@ == 4
+            acc += s2[col];
+            acc += s3[col];
+#endif
+            dst[col] = acc;
+        }
+    }
+
+    for (; row < rows; row++) {
+        const @work_type@ *s = src + row * cols;
+        npy_intp col = 0;
+        for (; col + step <= cols; col += step) {
+            /**begin repeat1
+             * #lane = 0, 1, 2, 3#
+             */
+            vst1q_@sfx@(dst + col + @lane@ * @lanes@,
+                    vaddq_@sfx@(
+                            vld1q_@sfx@(
+                                    dst + col + @lane@ * @lanes@),
+                            vld1q_@sfx@(
+                                    s + col + @lane@ * @lanes@)));
+            /**end repeat1**/
+        }
+        for (; col < cols; col++) {
+            dst[col] += s[col];
+        }
+    }
+}
+/**end repeat**/
+
+
+NPY_FINLINE void
+widen_add_i32x4(
+        int64x2_t *a0, int64x2_t *a1, int32x4_t values)
+{
+    *a0 = vaddq_s64(*a0, vmovl_s32(vget_low_s32(values)));
+    *a1 = vaddq_s64(*a1, vmovl_high_s32(values));
+}
+
+
+NPY_FINLINE void
+widen_add_i32x8(
+        int64x2_t *a0, int64x2_t *a1, int64x2_t *a2, int64x2_t *a3,
+        const npy_int32 *src)
+{
+    widen_add_i32x4(a0, a1, vld1q_s32(src));
+    widen_add_i32x4(a2, a3, vld1q_s32(src + 4));
+}
+
+
+NPY_FINLINE void
+widen_add_i16x8(
+        int64x2_t *a0, int64x2_t *a1, int64x2_t *a2, int64x2_t *a3,
+        const npy_int16 *src)
+{
+    int16x8_t values = vld1q_s16(src);
+    int32x4_t lo = vmovl_s16(vget_low_s16(values));
+    int32x4_t hi = vmovl_high_s16(values);
+    widen_add_i32x4(a0, a1, lo);
+    widen_add_i32x4(a2, a3, hi);
+}
+
+
+/**begin repeat
+ * #type = npy_int16, npy_int32#
+ * #bits = 16, 32#
+ */
+NPY_NOINLINE void
+add_reduce_contiguous_i@bits@_i64(
+        const @type@ *__restrict src, npy_int64 *__restrict dst,
+        npy_intp rows, npy_intp cols)
+{
+    npy_intp row = 0;
+
+    for (; row + 4 <= rows; row += 4) {
+        const @type@ *s0 = src + (row + 0) * cols;
+        const @type@ *s1 = src + (row + 1) * cols;
+        const @type@ *s2 = src + (row + 2) * cols;
+        const @type@ *s3 = src + (row + 3) * cols;
+        npy_intp col = 0;
+
+        for (; col + 8 <= cols; col += 8) {
+            int64x2_t a0 = vld1q_s64(dst + col + 0);
+            int64x2_t a1 = vld1q_s64(dst + col + 2);
+            int64x2_t a2 = vld1q_s64(dst + col + 4);
+            int64x2_t a3 = vld1q_s64(dst + col + 6);
+
+            widen_add_i@bits@x8(&a0, &a1, &a2, &a3, s0 + col);
+            widen_add_i@bits@x8(&a0, &a1, &a2, &a3, s1 + col);
+            widen_add_i@bits@x8(&a0, &a1, &a2, &a3, s2 + col);
+            widen_add_i@bits@x8(&a0, &a1, &a2, &a3, s3 + col);
+
+            vst1q_s64(dst + col + 0, a0);
+            vst1q_s64(dst + col + 2, a1);
+            vst1q_s64(dst + col + 4, a2);
+            vst1q_s64(dst + col + 6, a3);
+        }
+        for (; col < cols; col++) {
+            npy_uint64 acc = ((npy_uint64 *)dst)[col];
+            acc += (npy_uint64)(npy_int64)s0[col];
+            acc += (npy_uint64)(npy_int64)s1[col];
+            acc += (npy_uint64)(npy_int64)s2[col];
+            acc += (npy_uint64)(npy_int64)s3[col];
+            ((npy_uint64 *)dst)[col] = acc;
+        }
+    }
+
+    for (; row < rows; row++) {
+        const @type@ *s = src + row * cols;
+        npy_intp col = 0;
+        for (; col + 8 <= cols; col += 8) {
+            int64x2_t a0 = vld1q_s64(dst + col + 0);
+            int64x2_t a1 = vld1q_s64(dst + col + 2);
+            int64x2_t a2 = vld1q_s64(dst + col + 4);
+            int64x2_t a3 = vld1q_s64(dst + col + 6);
+            widen_add_i@bits@x8(
+                    &a0, &a1, &a2, &a3, s + col);
+            vst1q_s64(dst + col + 0, a0);
+            vst1q_s64(dst + col + 2, a1);
+            vst1q_s64(dst + col + 4, a2);
+            vst1q_s64(dst + col + 6, a3);
+        }
+        for (; col < cols; col++) {
+            ((npy_uint64 *)dst)[col] += (npy_uint64)(npy_int64)s[col];
+        }
+    }
+}
+/**end repeat**/
+#endif
+
+
+#if defined(__aarch64__)
+NPY_NO_EXPORT int
+NPY_CPU_DISPATCH_CURFX(npy_add_reduce_contiguous)(
+        PyArrayObject *operand, PyArrayObject *result,
+        npy_intp outer_count, npy_intp rows, npy_intp inner_count)
+{
+#if defined(NPY_HAVE_NEON)
+    const int input_type = PyArray_TYPE(operand);
+    const npy_intp input_step = rows * inner_count;
+
+    /**begin repeat
+     * #typenum = NPY_FLOAT, NPY_DOUBLE, NPY_INT16, NPY_INT32, NPY_INT64#
+     * #in_type = npy_float, npy_double, npy_int16, npy_int32, npy_uint64#
+     * #out_type = npy_float, npy_double, npy_int64, npy_int64, npy_uint64#
+     * #kernel = add_reduce_contiguous_f32, add_reduce_contiguous_f64,
+     *           add_reduce_contiguous_i16_i64,
+     *           add_reduce_contiguous_i32_i64, add_reduce_contiguous_i64#
+     */
+    if (input_type == @typenum@) {
+        const @in_type@ *src =
+                (const @in_type@ *)PyArray_DATA(operand);
+        @out_type@ *dst = (@out_type@ *)PyArray_DATA(result);
+        for (npy_intp outer = 0; outer < outer_count; outer++) {
+            @kernel@(src + outer * input_step,
+                    dst + outer * inner_count, rows, inner_count);
+        }
+        return 1;
+    }
+    /**end repeat**/
+#else
+    (void)operand;
+    (void)result;
+    (void)outer_count;
+    (void)rows;
+    (void)inner_count;
+#endif
+    return 0;
+}
+#endif
+
 
 //###############################################################################
 //## Division
