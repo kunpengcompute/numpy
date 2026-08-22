@@ -1110,16 +1110,20 @@ introselect_(type *v, npy_intp *tosort, npy_intp num, npy_intp kth,
         else {
             use_mom5_pivot = depth_limit <= 0 && hh - ll >= 5;
         }
-        const bool can_use_partition_highway =
-                NPY_ARM_SELECTION_TUNING &&
-                NPY_HAVE_PARTITION_HIGHWAY &&
-                !arg &&
-                sampled_sorted_block != 1000 &&
-                (std::is_same_v<type, npy_int64> ||
-                 std::is_same_v<type, npy_double>) &&
-                span >= 1024 &&
-                span * static_cast<npy_intp>(sizeof(type)) <=
-                        partition_highway_max_bytes;
+        /*
+         * Highway partition disabled: partition_simd::PartitionInt64 /
+         * PartitionDouble violate partition semantics on some inputs
+         * (elements greater than the pivot remain on the left side, near
+         * the span's left edge).  Verified with per-iteration invariant
+         * checks on Kunpeng 920B: multi-kth descending int64 repro
+         * np.partition(np.arange(n)[::-1], [0, 499]) returns wrong
+         * results; every violating partition ran with the Highway path
+         * (span 1024..4096).  The corruption also poisons
+         * median_of_median5_ pivot selection.  Fall back to the scalar
+         * unguarded_partition_ until partition_highway is fixed.
+         */
+        const bool can_use_partition_highway = false;
+        (void)partition_highway_max_bytes;
 
         /*
          * Prefer median-of-three in the common case.  Use a cheaper wider
@@ -1262,6 +1266,38 @@ introselect_noarg(void *v, npy_intp num, npy_intp kth, npy_intp *pivots,
         return 0;
     }
 #if NPY_ARM_SELECTION_TUNING
+    /*
+     * Multi-kth Highway QSelect dispatch, guarded to spread-out kth
+     * sets.  The dispatch runs one SIMD select over the current span
+     * and stores only the terminal kth via store_pivot; it does not
+     * build the intermediate upper-bound pivot structure that
+     * introselect_ leaves behind.  That is the right trade only when
+     * the requested kth values are far apart (spread kth sets, e.g.
+     * np.percentile(x, [25, 50, 75, 95, 99])): there the pivot
+     * structure would not narrow the next kth's span anyway, and the
+     * SIMD select is several times cheaper per element than the
+     * scalar quickselect (measured on Kunpeng 920B, 16M float64:
+     * percentile 342ms -> 134ms).
+     *
+     * For dense kth sets (e.g. np.quantile with 1001 quantiles, or
+     * pandas.qcut) the unguarded dispatch degenerated to O(n * nkth)
+     * because every kth re-scanned the ~(n - prev_kth) span: 500k
+     * elements x 1001 quantiles went from ~4ms to ~560ms.  The delta
+     * guard below keeps such cases on introselect_, whose pivot stack
+     * narrows dense kth sets to ~O(n) total.
+     *
+     * delta = kth - low is the distance from the last consumed pivot
+     * (previous kth) to the requested kth; num / 32 bounds the total
+     * dispatched work at ~16 * num SIMD element visits even for
+     * adversarial inputs.
+     *
+     * The sampled_monotonic_ check keeps ordered inputs (sorted,
+     * reversed or patterned arrays, e.g. the arange-repeat data of the
+     * algorithms.Quantile benchmarks) on introselect_, whose ordered
+     * fast paths beat the SIMD select there (measured 1.31ms vs
+     * 2.18ms for a single int64 quantile on 500k ordered elements);
+     * the SIMD select only wins on unordered (random) data.
+     */
     if (nkth > 1 && num >= 1024) {
         npy_intp low = 0, high = num - 1;
         npy_intp saved_npiv = (npiv != NULL) ? *npiv : 0;
@@ -1280,7 +1316,19 @@ introselect_noarg(void *v, npy_intp num, npy_intp kth, npy_intp *pivots,
             }
         }
         npy_intp span = high - low + 1;
-        if (span >= 1024 && highway_quickselect_dispatch(
+        const npy_intp delta = kth - low;
+        /*
+         * delta < 3 (the dumb_select_ window-edge case, e.g. the ceil
+         * half of an interpolation pair) also dispatches: dumb_select_
+         * is an O(span) scalar scan there anyway, so the SIMD select
+         * is never worse and matches the span it would have scanned.
+         */
+        const bool dispatch_kth =
+                (delta >= num / 32 && delta >= 1024) || delta < 3;
+        if (span >= 1024 && dispatch_kth &&
+                !sampled_monotonic_<Tag, false, typename Tag::type>(
+                        (typename Tag::type *)v, nullptr, low, high) &&
+                highway_quickselect_dispatch(
                     (T *)((char *)v + low * sizeof(T)), span, kth - low)) {
             store_pivot(kth, kth, pivots, npiv);
             return 0;
