@@ -224,6 +224,19 @@ static int
 #if (@src_contig@ == 0) && @is_aligned@
 #if @elsize@ == 16 && defined(__aarch64__)
 static NPY_GCC_OPT_3 NPY_GCC_UNROLL_LOOPS int
+#elif defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+/*
+ * Pin the hot strided-to-contig srcstride0 copy loop entry to a 64-byte
+ * cache-line boundary on x86_64 (GCC/Clang only). AArch64 dispatch additions
+ * keep shifting _multiarray_umath.so layout and perturbing this function's
+ * i-cache alignment as an accidental code-placement side effect; a fixed
+ * entry alignment makes its placement deterministic regardless of dispatch
+ * growth, restoring stable x86_64 performance. AArch64, all other
+ * architectures, and MSVC fall through to the plain declaration below, so the
+ * attribute never reaches a compiler that lacks GNU attribute syntax.
+ */
+__attribute__((aligned(64)))
+static NPY_GCC_OPT_3 int
 #else
 static NPY_GCC_OPT_3 int
 #endif
