@@ -1203,6 +1203,7 @@ TIMEDELTA_mm_qm_divmod(char **args, npy_intp const *dimensions, npy_intp const *
  *  #C = F, , L#
  *  #fd = 1, 1, 0#
  *  #VCHK = 1, 1, 0#
+ *  #is_double = 0, 1, 0#
  */
 /**begin repeat1
  * #kind = logical_and, logical_or#
@@ -1362,7 +1363,17 @@ NPY_NO_EXPORT void
     }
 }
 
+#if defined(__aarch64__) && @is_double@ && \
+        (defined(__GNUC__) || defined(__clang__))
+/*
+ * Keep the hot scalar copy loop at a stable I-cache address on AArch64.
+ * Changes in other generated loops otherwise shift this entry point and can
+ * substantially perturb the throughput of the contiguous double path.
+ */
+NPY_NO_EXPORT void __attribute__((aligned(64)))
+#else
 NPY_NO_EXPORT void
+#endif
 @TYPE@_positive(char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
     UNARY_LOOP {

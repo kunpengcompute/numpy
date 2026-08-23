@@ -465,6 +465,7 @@ simd_exp_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
   const float64x2_t neg_inf = vdupq_n_f64(-NPY_INFINITY);
   const float64x2_t nan_val = vdupq_n_f64(NPY_NAN);
   const float64x2_t zero_val = vdupq_n_f64(0.0);
+  const float64x2_t one_val = vdupq_n_f64(1.0);
   const float64x2_t inv_ln2 = vdupq_n_f64(0x1.71547652b82fep7);
   const float64x2_t shift = vdupq_n_f64(0x1.8p+52);
   const float64x2_t ln2_hi = vdupq_n_f64(0x1.62e42fefa39efp-8);
@@ -473,6 +474,9 @@ simd_exp_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
   const float64x2_t c1 = vdupq_n_f64(0x1.55555c75adbb2p-3);
   const float64x2_t c2 = vdupq_n_f64(0x1.55555da646206p-5);
   const uint64x2_t all_ones = vdupq_n_u64(0xFFFFFFFFFFFFFFFFULL);
+  const uint64x2_t abs_mask = vdupq_n_u64(0x7FFFFFFFFFFFFFFFULL);
+  const uint64x2_t min_normal_bits = vdupq_n_u64(0x0010000000000000ULL);
+  const uint64x2_t inf_bits = vdupq_n_u64(0x7FF0000000000000ULL);
   const float64x2_t exp_max = vdupq_n_f64(709.782712893384);
   const float64x2_t exp_min = vdupq_n_f64(-745.1332191019411);
 
@@ -494,9 +498,82 @@ simd_exp_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
         x[i] = vld1q_f64(infp + i * VEC_SIZE);
     } else {
       for (int i = 0; i < UNROLL; i++) {
-        double vals[2] = {infp[(2*i) * ssrc], infp[(2*i+1) * ssrc]};
-        x[i] = vld1q_f64(vals);
+        const npy_double *pair = infp + (2 * i) * ssrc;
+        x[i] = vld1q_dup_f64(pair);
+        x[i] = vld1q_lane_f64(pair + ssrc, x[i], 1);
       }
+    }
+
+    /*
+     * Keep the fully unrolled path for ordinary finite data.  For blocks that
+     * start with special or tiny values, process vectors independently so
+     * zero/subnormal/Inf/NaN pairs can bypass range reduction, table lookup,
+     * and polynomial evaluation.  Sampling once per block keeps the ordinary
+     * finite-data overhead negligible.
+     */
+    uint64x2_t sample_abs = vandq_u64(vreinterpretq_u64_f64(x[0]), abs_mask);
+    uint64x2_t sample_easy = vorrq_u64(
+        vcltq_u64(sample_abs, min_normal_bits),
+        vcgeq_u64(sample_abs, inf_bits));
+    if (neon_has_any_lane_u64(sample_easy)) {
+      for (int i = 0; i < UNROLL; i++) {
+        uint64x2_t x_abs = vandq_u64(vreinterpretq_u64_f64(x[i]), abs_mask);
+        uint64x2_t is_tiny = vcltq_u64(x_abs, min_normal_bits);
+        uint64x2_t is_nonfinite = vcgeq_u64(x_abs, inf_bits);
+        uint64x2_t is_easy = vorrq_u64(is_tiny, is_nonfinite);
+        float64x2_t result;
+
+        if (neon_has_all_lanes_u64(is_easy)) {
+          result = vbslq_f64(is_tiny, one_val, x[i]);
+          result = vbslq_f64(vceqq_f64(x[i], neg_inf), zero_val, result);
+        }
+        else {
+          uint64x2_t is_nan = veorq_u64(vceqq_f64(x[i], x[i]), all_ones);
+          uint64x2_t is_pos_inf = vceqq_f64(x[i], pos_inf);
+          uint64x2_t is_neg_inf = vceqq_f64(x[i], neg_inf);
+          uint64x2_t is_overflow = vcgtq_f64(x[i], exp_max);
+          uint64x2_t is_underflow = vcltq_f64(x[i], exp_min);
+          uint64x2_t special_mask = vorrq_u64(
+              vorrq_u64(is_nan, is_pos_inf), is_neg_inf);
+          special_mask = vorrq_u64(
+              special_mask, vorrq_u64(is_overflow, is_underflow));
+          float64x2_t safe_x = vbslq_f64(special_mask, zero_val, x[i]);
+
+          float64x2_t z = vfmaq_f64(shift, safe_x, inv_ln2);
+          uint64x2_t u = vreinterpretq_u64_f64(z);
+          float64x2_t n = vsubq_f64(z, shift);
+          float64x2_t r = vfmsq_f64(
+              vfmsq_f64(safe_x, n, ln2_hi), n, ln2_lo);
+          uint64x2_t e = vshlq_n_u64(u, 52 - V_EXP_TABLE_BITS);
+          uint64x2_t tab = neon_exp_lookup_sbits(u);
+          float64x2_t scale = vreinterpretq_f64_u64(vaddq_u64(tab, e));
+          float64x2_t r2 = vmulq_f64(r, r);
+          float64x2_t poly = vfmaq_f64(
+              vfmaq_f64(c0, r, c1), r2, c2);
+          poly = vfmaq_f64(r, poly, r2);
+          result = vfmaq_f64(scale, poly, scale);
+
+          result = vbslq_f64(is_nan, x[i], result);
+          result = vbslq_f64(is_pos_inf, pos_inf, result);
+          result = vbslq_f64(is_neg_inf, zero_val, result);
+          result = vbslq_f64(is_overflow, pos_inf, result);
+          result = vbslq_f64(is_underflow, zero_val, result);
+        }
+
+        npy_double *pair_out = outp + i * VEC_SIZE * sdst;
+        if (sdst == 1) {
+          vst1q_f64(pair_out, result);
+        }
+        else {
+          pair_out[0] = vgetq_lane_f64(result, 0);
+          pair_out[sdst] = vgetq_lane_f64(result, 1);
+        }
+      }
+
+      infp += ssrc * UNROLL * VEC_SIZE;
+      outp += sdst * UNROLL * VEC_SIZE;
+      remaining -= UNROLL * VEC_SIZE;
+      continue;
     }
 
     uint64x2_t need_special[UNROLL], is_nan[UNROLL];
@@ -562,8 +639,10 @@ simd_exp_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
       if (current_len == 1) x = vld1q_dup_f64(infp);
       else x = vld1q_f64(infp);
     } else {
-      double vals[2] = {infp[0], (remaining > 1) ? infp[ssrc] : infp[0]};
-      x = vld1q_f64(vals);
+      x = vld1q_dup_f64(infp);
+      if (remaining > 1) {
+        x = vld1q_lane_f64(infp + ssrc, x, 1);
+      }
     }
 
     uint64x2_t is_nan = vceqq_f64(x, x);
@@ -937,6 +1016,12 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_exp)
         const npy_intp sdst = steps[1] / sizeof(npy_double);
         simd_exp_neon_DOUBLE(src, ssrc, dst, sdst, len);
     }
+    else {
+        UNARY_LOOP {
+            const npy_double in1 = *(npy_double *)ip1;
+            *(npy_double *)op1 = npy_exp(in1);
+        }
+    }
     return;
 #else
   #ifdef SIMD_AVX512F_NOCLANG_BUG
@@ -1064,4 +1149,3 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_exp)
         *((npy_half *)op1) = npy_float_to_half(npy_expf(in1));
     }
 }
-
