@@ -82,7 +82,6 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_reciprocal)
  * #UNROLL = 0, 0, 1#
  */
 #if @big@ && @UNROLL@
-__attribute__((aligned(32)))
 AUTO_VEC_UNROLL_LOOPS
 #endif
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(@TYPE@_@kind@)
