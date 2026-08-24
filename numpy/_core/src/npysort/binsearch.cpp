@@ -285,15 +285,14 @@ binsearch(const char *arr, const char *key, char *ret, npy_intp arr_len,
     /* Fast path: ARM-optimized search for contiguous arrays */
     if (arr_str == sizeof(T) && key_str == sizeof(T) &&
         ret_str == sizeof(npy_intp)) {
-        if (arr_len > 32768 && key_len >= 4) {
-            /* Two-level indexed interleaved search (cache optimization) */
+        if (arr_len > 32768 && key_len >= 384) {
+            /* Two-level indexed interleaved search (cache optimization).
+             * The block index costs n/4096 scattered reads per call;
+             * below ~384 unordered queries the scalar loop wins
+             * (measured on 2M float64: 8q 0.7us vs 2.4us, 64q 2.7us
+             * vs 4.5us, 256q 13.6us vs 16.1us; at 384q the interleaved
+             * benefit overtakes, 55.6us vs 30.4us). */
             binsearch_indexed_interleaved<Tag, side, 4>(
-                arr, key, ret, arr_len, key_len);
-            return;
-        }
-        else if (arr_len > 0 && key_len >= 4) {
-            /* Direct interleaved search (small arrays) */
-            binsearch_interleaved<Tag, side, 4>(
                 arr, key, ret, arr_len, key_len);
             return;
         }
