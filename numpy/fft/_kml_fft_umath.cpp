@@ -193,6 +193,27 @@ template <> struct kml_traits<float> {
     }
 };
 
+/* ── RAII wrapper for KML FFT plans ── */
+template <typename Traits>
+class plan_guard {
+public:
+    using plan_t = typename Traits::plan_t;
+
+    explicit plan_guard(plan_t plan) noexcept : plan_(plan) {}
+
+    ~plan_guard() noexcept {
+        if (plan_) {
+            Traits::destroy_plan(plan_);
+        }
+    }
+
+    plan_guard(const plan_guard &) = delete;
+    plan_guard &operator=(const plan_guard &) = delete;
+
+private:
+    plan_t plan_;
+};
+
 /* ── Helper: apply scale factor to output ── */
 template <typename T>
 static inline void apply_fct(T *op, size_t n_elements, T fct) {
@@ -261,6 +282,7 @@ fft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
         plan_t p = traits::plan_dft_1d((int)nout, pin, pout,
             direction, FFT_ESTIMATE);
         if (!p) throw std::runtime_error("plan_dft_1d creation failed");
+        plan_guard<traits> guard(p);
 
         if (contiguous_in && contiguous_out && pin != pout && nin >= nout) {
             traits::execute_dft(p, pin, pout);
@@ -272,11 +294,9 @@ fft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
                 (complex_t *)buf.data(), (complex_t *)buf.data());
             apply_fct_complex(buf.data(), nout, fct);
             copy_output(buf.data(), (char *)(op + i * so), step_out, nout);
-            traits::destroy_plan(p);
             continue;
         }
         apply_fct_complex((std::complex<T> *)pout, nout, fct);
-        traits::destroy_plan(p);
     }
 }
 
