@@ -165,7 +165,6 @@ try_add_reduce_contiguous(
     int result_type = PyArray_TYPE(result);
     int supported_dtype =
             (input_type == NPY_FLOAT && result_type == NPY_FLOAT) ||
-            (input_type == NPY_DOUBLE && result_type == NPY_DOUBLE) ||
             ((input_type == NPY_INT16 || input_type == NPY_INT32 ||
               input_type == NPY_INT64) && result_type == NPY_INT64);
     if (context->caller != n_ops.add || wheremask != NULL ||
