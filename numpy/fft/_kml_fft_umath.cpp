@@ -268,15 +268,16 @@ fft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
     char *ip = args[0], *fp = args[1], *op = args[2];
     npy_intp n_outer = dimensions[0];
     npy_intp nin = dimensions[1], nout = dimensions[2];
-    npy_intp si = steps[0], so = steps[2];
+    npy_intp si = steps[0], sf = steps[1], so = steps[2];
     npy_intp step_in = steps[3], step_out = steps[4];
     int direction = *((int *)func);
-    T fct = *((T *)fp);
 
     bool contiguous_in = (step_in == sizeof(complex_t));
     bool contiguous_out = (step_out == sizeof(complex_t));
 
     for (npy_intp i = 0; i < n_outer; i++) {
+        // The scalar core operand can vary across broadcast batches.
+        T fct = *((T *)(fp + i * sf));
         complex_t *pin = (complex_t *)(ip + i * si);
         complex_t *pout = (complex_t *)(op + i * so);
         plan_t p = traits::plan_dft_1d((int)nout, pin, pout,
@@ -314,15 +315,15 @@ rfft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
     char *ip = args[0], *fp = args[1], *op = args[2];
     npy_intp n_outer = dimensions[0];
     npy_intp nin = dimensions[1], nout = dimensions[2];
-    npy_intp si = steps[0], so = steps[2];
+    npy_intp si = steps[0], sf = steps[1], so = steps[2];
     npy_intp step_in = steps[3], step_out = steps[4];
-    T fct = *((T *)fp);
 
     bool contiguous_in = (step_in == sizeof(real_t));
     bool contiguous_out = (step_out == sizeof(complex_t));
     size_t nin_used = (size_t)nin <= npts ? (size_t)nin : npts;
 
     for (npy_intp i = 0; i < n_outer; i++) {
+        T fct = *((T *)(fp + i * sf));
         if (contiguous_in && contiguous_out && (size_t)nin >= npts) {
             real_t *pin = (real_t *)(ip + i * si);
             complex_t *pout = (complex_t *)(op + i * so);
@@ -380,14 +381,14 @@ irfft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
     char *ip = args[0], *fp = args[1], *op = args[2];
     npy_intp n_outer = dimensions[0];
     npy_intp nin = dimensions[1], nout = dimensions[2];
-    npy_intp si = steps[0], so = steps[2];
+    npy_intp si = steps[0], sf = steps[1], so = steps[2];
     npy_intp step_in = steps[3], step_out = steps[4];
-    T fct = *((T *)fp);
 
     bool contiguous_in = (step_in == sizeof(complex_t));
     bool contiguous_out = (step_out == sizeof(real_t));
 
     for (npy_intp i = 0; i < n_outer; i++) {
+        T fct = *((T *)(fp + i * sf));
         if (contiguous_in && contiguous_out && (size_t)nin >= (size_t)(nout / 2 + 1)) {
             complex_t *pin = (complex_t *)(ip + i * si);
             real_t *pout = (real_t *)(op + i * so);

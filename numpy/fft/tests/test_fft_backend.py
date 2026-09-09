@@ -15,6 +15,53 @@ from numpy.fft._backend import _BACKEND_MANAGER
 KMLFFT_AVAILABLE = "kmlfft" in _BACKEND_MANAGER._backends
 
 
+@pytest.mark.skipif(not KMLFFT_AVAILABLE, reason="kmlfft backend not available")
+class TestKMLFFTScaleFactors:
+    @pytest.mark.parametrize("name", [
+        "fft", "ifft", "rfft_n_even", "rfft_n_odd", "irfft",
+    ])
+    @pytest.mark.parametrize("real_dtype", [np.float32, np.float64])
+    @pytest.mark.parametrize("factor_layout", [
+        "scalar", "contiguous", "strided", "reversed",
+    ])
+    @pytest.mark.parametrize("buffered", [False, True])
+    def test_native_batch_scale_factors(self, name, real_dtype,
+                                       factor_layout, buffered):
+        from numpy.fft import _kml_fft_umath as kml
+
+        complex_dtype = np.result_type(real_dtype, np.complex64)
+        is_rfft = name.startswith("rfft_")
+        n = 5 if name == "rfft_n_odd" else 4
+        nin = n // 2 + 1 if name == "irfft" else n
+        nout = n // 2 + 1 if is_rfft else n
+        a = np.ones((3, nin), dtype=real_dtype if is_rfft else complex_dtype)
+        output_dtype = real_dtype if name == "irfft" else complex_dtype
+        if buffered:
+            a = a[:, ::-1]
+            out = np.empty((3, 2 * nout), dtype=output_dtype)[:, ::2]
+        else:
+            out = np.empty((3, nout), dtype=output_dtype)
+
+        factors = np.array([1, -2, 0.5], dtype=real_dtype)
+        if factor_layout == "scalar":
+            factors = real_dtype(2)
+        elif factor_layout == "strided":
+            storage = np.full(6, 99, dtype=real_dtype)
+            storage[::2] = factors
+            factors = storage[::2]
+        elif factor_layout == "reversed":
+            factors = factors[::-1]
+
+        # Each unnormalized transform of ones is n at index zero and zero
+        # elsewhere, including C2R with an all-ones Hermitian half-spectrum.
+        expected = np.zeros((3, nout), dtype=output_dtype)
+        expected[:, 0] = n * factors
+        getattr(kml, name)(a, factors, out=out)
+        tolerance = 1e-6 if real_dtype == np.float32 else 1e-12
+        np.testing.assert_allclose(out, expected, rtol=tolerance,
+                                   atol=tolerance)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
