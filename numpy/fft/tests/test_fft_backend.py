@@ -62,6 +62,56 @@ class TestKMLFFTScaleFactors:
                                    atol=tolerance)
 
 
+@pytest.mark.skipif(not KMLFFT_AVAILABLE, reason="kmlfft backend not available")
+class TestKMLFFTLengthValidation:
+    @pytest.mark.skipif(
+        np.dtype(np.intp).itemsize <= np.dtype(np.intc).itemsize,
+        reason="requires array dimensions wider than C int",
+    )
+    @pytest.mark.parametrize("name", [
+        "fft", "ifft", "rfft_n_even", "rfft_n_odd", "irfft",
+    ])
+    @pytest.mark.parametrize("real_dtype", [np.float32, np.float64])
+    @pytest.mark.parametrize("n", [
+        int(np.iinfo(np.intc).max) + 1,
+        2 * (int(np.iinfo(np.intc).max) + 1),
+        2 * (int(np.iinfo(np.intc).max) + 1) + 2,
+    ])
+    def test_native_rejects_oversized_length(self, name, real_dtype, n):
+        from numpy.fft import _kml_fft_umath as kml
+
+        complex_dtype = np.result_type(real_dtype, np.complex64)
+        is_rfft = name.startswith("rfft_")
+        if name == "rfft_n_odd":
+            n += 1
+        nout = n // 2 + 1 if is_rfft else n
+        input_dtype = real_dtype if is_rfft else complex_dtype
+        output_dtype = real_dtype if name == "irfft" else complex_dtype
+        a = np.ones(1, dtype=input_dtype)
+        storage = np.zeros(1, dtype=output_dtype)
+        # A zero-stride output exposes the large core dimension using only
+        # one element of storage. Validation must precede work-buffer allocation.
+        out = np.ndarray((nout,), dtype=output_dtype,
+                         buffer=storage, strides=(0,))
+        with pytest.raises(ValueError, match="KML FFT length"):
+            getattr(kml, name)(a, real_dtype(1), out=out)
+        assert storage[0] == 0
+
+    @pytest.mark.parametrize("name,nout", [
+        ("fft", 0), ("ifft", 0), ("irfft", 0),
+        ("rfft_n_even", 0), ("rfft_n_even", 1), ("rfft_n_odd", 0),
+    ])
+    def test_native_rejects_zero_length(self, name, nout):
+        from numpy.fft import _kml_fft_umath as kml
+
+        a = np.ones(1, dtype=np.float64 if name.startswith("rfft_")
+                    else np.complex128)
+        out = np.empty(nout, dtype=np.float64 if name == "irfft"
+                       else np.complex128)
+        with pytest.raises(ValueError, match="KML FFT length"):
+            getattr(kml, name)(a, np.float64(1), out=out)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

@@ -15,7 +15,9 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <atomic>
+#include <climits>
 #include <complex>
+#include <stdexcept>
 #include <vector>
 
 #include "numpy/arrayobject.h"
@@ -40,11 +42,47 @@ kml_ufunc_adapter(char **args, npy_intp const *dimensions,
         PyErr_NoMemory();
         NPY_DISABLE_C_API;
     }
+    catch (const std::invalid_argument &ex) {
+        NPY_ALLOW_C_API;
+        PyErr_SetString(PyExc_ValueError, ex.what());
+        NPY_DISABLE_C_API;
+    }
     catch (const std::exception &ex) {
         NPY_ALLOW_C_API;
         PyErr_SetString(PyExc_RuntimeError, ex.what());
         NPY_DISABLE_C_API;
     }
+}
+
+/*
+ * NumPy dimensions can exceed INT_MAX, but KML's plan APIs take int lengths.
+ * Unchecked narrowing can produce an invalid length or a smaller valid plan
+ * that only transforms part of the array. Validate in the native entry points
+ * before allocating work buffers or creating plans, including direct gufunc
+ * calls that bypass the Python FFT wrappers.
+ */
+static constexpr const char *kml_fft_length_error =
+    "KML FFT length must be between 1 and INT_MAX";
+
+static int
+checked_fft_length(npy_intp n)
+{
+    if (n < 1 || n > INT_MAX) {
+        throw std::invalid_argument(kml_fft_length_error);
+    }
+    return static_cast<int>(n);
+}
+
+static int
+checked_rfft_length(npy_intp nout, bool is_odd)
+{
+    /* Check the half-spectrum size before reconstructing the full length.
+     * This also prevents underflow/overflow in the reconstruction itself.
+     */
+    if (nout < 1 || nout > INT_MAX / 2 + 1) {
+        throw std::invalid_argument(kml_fft_length_error);
+    }
+    return checked_fft_length(2 * (nout - 1) + (is_odd ? 1 : 0));
 }
 
 /* ── Type traits to dispatch between double/float FFT APIs ── */
@@ -281,6 +319,7 @@ fft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
     char *ip = args[0], *fp = args[1], *op = args[2];
     npy_intp n_outer = dimensions[0];
     npy_intp nin = dimensions[1], nout = dimensions[2];
+    const int n = checked_fft_length(nout);
     npy_intp si = steps[0], sf = steps[1], so = steps[2];
     npy_intp step_in = steps[3], step_out = steps[4];
     int direction = *((int *)func);
@@ -293,7 +332,7 @@ fft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
         T fct = *((T *)(fp + i * sf));
         complex_t *pin = (complex_t *)(ip + i * si);
         complex_t *pout = (complex_t *)(op + i * so);
-        plan_t p = traits::plan_dft_1d((int)nout, pin, pout,
+        plan_t p = traits::plan_dft_1d(n, pin, pout,
             direction, FFT_ESTIMATE);
         if (!p) throw std::runtime_error("plan_dft_1d creation failed");
         plan_guard<traits> guard(p);
@@ -318,13 +357,14 @@ fft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
 template <typename T>
 static void
 rfft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
-          void * /* unused */, size_t npts)
+          void * /* unused */, int n)
 {
     using traits = kml_traits<T>;
     using real_t = typename traits::real_t;
     using complex_t = typename traits::complex_t;
     using plan_t = typename traits::plan_t;
 
+    const size_t npts = static_cast<size_t>(n);
     char *ip = args[0], *fp = args[1], *op = args[2];
     npy_intp n_outer = dimensions[0];
     npy_intp nin = dimensions[1], nout = dimensions[2];
@@ -340,7 +380,7 @@ rfft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
         if (contiguous_in && contiguous_out && (size_t)nin >= npts) {
             real_t *pin = (real_t *)(ip + i * si);
             complex_t *pout = (complex_t *)(op + i * so);
-            plan_t p = traits::plan_dft_r2c_1d((int)npts,
+            plan_t p = traits::plan_dft_r2c_1d(n,
                 pin, pout, FFT_ESTIMATE);
             if (!p) throw std::runtime_error("plan_dft_r2c_1d creation failed");
             traits::execute_dft_r2c(p, pin, pout);
@@ -351,7 +391,7 @@ rfft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
             std::vector<std::complex<T>> cbuf(nout);
             copy_input<real_t>(ip + i * si, step_in, nin_used,
                                rbuf.data(), npts);
-            plan_t p = traits::plan_dft_r2c_1d((int)npts,
+            plan_t p = traits::plan_dft_r2c_1d(n,
                 rbuf.data(), (complex_t *)cbuf.data(),
                 FFT_ESTIMATE);
             if (!p) throw std::runtime_error("plan_dft_r2c_1d creation failed");
@@ -367,17 +407,15 @@ rfft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
 template <typename T>
 static void rfft_n_even_loop(char **args, npy_intp const *dimensions,
                              npy_intp const *steps, void *func) {
-    size_t nout = (size_t)dimensions[2];
-    size_t npts = 2 * nout - 2;
-    rfft_loop<T>(args, dimensions, steps, func, npts);
+    const int n = checked_rfft_length(dimensions[2], false);
+    rfft_loop<T>(args, dimensions, steps, func, n);
 }
 
 template <typename T>
 static void rfft_n_odd_loop(char **args, npy_intp const *dimensions,
                             npy_intp const *steps, void *func) {
-    size_t nout = (size_t)dimensions[2];
-    size_t npts = 2 * nout - 1;
-    rfft_loop<T>(args, dimensions, steps, func, npts);
+    const int n = checked_rfft_length(dimensions[2], true);
+    rfft_loop<T>(args, dimensions, steps, func, n);
 }
 
 /* ── GUFunc loop: C2R (irfft) ── */
@@ -394,6 +432,7 @@ irfft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
     char *ip = args[0], *fp = args[1], *op = args[2];
     npy_intp n_outer = dimensions[0];
     npy_intp nin = dimensions[1], nout = dimensions[2];
+    const int n = checked_fft_length(nout);
     npy_intp si = steps[0], sf = steps[1], so = steps[2];
     npy_intp step_in = steps[3], step_out = steps[4];
 
@@ -405,7 +444,7 @@ irfft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
         if (contiguous_in && contiguous_out && (size_t)nin >= (size_t)(nout / 2 + 1)) {
             complex_t *pin = (complex_t *)(ip + i * si);
             real_t *pout = (real_t *)(op + i * so);
-            plan_t p = traits::plan_dft_c2r_1d((int)nout,
+            plan_t p = traits::plan_dft_c2r_1d(n,
                 pin, pout, FFT_ESTIMATE);
             if (!p) throw std::runtime_error("plan_dft_c2r_1d creation failed");
             traits::execute_dft_c2r(p, pin, pout);
@@ -417,7 +456,7 @@ irfft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
             std::vector<real_t> rbuf(nout);
             copy_input(ip + i * si, step_in, nin,
                        (std::complex<T> *)cbuf.data(), nin_expected);
-            plan_t p = traits::plan_dft_c2r_1d((int)nout,
+            plan_t p = traits::plan_dft_c2r_1d(n,
                 (complex_t *)cbuf.data(), rbuf.data(),
                 FFT_ESTIMATE);
             if (!p) throw std::runtime_error("plan_dft_c2r_1d creation failed");
