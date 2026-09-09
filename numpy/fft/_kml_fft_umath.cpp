@@ -14,6 +14,7 @@
 
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include <atomic>
 #include <complex>
 #include <vector>
 
@@ -116,8 +117,14 @@ template <> struct kml_traits<double> {
     static void destroy_plan(plan_t p) {
         FFT_DESTROY_PLAN(p);
     }
-    static void init_threads() {
-        FFT_INIT_THREADS();
+    static int init_threads() {
+        return FFT_INIT_THREADS();
+    }
+    static void plan_with_nthreads(int nthreads) {
+        FFT_PLAN_WITH_NTHREADS(nthreads);
+    }
+    static void cleanup_threads() {
+        FFT_CLEANUP_THREADS();
     }
 };
 
@@ -188,8 +195,14 @@ template <> struct kml_traits<float> {
     static void destroy_plan(plan_t p) {
         FFTF_DESTROY_PLAN(p);
     }
-    static void init_threads() {
-        FFTF_INIT_THREADS();
+    static int init_threads() {
+        return FFTF_INIT_THREADS();
+    }
+    static void plan_with_nthreads(int nthreads) {
+        FFTF_PLAN_WITH_NTHREADS(nthreads);
+    }
+    static void cleanup_threads() {
+        FFTF_CLEANUP_THREADS();
     }
 };
 
@@ -509,24 +522,47 @@ add_gufuncs(PyObject *dictionary) {
 }
 
 /* ── Module init ── */
-static int module_loaded = 0;
+/* KML thread initialization/configuration is non-reentrant. Claim the single
+ * initialization attempt atomically, including in free-threaded builds. Do not
+ * retry after failure: cleanup_threads ends the KML threading lifetime.
+ */
+static std::atomic_flag module_loaded = ATOMIC_FLAG_INIT;
 
 static int
 _kml_fft_umath_exec(PyObject *m)
 {
-    if (module_loaded) {
+    if (module_loaded.test_and_set()) {
         PyErr_SetString(PyExc_ImportError,
                         "cannot load module more than once per process");
         return -1;
     }
-    module_loaded = 1;
-
     if (PyArray_ImportNumPyAPI() < 0) return -1;
     if (PyUFunc_ImportUFuncAPI() < 0) return -1;
 
-    /* Initialize FFT library threading */
-    kml_traits<double>::init_threads();
-    kml_traits<float>::init_threads();
+    if (kml_traits<double>::init_threads() == 0) {
+        PyErr_SetString(PyExc_ImportError,
+                        "KML FFT double-precision thread initialization failed");
+        return -1;
+    }
+    if (kml_traits<float>::init_threads() == 0) {
+        /* No plans or gufuncs have been published; release the successful half
+         * of this initialization attempt before permanently disabling it.
+         */
+        kml_traits<double>::cleanup_threads();
+        PyErr_SetString(PyExc_ImportError,
+                        "KML FFT single-precision thread initialization failed");
+        return -1;
+    }
+
+    /* Match NumPy's PocketFFT build (POCKETFFT_NO_MULTITHREADING): each FFT
+     * uses one internal thread. Configure both precisions once, before exposing
+     * any gufuncs, since plan_with_nthreads is non-reentrant. Independent FFT
+     * calls can still run concurrently; this is not a planner-safety guarantee.
+     * Successful initialization has process lifetime, not backend-context
+     * lifetime, so switching backends must not call cleanup_threads.
+     */
+    kml_traits<double>::plan_with_nthreads(1);
+    kml_traits<float>::plan_with_nthreads(1);
 
     PyObject *d = PyModule_GetDict(m);
     if (add_gufuncs(d) < 0) {
