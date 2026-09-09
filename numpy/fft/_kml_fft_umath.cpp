@@ -481,42 +481,48 @@ static const char irfft_types[] = {
 static int
 add_gufuncs(PyObject *dictionary) {
     PyObject *f;
+    int ret;
     int ntypes = 2; /* double + float, no longdouble */
 
     f = PyUFunc_FromFuncAndDataAndSignature(
         fft_functions, fft_data, fft_types, ntypes, 2, 1, PyUFunc_None,
         "fft", "FFT complex forward\n", 0, "(n),()->(m)");
     if (f == NULL) return -1;
-    PyDict_SetItemString(dictionary, "fft", f);
+    ret = PyDict_SetItemString(dictionary, "fft", f);
     Py_DECREF(f);
+    if (ret < 0) return -1;
 
     f = PyUFunc_FromFuncAndDataAndSignature(
         fft_functions, ifft_data, fft_types, ntypes, 2, 1, PyUFunc_None,
         "ifft", "FFT complex backward\n", 0, "(m),()->(n)");
     if (f == NULL) return -1;
-    PyDict_SetItemString(dictionary, "ifft", f);
+    ret = PyDict_SetItemString(dictionary, "ifft", f);
     Py_DECREF(f);
+    if (ret < 0) return -1;
 
     f = PyUFunc_FromFuncAndDataAndSignature(
         rfft_n_even_functions, NULL, rfft_types, ntypes, 2, 1, PyUFunc_None,
         "rfft_n_even", "FFT real forward for even n\n", 0, "(n),()->(m)");
     if (f == NULL) return -1;
-    PyDict_SetItemString(dictionary, "rfft_n_even", f);
+    ret = PyDict_SetItemString(dictionary, "rfft_n_even", f);
     Py_DECREF(f);
+    if (ret < 0) return -1;
 
     f = PyUFunc_FromFuncAndDataAndSignature(
         rfft_n_odd_functions, NULL, rfft_types, ntypes, 2, 1, PyUFunc_None,
         "rfft_n_odd", "FFT real forward for odd n\n", 0, "(n),()->(m)");
     if (f == NULL) return -1;
-    PyDict_SetItemString(dictionary, "rfft_n_odd", f);
+    ret = PyDict_SetItemString(dictionary, "rfft_n_odd", f);
     Py_DECREF(f);
+    if (ret < 0) return -1;
 
     f = PyUFunc_FromFuncAndDataAndSignature(
         irfft_functions, NULL, irfft_types, ntypes, 2, 1, PyUFunc_None,
         "irfft", "FFT real backward\n", 0, "(m),()->(n)");
     if (f == NULL) return -1;
-    PyDict_SetItemString(dictionary, "irfft", f);
+    ret = PyDict_SetItemString(dictionary, "irfft", f);
     Py_DECREF(f);
+    if (ret < 0) return -1;
 
     return 0;
 }
