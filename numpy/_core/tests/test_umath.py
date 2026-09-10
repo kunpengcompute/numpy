@@ -1789,6 +1789,79 @@ class TestSpecialFloats:
                 assert_raises(FloatingPointError, np.tan,
                               np.array(-np.inf, dtype=dt))
 
+    @pytest.mark.parametrize('src_stride, dst_stride', [
+        (4, 4), (4, -12), (-8, 4), (-12, 8), (5, 4), (4, 5),
+    ])
+    def test_tan_float32_strides(self, src_stride, dst_stride):
+        values = np.linspace(-1, 1, 17, dtype=np.float32)
+        arrays = []
+        for stride in (src_stride, dst_stride):
+            span = (values.size - 1) * abs(stride)
+            arrays.append(np.ndarray(
+                values.shape, dtype=np.float32, buffer=bytearray(span + 4),
+                offset=span if stride < 0 else 0, strides=(stride,),
+            ))
+        src, dst = arrays
+        src[...] = values
+        dst[...] = np.nan
+        np.tan(src, out=dst)
+        expected = np.tan(values.astype(np.float64)).astype(np.float32)
+        assert_array_max_ulp(dst, expected, 3)
+
+    @pytest.mark.parametrize('shift', [0, 1])
+    def test_tan_float32_overlap(self, shift):
+        values = np.linspace(-1, 1, 17, dtype=np.float32)
+        src = values[:-1]
+        dst = values[shift:shift + src.size]
+        expected = np.tan(src.astype(np.float64)).astype(np.float32)
+        np.tan(src, out=dst)
+        assert_array_max_ulp(dst, expected, 3)
+
+    @pytest.mark.skipif(
+        not sys.platform.startswith('linux') or sys.maxsize <= 2**32,
+        reason='requires a large sparse virtual address space on 64-bit Linux',
+    )
+    @pytest.mark.parametrize('operand', ['src', 'dst'])
+    @pytest.mark.parametrize('stride', [2**30 + 1, 2**32 + 1])
+    @pytest.mark.parametrize('sign', [-1, 1])
+    @pytest.mark.parametrize('size', [3, 4])
+    def test_tan_float32_large_strides(self, operand, stride, sign, size):
+        import mmap
+
+        # The smaller stride overflows lane * stride; the larger one cannot
+        # itself fit in an int32 gather/scatter index.  Only a few pages of
+        # this anonymous mapping are touched, regardless of its virtual size.
+        byte_stride = sign * stride * 4
+        span = (size - 1) * abs(byte_stride)
+        # Keep wrapped signed int32 indices inside the mapping, so a broken
+        # implementation produces incorrect values rather than a segfault.
+        padding = 2**33
+        try:
+            mapping = mmap.mmap(
+                -1, span + 2 * padding + 4,
+                flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS,
+            )
+        except (OSError, OverflowError) as exc:
+            pytest.skip(f'cannot reserve sparse address space: {exc}')
+
+        with mapping:
+            strided = np.ndarray(
+                (size,), dtype=np.float32, buffer=mapping,
+                offset=padding + (span if sign < 0 else 0),
+                strides=(byte_stride,),
+            )
+            values = np.linspace(0.125, 1, size, dtype=np.float32)
+            src = strided if operand == 'src' else values.copy()
+            dst = strided if operand == 'dst' else np.empty_like(values)
+            src[...] = values
+            dst[...] = np.nan
+            expected = np.tan(values.astype(np.float64)).astype(np.float32)
+            try:
+                np.tan(src, out=dst)
+                assert_array_max_ulp(dst, expected, 3)
+            finally:
+                del src, dst, strided
+
     @pytest.mark.skipif(IS_WASM, reason="fp errors don't work in wasm")
     def test_arcsincos(self):
         with np.errstate(all='ignore'):
