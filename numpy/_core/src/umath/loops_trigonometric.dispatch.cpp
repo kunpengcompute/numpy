@@ -1643,17 +1643,28 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_tan)
         steps[0] % sizeof(npy_float) == 0 &&
         steps[1] % sizeof(npy_float) == 0)
     {
-        const npy_intp ssrc = steps[0] / sizeof(npy_float);
-        const npy_intp sdst = steps[1] / sizeof(npy_float);
-        simd_tan_f32_impl(src, ssrc, dst, sdst, len);
-        return;
+        const npy_intp ssrc = steps[0] / (npy_intp)sizeof(npy_float);
+        const npy_intp sdst = steps[1] / (npy_intp)sizeof(npy_float);
+        /*
+         * Highway uses signed 32-bit element indices for float gather/scatter.
+         * Bound the stride before narrowing it or multiplying by a lane index.
+         * Check the whole vector, including inactive lanes in a short tail.
+         */
+        HWY_LANES_CONSTEXPR int lanes = Lanes<float>();
+        const npy_intp max_index = lanes > 1 ? lanes - 1 : 1;
+        const npy_intp min_stride = NPY_MIN_INT32 / max_index;
+        const npy_intp max_stride = NPY_MAX_INT32 / max_index;
+        if (ssrc >= min_stride && ssrc <= max_stride &&
+            sdst >= min_stride && sdst <= max_stride) {
+            simd_tan_f32_impl(src, ssrc, dst, sdst, len);
+            return;
+        }
     }
-#else
+#endif
     UNARY_LOOP {
         const npy_float in1 = *(npy_float *)ip1;
         *(npy_float *)op1 = npy_tanf(in1);
     }
-#endif
 }
 
 #if NPY_SIMD && defined(NPY_HAVE_AVX512_SKX) && defined(NPY_CAN_LINK_SVML)
