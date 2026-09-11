@@ -14,7 +14,10 @@
 
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include <atomic>
+#include <climits>
 #include <complex>
+#include <stdexcept>
 #include <vector>
 
 #include "numpy/arrayobject.h"
@@ -39,11 +42,47 @@ kml_ufunc_adapter(char **args, npy_intp const *dimensions,
         PyErr_NoMemory();
         NPY_DISABLE_C_API;
     }
+    catch (const std::invalid_argument &ex) {
+        NPY_ALLOW_C_API;
+        PyErr_SetString(PyExc_ValueError, ex.what());
+        NPY_DISABLE_C_API;
+    }
     catch (const std::exception &ex) {
         NPY_ALLOW_C_API;
         PyErr_SetString(PyExc_RuntimeError, ex.what());
         NPY_DISABLE_C_API;
     }
+}
+
+/*
+ * NumPy dimensions can exceed INT_MAX, but KML's plan APIs take int lengths.
+ * Unchecked narrowing can produce an invalid length or a smaller valid plan
+ * that only transforms part of the array. Validate in the native entry points
+ * before allocating work buffers or creating plans, including direct gufunc
+ * calls that bypass the Python FFT wrappers.
+ */
+static constexpr const char *kml_fft_length_error =
+    "KML FFT length must be between 1 and INT_MAX";
+
+static int
+checked_fft_length(npy_intp n)
+{
+    if (n < 1 || n > INT_MAX) {
+        throw std::invalid_argument(kml_fft_length_error);
+    }
+    return static_cast<int>(n);
+}
+
+static int
+checked_rfft_length(npy_intp nout, bool is_odd)
+{
+    /* Check the half-spectrum size before reconstructing the full length.
+     * This also prevents underflow/overflow in the reconstruction itself.
+     */
+    if (nout < 1 || nout > INT_MAX / 2 + 1) {
+        throw std::invalid_argument(kml_fft_length_error);
+    }
+    return checked_fft_length(2 * (nout - 1) + (is_odd ? 1 : 0));
 }
 
 /* ── Type traits to dispatch between double/float FFT APIs ── */
@@ -116,8 +155,14 @@ template <> struct kml_traits<double> {
     static void destroy_plan(plan_t p) {
         FFT_DESTROY_PLAN(p);
     }
-    static void init_threads() {
-        FFT_INIT_THREADS();
+    static int init_threads() {
+        return FFT_INIT_THREADS();
+    }
+    static void plan_with_nthreads(int nthreads) {
+        FFT_PLAN_WITH_NTHREADS(nthreads);
+    }
+    static void cleanup_threads() {
+        FFT_CLEANUP_THREADS();
     }
 };
 
@@ -188,8 +233,14 @@ template <> struct kml_traits<float> {
     static void destroy_plan(plan_t p) {
         FFTF_DESTROY_PLAN(p);
     }
-    static void init_threads() {
-        FFTF_INIT_THREADS();
+    static int init_threads() {
+        return FFTF_INIT_THREADS();
+    }
+    static void plan_with_nthreads(int nthreads) {
+        FFTF_PLAN_WITH_NTHREADS(nthreads);
+    }
+    static void cleanup_threads() {
+        FFTF_CLEANUP_THREADS();
     }
 };
 
@@ -268,18 +319,20 @@ fft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
     char *ip = args[0], *fp = args[1], *op = args[2];
     npy_intp n_outer = dimensions[0];
     npy_intp nin = dimensions[1], nout = dimensions[2];
-    npy_intp si = steps[0], so = steps[2];
+    const int n = checked_fft_length(nout);
+    npy_intp si = steps[0], sf = steps[1], so = steps[2];
     npy_intp step_in = steps[3], step_out = steps[4];
     int direction = *((int *)func);
-    T fct = *((T *)fp);
 
     bool contiguous_in = (step_in == sizeof(complex_t));
     bool contiguous_out = (step_out == sizeof(complex_t));
 
     for (npy_intp i = 0; i < n_outer; i++) {
+        // The scalar core operand can vary across broadcast batches.
+        T fct = *((T *)(fp + i * sf));
         complex_t *pin = (complex_t *)(ip + i * si);
         complex_t *pout = (complex_t *)(op + i * so);
-        plan_t p = traits::plan_dft_1d((int)nout, pin, pout,
+        plan_t p = traits::plan_dft_1d(n, pin, pout,
             direction, FFT_ESTIMATE);
         if (!p) throw std::runtime_error("plan_dft_1d creation failed");
         plan_guard<traits> guard(p);
@@ -304,29 +357,30 @@ fft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
 template <typename T>
 static void
 rfft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
-          void * /* unused */, size_t npts)
+          void * /* unused */, int n)
 {
     using traits = kml_traits<T>;
     using real_t = typename traits::real_t;
     using complex_t = typename traits::complex_t;
     using plan_t = typename traits::plan_t;
 
+    const size_t npts = static_cast<size_t>(n);
     char *ip = args[0], *fp = args[1], *op = args[2];
     npy_intp n_outer = dimensions[0];
     npy_intp nin = dimensions[1], nout = dimensions[2];
-    npy_intp si = steps[0], so = steps[2];
+    npy_intp si = steps[0], sf = steps[1], so = steps[2];
     npy_intp step_in = steps[3], step_out = steps[4];
-    T fct = *((T *)fp);
 
     bool contiguous_in = (step_in == sizeof(real_t));
     bool contiguous_out = (step_out == sizeof(complex_t));
     size_t nin_used = (size_t)nin <= npts ? (size_t)nin : npts;
 
     for (npy_intp i = 0; i < n_outer; i++) {
+        T fct = *((T *)(fp + i * sf));
         if (contiguous_in && contiguous_out && (size_t)nin >= npts) {
             real_t *pin = (real_t *)(ip + i * si);
             complex_t *pout = (complex_t *)(op + i * so);
-            plan_t p = traits::plan_dft_r2c_1d((int)npts,
+            plan_t p = traits::plan_dft_r2c_1d(n,
                 pin, pout, FFT_ESTIMATE);
             if (!p) throw std::runtime_error("plan_dft_r2c_1d creation failed");
             traits::execute_dft_r2c(p, pin, pout);
@@ -337,7 +391,7 @@ rfft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
             std::vector<std::complex<T>> cbuf(nout);
             copy_input<real_t>(ip + i * si, step_in, nin_used,
                                rbuf.data(), npts);
-            plan_t p = traits::plan_dft_r2c_1d((int)npts,
+            plan_t p = traits::plan_dft_r2c_1d(n,
                 rbuf.data(), (complex_t *)cbuf.data(),
                 FFT_ESTIMATE);
             if (!p) throw std::runtime_error("plan_dft_r2c_1d creation failed");
@@ -353,17 +407,15 @@ rfft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
 template <typename T>
 static void rfft_n_even_loop(char **args, npy_intp const *dimensions,
                              npy_intp const *steps, void *func) {
-    size_t nout = (size_t)dimensions[2];
-    size_t npts = 2 * nout - 2;
-    rfft_loop<T>(args, dimensions, steps, func, npts);
+    const int n = checked_rfft_length(dimensions[2], false);
+    rfft_loop<T>(args, dimensions, steps, func, n);
 }
 
 template <typename T>
 static void rfft_n_odd_loop(char **args, npy_intp const *dimensions,
                             npy_intp const *steps, void *func) {
-    size_t nout = (size_t)dimensions[2];
-    size_t npts = 2 * nout - 1;
-    rfft_loop<T>(args, dimensions, steps, func, npts);
+    const int n = checked_rfft_length(dimensions[2], true);
+    rfft_loop<T>(args, dimensions, steps, func, n);
 }
 
 /* ── GUFunc loop: C2R (irfft) ── */
@@ -380,18 +432,19 @@ irfft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
     char *ip = args[0], *fp = args[1], *op = args[2];
     npy_intp n_outer = dimensions[0];
     npy_intp nin = dimensions[1], nout = dimensions[2];
-    npy_intp si = steps[0], so = steps[2];
+    const int n = checked_fft_length(nout);
+    npy_intp si = steps[0], sf = steps[1], so = steps[2];
     npy_intp step_in = steps[3], step_out = steps[4];
-    T fct = *((T *)fp);
 
     bool contiguous_in = (step_in == sizeof(complex_t));
     bool contiguous_out = (step_out == sizeof(real_t));
 
     for (npy_intp i = 0; i < n_outer; i++) {
+        T fct = *((T *)(fp + i * sf));
         if (contiguous_in && contiguous_out && (size_t)nin >= (size_t)(nout / 2 + 1)) {
             complex_t *pin = (complex_t *)(ip + i * si);
             real_t *pout = (real_t *)(op + i * so);
-            plan_t p = traits::plan_dft_c2r_1d((int)nout,
+            plan_t p = traits::plan_dft_c2r_1d(n,
                 pin, pout, FFT_ESTIMATE);
             if (!p) throw std::runtime_error("plan_dft_c2r_1d creation failed");
             traits::execute_dft_c2r(p, pin, pout);
@@ -403,7 +456,7 @@ irfft_loop(char **args, npy_intp const *dimensions, npy_intp const *steps,
             std::vector<real_t> rbuf(nout);
             copy_input(ip + i * si, step_in, nin,
                        (std::complex<T> *)cbuf.data(), nin_expected);
-            plan_t p = traits::plan_dft_c2r_1d((int)nout,
+            plan_t p = traits::plan_dft_c2r_1d(n,
                 (complex_t *)cbuf.data(), rbuf.data(),
                 FFT_ESTIMATE);
             if (!p) throw std::runtime_error("plan_dft_c2r_1d creation failed");
@@ -467,65 +520,94 @@ static const char irfft_types[] = {
 static int
 add_gufuncs(PyObject *dictionary) {
     PyObject *f;
+    int ret;
     int ntypes = 2; /* double + float, no longdouble */
 
     f = PyUFunc_FromFuncAndDataAndSignature(
         fft_functions, fft_data, fft_types, ntypes, 2, 1, PyUFunc_None,
         "fft", "FFT complex forward\n", 0, "(n),()->(m)");
     if (f == NULL) return -1;
-    PyDict_SetItemString(dictionary, "fft", f);
+    ret = PyDict_SetItemString(dictionary, "fft", f);
     Py_DECREF(f);
+    if (ret < 0) return -1;
 
     f = PyUFunc_FromFuncAndDataAndSignature(
         fft_functions, ifft_data, fft_types, ntypes, 2, 1, PyUFunc_None,
         "ifft", "FFT complex backward\n", 0, "(m),()->(n)");
     if (f == NULL) return -1;
-    PyDict_SetItemString(dictionary, "ifft", f);
+    ret = PyDict_SetItemString(dictionary, "ifft", f);
     Py_DECREF(f);
+    if (ret < 0) return -1;
 
     f = PyUFunc_FromFuncAndDataAndSignature(
         rfft_n_even_functions, NULL, rfft_types, ntypes, 2, 1, PyUFunc_None,
         "rfft_n_even", "FFT real forward for even n\n", 0, "(n),()->(m)");
     if (f == NULL) return -1;
-    PyDict_SetItemString(dictionary, "rfft_n_even", f);
+    ret = PyDict_SetItemString(dictionary, "rfft_n_even", f);
     Py_DECREF(f);
+    if (ret < 0) return -1;
 
     f = PyUFunc_FromFuncAndDataAndSignature(
         rfft_n_odd_functions, NULL, rfft_types, ntypes, 2, 1, PyUFunc_None,
         "rfft_n_odd", "FFT real forward for odd n\n", 0, "(n),()->(m)");
     if (f == NULL) return -1;
-    PyDict_SetItemString(dictionary, "rfft_n_odd", f);
+    ret = PyDict_SetItemString(dictionary, "rfft_n_odd", f);
     Py_DECREF(f);
+    if (ret < 0) return -1;
 
     f = PyUFunc_FromFuncAndDataAndSignature(
         irfft_functions, NULL, irfft_types, ntypes, 2, 1, PyUFunc_None,
         "irfft", "FFT real backward\n", 0, "(m),()->(n)");
     if (f == NULL) return -1;
-    PyDict_SetItemString(dictionary, "irfft", f);
+    ret = PyDict_SetItemString(dictionary, "irfft", f);
     Py_DECREF(f);
+    if (ret < 0) return -1;
 
     return 0;
 }
 
 /* ── Module init ── */
-static int module_loaded = 0;
+/* KML thread initialization/configuration is non-reentrant. Claim the single
+ * initialization attempt atomically, including in free-threaded builds. Do not
+ * retry after failure: cleanup_threads ends the KML threading lifetime.
+ */
+static std::atomic_flag module_loaded = ATOMIC_FLAG_INIT;
 
 static int
 _kml_fft_umath_exec(PyObject *m)
 {
-    if (module_loaded) {
+    if (module_loaded.test_and_set()) {
         PyErr_SetString(PyExc_ImportError,
                         "cannot load module more than once per process");
         return -1;
     }
-    module_loaded = 1;
-
     if (PyArray_ImportNumPyAPI() < 0) return -1;
     if (PyUFunc_ImportUFuncAPI() < 0) return -1;
 
-    /* Initialize FFT library threading */
-    kml_traits<double>::init_threads();
-    kml_traits<float>::init_threads();
+    if (kml_traits<double>::init_threads() == 0) {
+        PyErr_SetString(PyExc_ImportError,
+                        "KML FFT double-precision thread initialization failed");
+        return -1;
+    }
+    if (kml_traits<float>::init_threads() == 0) {
+        /* No plans or gufuncs have been published; release the successful half
+         * of this initialization attempt before permanently disabling it.
+         */
+        kml_traits<double>::cleanup_threads();
+        PyErr_SetString(PyExc_ImportError,
+                        "KML FFT single-precision thread initialization failed");
+        return -1;
+    }
+
+    /* Match NumPy's PocketFFT build (POCKETFFT_NO_MULTITHREADING): each FFT
+     * uses one internal thread. Configure both precisions once, before exposing
+     * any gufuncs, since plan_with_nthreads is non-reentrant. Independent FFT
+     * calls can still run concurrently; this is not a planner-safety guarantee.
+     * Successful initialization has process lifetime, not backend-context
+     * lifetime, so switching backends must not call cleanup_threads.
+     */
+    kml_traits<double>::plan_with_nthreads(1);
+    kml_traits<float>::plan_with_nthreads(1);
 
     PyObject *d = PyModule_GetDict(m);
     if (add_gufuncs(d) < 0) {

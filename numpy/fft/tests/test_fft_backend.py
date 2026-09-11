@@ -15,6 +15,103 @@ from numpy.fft._backend import _BACKEND_MANAGER
 KMLFFT_AVAILABLE = "kmlfft" in _BACKEND_MANAGER._backends
 
 
+@pytest.mark.skipif(not KMLFFT_AVAILABLE, reason="kmlfft backend not available")
+class TestKMLFFTScaleFactors:
+    @pytest.mark.parametrize("name", [
+        "fft", "ifft", "rfft_n_even", "rfft_n_odd", "irfft",
+    ])
+    @pytest.mark.parametrize("real_dtype", [np.float32, np.float64])
+    @pytest.mark.parametrize("factor_layout", [
+        "scalar", "contiguous", "strided", "reversed",
+    ])
+    @pytest.mark.parametrize("buffered", [False, True])
+    def test_native_batch_scale_factors(self, name, real_dtype,
+                                       factor_layout, buffered):
+        from numpy.fft import _kml_fft_umath as kml
+
+        complex_dtype = np.result_type(real_dtype, np.complex64)
+        is_rfft = name.startswith("rfft_")
+        n = 5 if name == "rfft_n_odd" else 4
+        nin = n // 2 + 1 if name == "irfft" else n
+        nout = n // 2 + 1 if is_rfft else n
+        a = np.ones((3, nin), dtype=real_dtype if is_rfft else complex_dtype)
+        output_dtype = real_dtype if name == "irfft" else complex_dtype
+        if buffered:
+            a = a[:, ::-1]
+            out = np.empty((3, 2 * nout), dtype=output_dtype)[:, ::2]
+        else:
+            out = np.empty((3, nout), dtype=output_dtype)
+
+        factors = np.array([1, -2, 0.5], dtype=real_dtype)
+        if factor_layout == "scalar":
+            factors = real_dtype(2)
+        elif factor_layout == "strided":
+            storage = np.full(6, 99, dtype=real_dtype)
+            storage[::2] = factors
+            factors = storage[::2]
+        elif factor_layout == "reversed":
+            factors = factors[::-1]
+
+        # Each unnormalized transform of ones is n at index zero and zero
+        # elsewhere, including C2R with an all-ones Hermitian half-spectrum.
+        expected = np.zeros((3, nout), dtype=output_dtype)
+        expected[:, 0] = n * factors
+        getattr(kml, name)(a, factors, out=out)
+        tolerance = 1e-6 if real_dtype == np.float32 else 1e-12
+        np.testing.assert_allclose(out, expected, rtol=tolerance,
+                                   atol=tolerance)
+
+
+@pytest.mark.skipif(not KMLFFT_AVAILABLE, reason="kmlfft backend not available")
+class TestKMLFFTLengthValidation:
+    @pytest.mark.skipif(
+        np.dtype(np.intp).itemsize <= np.dtype(np.intc).itemsize,
+        reason="requires array dimensions wider than C int",
+    )
+    @pytest.mark.parametrize("name", [
+        "fft", "ifft", "rfft_n_even", "rfft_n_odd", "irfft",
+    ])
+    @pytest.mark.parametrize("real_dtype", [np.float32, np.float64])
+    @pytest.mark.parametrize("n", [
+        int(np.iinfo(np.intc).max) + 1,
+        2 * (int(np.iinfo(np.intc).max) + 1),
+        2 * (int(np.iinfo(np.intc).max) + 1) + 2,
+    ])
+    def test_native_rejects_oversized_length(self, name, real_dtype, n):
+        from numpy.fft import _kml_fft_umath as kml
+
+        complex_dtype = np.result_type(real_dtype, np.complex64)
+        is_rfft = name.startswith("rfft_")
+        if name == "rfft_n_odd":
+            n += 1
+        nout = n // 2 + 1 if is_rfft else n
+        input_dtype = real_dtype if is_rfft else complex_dtype
+        output_dtype = real_dtype if name == "irfft" else complex_dtype
+        a = np.ones(1, dtype=input_dtype)
+        storage = np.zeros(1, dtype=output_dtype)
+        # A zero-stride output exposes the large core dimension using only
+        # one element of storage. Validation must precede work-buffer allocation.
+        out = np.ndarray((nout,), dtype=output_dtype,
+                         buffer=storage, strides=(0,))
+        with pytest.raises(ValueError, match="KML FFT length"):
+            getattr(kml, name)(a, real_dtype(1), out=out)
+        assert storage[0] == 0
+
+    @pytest.mark.parametrize("name,nout", [
+        ("fft", 0), ("ifft", 0), ("irfft", 0),
+        ("rfft_n_even", 0), ("rfft_n_even", 1), ("rfft_n_odd", 0),
+    ])
+    def test_native_rejects_zero_length(self, name, nout):
+        from numpy.fft import _kml_fft_umath as kml
+
+        a = np.ones(1, dtype=np.float64 if name.startswith("rfft_")
+                    else np.complex128)
+        out = np.empty(nout, dtype=np.float64 if name == "irfft"
+                       else np.complex128)
+        with pytest.raises(ValueError, match="KML FFT length"):
+            getattr(kml, name)(a, np.float64(1), out=out)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

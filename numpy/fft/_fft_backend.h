@@ -28,6 +28,8 @@
 #define FFT_EXECUTE_DFT_C2R    kml_fft_execute_dft_c2r
 #define FFT_DESTROY_PLAN       kml_fft_destroy_plan
 #define FFT_INIT_THREADS       kml_fft_init_threads
+#define FFT_PLAN_WITH_NTHREADS kml_fft_plan_with_nthreads
+#define FFT_CLEANUP_THREADS    kml_fft_cleanup_threads
 #define FFT_ESTIMATE           KML_FFT_ESTIMATE
 #define FFT_FORWARD            KML_FFT_FORWARD
 #define FFT_BACKWARD           KML_FFT_BACKWARD
@@ -48,6 +50,8 @@
 #define FFTF_EXECUTE_DFT_C2R    kml_fftf_execute_dft_c2r
 #define FFTF_DESTROY_PLAN       kml_fftf_destroy_plan
 #define FFTF_INIT_THREADS       kml_fftf_init_threads
+#define FFTF_PLAN_WITH_NTHREADS kml_fftf_plan_with_nthreads
+#define FFTF_CLEANUP_THREADS    kml_fftf_cleanup_threads
 
 #else
 #error "Unknown FFT backend. Build with -DNUMPY_FFT_USE_KML"
