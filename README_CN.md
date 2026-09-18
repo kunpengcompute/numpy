@@ -10,6 +10,32 @@ BoostKit NumPy 是基于上游社区 NumPy 的鲲鹏平台性能优化项目，�
 
 当前工作重点包括 ARM64 / 鲲鹏平台性能优化、benchmark 结果验证，以及保持与上游 NumPy 行为的兼容性。
 
+## 容器环境部署
+
+容器环境部署通过基于镜像构建容器环境放方式来部署
+
+### 基于镜像构建容器环境
+
+基于镜像构建容器环境，首先需要获取镜像。通过命令直接拉取预构建镜像（推荐）
+
+### 步骤 获取镜像
+
+### 选项：直接拉取预构建镜像
+
+拉取镜像的命令为：
+
+```shell
+docker pull swr.cn-north-4.myhuaweicloud.com/cloud_boostkit/openeuler22.03_lts_sp3:numpy-2.4.3
+```
+
+### 镜像配置
+
+拉取镜像后需要配置环境变量，从而正确识别 conda 预装环境和完整 Python 工具链。
+```shell
+ export PATH=/opt/miniforge3/bin:$PATH
+```
+
+
 ## 环境要求
 
 推荐在 Linux ARM64 / aarch64 环境下构建和运行本项目，重点目标平台为鲲鹏服务器。x86_64 Linux 环境可用于 baseline 对比和兼容性验证。
