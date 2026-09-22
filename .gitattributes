@@ -52,8 +52,8 @@ numpy/version.py linguist-generated
 *.js    text
 
 # F2py
-./doc/source/f2py/*.pyf text
-./doc/source/f2py/*.dat text
+./docs/source/f2py/*.pyf text
+./docs/source/f2py/*.dat text
 
 # Documents
 *.md    text diff=markdown
@@ -99,10 +99,10 @@ numpy/version.py linguist-generated
 # Misc.
 *.swg   text
 *.patch text
-./doc/neps/index.rst.tmpl text
+./docs/neps/index.rst.tmpl text
 ./benchmarks/asv_compare.conf.json.tpl text
 ./tools/swig/test/*.i text
-./doc/source/dev/gitwash/git_links.inc text
-./doc/source/reference/simd/*.inc text
+./docs/source/dev/gitwash/git_links.inc text
+./docs/source/reference/simd/*.inc text
 ./numpy/_core/src/_simd/*.inc text diff=c
 * text=auto eol=lf

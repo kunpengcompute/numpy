@@ -76,7 +76,7 @@ license-files = [
 # differences; we choose to make the SPDX expression reflect *a wheel built
 # from the sources*.
 #    '.spin/LICENSE',                                    # BSD-3-Clause
-#    'doc/source/_static/scipy-mathjax/LICENSE',         # Apache-2.0
+#    'docs/source/_static/scipy-mathjax/LICENSE',         # Apache-2.0
 #    'numpy/_build_utils/tempita/LICENSE.txt',           # BSD-3-Clause
 #    'vendored-meson/meson/COPYING',                     # Apache-2.0
 # Note that the commented out license files are still included in the sdist,
@@ -106,10 +106,10 @@ tracker = "https://github.com/numpy/numpy/issues"
 
 [tool.towncrier]
     single_file = false
-    filename = "doc/source/release/notes-towncrier.rst"
-    directory = "doc/release/upcoming_changes/"
+    filename = "docs/source/release/notes-towncrier.rst"
+    directory = "docs/release/upcoming_changes/"
     issue_format = "`gh-{issue} <https://github.com/numpy/numpy/pull/{issue}>`__"
-    template = "doc/release/upcoming_changes/template.rst"
+    template = "docs/release/upcoming_changes/template.rst"
     underlines = "~="
     all_bullets = false
 

@@ -108,10 +108,10 @@ def docs(*, parent_callback, **kwargs):
 
     """
     kwargs['clean_dirs'] = [
-        './doc/build/',
-        './doc/source/reference/generated',
-        './doc/source/reference/random/bit_generators/generated',
-        './doc/source/reference/random/generated',
+        './docs/build/',
+        './docs/source/reference/generated',
+        './docs/source/reference/random/bit_generators/generated',
+        './docs/source/reference/random/generated',
     ]
 
     # Run towncrier without staging anything for commit. This is the way to get
@@ -234,14 +234,14 @@ def check_docs(*, parent_callback, pytest_args, **kwargs):
 def check_tutorials(*, parent_callback, pytest_args, **kwargs):
     """🔧 Run doctests of user-facing rst tutorials.
 
-    To test all tutorials in the numpy doc/source/user/ directory, use
+    To test all tutorials in the numpy docs/source/user/ directory, use
 
       spin check-tutorials
 
     To run tests on a specific RST file:
 
      \b
-     spin check-tutorials doc/source/user/absolute-beginners.rst
+     spin check-tutorials docs/source/user/absolute-beginners.rst
 
     \b
     Note:
@@ -258,7 +258,7 @@ def check_tutorials(*, parent_callback, pytest_args, **kwargs):
     #   - `spin check-tutorials path/to/rst`, and
     #   - `spin check-tutorials path/to/rst -- --durations=3`
     if (not pytest_args) or all(arg.startswith('-') for arg in pytest_args):
-        pytest_args = ('doc/source/user',) + pytest_args
+        pytest_args = ('docs/source/user',) + pytest_args
 
     # make all paths relative to the numpy source folder
     pytest_args = tuple(

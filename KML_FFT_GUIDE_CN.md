@@ -617,5 +617,5 @@ NumPy 时选择 `--use-gcc` 并加载 `gcc/env/setvars.sh`；使用 BiSheng
 
 更多构建机制和后端架构说明可参阅：
 
-- [FFT 后端构建说明](doc/source/building/fft_backend.rst)
-- [FFT 后端架构说明](doc/source/dev/fft-backend.rst)
+- [FFT 后端构建说明](docs/source/building/fft_backend.rst)
+- [FFT 后端架构说明](docs/source/dev/fft-backend.rst)

@@ -21,7 +21,7 @@ import subprocess
 from pathlib import Path
 
 # Name of the notes directory
-NOTES_DIR = "doc/source/release"
+NOTES_DIR = "docs/source/release"
 # Name of the output directory
 OUTPUT_DIR = "release"
 # Output base name, `.rst` or `.md` will be appended

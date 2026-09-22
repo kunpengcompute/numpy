@@ -69,8 +69,8 @@ jobs:
             . venv/bin/activate
             # Don't use -q, show warning summary"
             SPHINXOPTS="-W -n" spin docs
-            if [[ $(find doc/build/html -type f | wc -l) -lt 1000 ]]; then
-                echo "doc build failed: doc/build/html is empty"
+            if [[ $(find docs/build/html -type f | wc -l) -lt 1000 ]]; then
+                echo "doc build failed: docs/build/html is empty"
                 exit -1
             fi
 
@@ -78,14 +78,14 @@ jobs:
           name: build neps
           command: |
             . venv/bin/activate
-            cd doc/neps
+            cd docs/neps
             SPHINXOPTS="-n" make -e html || echo "ignoring errors for now"
 
       - store_artifacts:
-          path: doc/build/html/
+          path: docs/build/html/
 
       - store_artifacts:
-          path: doc/neps/_build/html/
+          path: docs/neps/_build/html/
      #      destination: neps
 
       - run:
@@ -104,8 +104,8 @@ jobs:
       - persist_to_workspace:
           root: ~/repo
           paths:
-            - doc/build/html
-            - doc/neps/_build
+            - docs/build/html
+            - docs/neps/_build
             - tools/ci/push_docs_to_repo.py
 
   deploy:
@@ -124,9 +124,9 @@ jobs:
       -  run:
           name: deploy devdocs
           command: |
-            touch doc/build/html/.nojekyll
+            touch docs/build/html/.nojekyll
 
-            ./tools/ci/push_docs_to_repo.py doc/build/html \
+            ./tools/ci/push_docs_to_repo.py docs/build/html \
                 --committer "numpy-circleci-bot" \
                 --email "numpy-circleci-bot@nomail" \
                 --message "Docs build of $CIRCLE_SHA1" \
@@ -150,9 +150,9 @@ jobs:
       -  run:
           name: deploy neps
           command: |
-            touch doc/neps/_build/html/.nojekyll
+            touch docs/neps/_build/html/.nojekyll
 
-            ./tools/ci/push_docs_to_repo.py doc/neps/_build/html \
+            ./tools/ci/push_docs_to_repo.py docs/neps/_build/html \
                 --committer "numpy-circleci-bot" \
                 --email "numpy-circleci-bot@nomail" \
                 --message "Docs build of $CIRCLE_SHA1" \

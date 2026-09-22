@@ -1,87 +1,69 @@
-<h1 align="center">
-<img src="https://raw.githubusercontent.com/numpy/numpy/main/branding/logo/primary/numpylogo.svg" width="300">
-</h1><br>
+# BoostKit NumPy
 
+## NumPy介绍
 
-[![Powered by NumFOCUS](https://img.shields.io/badge/powered%20by-NumFOCUS-orange.svg?style=flat&colorA=E1523D&colorB=007D8A)](
-https://numfocus.org)
-[![PyPI Downloads](https://img.shields.io/pypi/dm/numpy.svg?label=PyPI%20downloads)](
-https://pypi.org/project/numpy/)
-[![Conda Downloads](https://img.shields.io/conda/dn/conda-forge/numpy.svg?label=Conda%20downloads)](
-https://anaconda.org/conda-forge/numpy)
-[![Stack Overflow](https://img.shields.io/badge/stackoverflow-Ask%20questions-blue.svg)](
-https://stackoverflow.com/questions/tagged/numpy)
-[![Nature Paper](https://img.shields.io/badge/DOI-10.1038%2Fs41586--020--2649--2-blue)](
-https://doi.org/10.1038/s41586-020-2649-2)
-[![LFX Health Score](https://insights.linuxfoundation.org/api/badge/health-score?project=numpy)](https://insights.linuxfoundation.org/project/numpy)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/numpy/numpy/badge)](https://securityscorecards.dev/viewer/?uri=github.com/numpy/numpy)
-[![Typing](https://img.shields.io/pypi/types/numpy)](https://pypi.org/project/numpy/)
+BoostKit NumPy是基于上游社区NumPy的鲲鹏平台性能优化项目，属于鲲鹏BoostKit应用使能套件生态的一部分，旨在提升NumPy在ARM64/鲲鹏环境下的执行性能。
 
+本项目面向NumPy的性能相关实现进行优化，并通过benchmark用例对优化效果进行评估。在提升性能的同时，本项目保持与上游NumPy行为、接口语义和数值结果的一致性。
 
-NumPy is the fundamental package for scientific computing with Python.
+## 特性说明
 
-- **Website:** https://numpy.org
-- **Documentation:** https://numpy.org/doc
-- **Mailing list:** https://mail.python.org/mailman/listinfo/numpy-discussion
-- **Source code:** https://github.com/numpy/numpy
-- **Contributing:** https://numpy.org/devdocs/dev/index.html
-- **Bug reports:** https://github.com/numpy/numpy/issues
-- **Report a security vulnerability:** https://tidelift.com/docs/security
+### ARM64/鲲鹏性能优化
 
-It provides:
+本项目面向 ARM64架构进行NumPy性能优化，重点关注NumPy在鲲鹏服务器上的运行表现。
 
-- a powerful N-dimensional array object
-- sophisticated (broadcasting) functions
-- tools for integrating C/C++ and Fortran code
-- useful linear algebra, Fourier transform, and random number capabilities
+优化工作覆盖NumPy中的性能相关实现，具体优化内容以版本变更说明和benchmark 结果为准。优化目标是在保持NumPy原有行为一致性的前提下，提升关键场景下的执行性能。
 
-Testing:
+### Benchmark 性能验证
 
-NumPy requires `pytest` and `hypothesis`.  Tests can then be run after installation with:
+本项目使用 ASV benchmark 对性能变化进行评估。benchmark 结果用于验证优化收益、分析性能波动，并识别可能存在的劣化用例。
 
-    python -c "import numpy, sys; sys.exit(numpy.test() is False)"
+### 上游 NumPy 兼容性
 
-Code of Conduct
-----------------------
+本项目基于上游社区 NumPy，保持与上游 NumPy 公共 API、用户可见行为、异常行为和数值语义的一致性。
 
-NumPy is a community-driven open source project developed by a diverse group of
-[contributors](https://numpy.org/teams/). The NumPy leadership has made a strong
-commitment to creating an open, inclusive, and positive community. Please read the
-[NumPy Code of Conduct](https://numpy.org/code-of-conduct/) for guidance on how to interact
-with others in a way that makes our community thrive.
+性能优化不应改变 NumPy 原有接口语义，也不应影响已有测试用例的正确性。
 
-Call for Contributions
-----------------------
+## 项目状态
 
-The NumPy project welcomes your expertise and enthusiasm!
+本项目处于持续开发和优化阶段。
 
-Small improvements or fixes are always appreciated. If you are considering larger contributions
-to the source code, please contact us through the [mailing
-list](https://mail.python.org/mailman/listinfo/numpy-discussion) first.
+当前工作重点包括ARM64/鲲鹏平台性能优化、benchmark 结果验证，以及保持与上游 NumPy 行为的兼容性。
 
-Writing code isn’t the only way to contribute to NumPy. You can also:
-- review pull requests
-- help us stay on top of new and old issues
-- develop tutorials, presentations, and other educational materials
-- maintain and improve [our website](https://github.com/numpy/numpy.org)
-- develop graphic design for our brand assets and promotional materials
-- translate website content
-- help with outreach and onboard new contributors
-- write grant proposals and help with other fundraising efforts
+具体构建依赖请以`pyproject.toml`、`meson.build`和`docs/source/building`中的说明为准。
 
-For more information about the ways you can contribute to NumPy, visit [our website](https://numpy.org/contribute/). 
-If you’re unsure where to start or how your skills fit in, reach out! You can
-ask on the mailing list or here, on GitHub, by opening a new issue or leaving a
-comment on a relevant issue that is already open.
+## 容器环境部署
 
-Our preferred channels of communication are all public, but if you’d like to
-speak to us in private first, contact our community coordinators at
-numpy-team@googlegroups.com or on Slack (write numpy-team@googlegroups.com for
-an invitation).
+容器环境部署通过基于镜像构建容器环境放方式来部署
 
-We also have a biweekly community call, details of which are announced on the
-mailing list. You are very welcome to join.
+### 基于镜像构建容器环境
 
-If you are new to contributing to open source, [this
-guide](https://opensource.guide/how-to-contribute/) helps explain why, what,
-and how to successfully get involved.
+基于镜像构建容器环境，首先需要获取镜像。通过命令直接拉取预构建镜像（推荐）
+
+### 步骤 获取镜像
+
+### 选项：直接拉取预构建镜像
+
+拉取镜像的命令为：
+
+```shell
+docker pull swr.cn-north-4.myhuaweicloud.com/cloud_boostkit/openeuler22.03_lts_sp3:numpy-2.4.3
+```
+
+### 镜像配置
+
+拉取镜像后需要配置环境变量，从而正确识别 conda 预装环境和完整 Python 工具链。
+```shell
+ export PATH=/opt/miniforge3/bin:$PATH
+```
+
+## 更多文档
+
+|名称|路径|简介|
+|--|--|--|
+|快速入门|[quick_start.md](./docs/zh/quick_start.md)|提供快速使能并验证NumPy加速能力的快速入门指导。|
+|版本说明书|[release_notes.md](./docs/zh/release_notes.md)|提供NumPy的基础信息和特性更新信息。|
+
+## License
+
+本项目遵循上游NumPy及相关第三方依赖的许可证要求。

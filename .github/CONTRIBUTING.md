@@ -24,11 +24,11 @@ Either way, please be sure to follow our
 [convention for commit messages](https://numpy.org/devdocs/dev/development_workflow.html#writing-the-commit-message).
 
 If you are writing new C code, please follow the style described in
-``doc/C_STYLE_GUIDE``.
+``docs/C_STYLE_GUIDE``.
 
 Suggested ways to work on your development version (compile and run
 the tests without interfering with system packages) are described in
-``doc/source/dev/development_environment.rst``.
+``docs/source/dev/development_environment.rst``.
 
 ### A note on feature enhancements/API changes
 
