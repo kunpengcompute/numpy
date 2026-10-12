@@ -62,6 +62,7 @@ docker pull swr.cn-north-4.myhuaweicloud.com/cloud_boostkit/openeuler22.03_lts_s
 |名称|路径|简介|
 |--|--|--|
 |快速入门|[quick_start.md](./docs/zh/quick_start.md)|提供快速使能并验证NumPy加速能力的快速入门指导。|
+|鲲鹏优化版使用指南|[quick_start.md](./docs/quick_start.md)|提供鲲鹏优化版NumPy发行版wheel包的下载校验、安装与生效验证指导。|
 |版本说明书|[release_notes.md](./docs/zh/release_notes.md)|提供NumPy的基础信息和特性更新信息。|
 
 ## License
