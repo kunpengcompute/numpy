@@ -9,8 +9,6 @@
 | 代码仓 | gitcode.com/boostkit/numpy |
 | Release | `v2.4.3.0-rc2` |
 | wheel 文件 | `numpy-2.4.3-cp314-cp314-manylinux_2_34_aarch64.whl` |
-| 制品源码提交 | `558304423d330034cfdc40b1f55175b4675d437c`（与 release tag `target_commitish` 一致，即 wheel 内 `numpy.version.git_revision`） |
-| 优化起点提交 | master `aab588bf`（性能优化工作的起点，非制品源码提交） |
 | 说明 | 面向 ARM64/鲲鹏平台优化关键计算路径，与上游 NumPy API、行为、异常语义和数值结果兼容 |
 
 > 本指南中所有命令均已在鲲鹏 920b 实机（AlmaLinux 9.4, aarch64）端到端验证通过。
