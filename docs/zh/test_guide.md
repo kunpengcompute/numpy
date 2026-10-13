@@ -1,6 +1,6 @@
 # 快速入门
 
-如果需求在鲲鹏服务器上安装KML、构建带KML FFT后端的BoostKit NumPy，并验证 `kmlfft` 已经实际生效，请参阅[KML FFT构建与使用指南](../../KML_FFT_GUIDE_CN.md)。
+如果需求在鲲鹏服务器上安装KML、构建带KML FFT后端的BoostKit NumPy，并验证`kmlfft`已经实际生效，请参阅[KML FFT构建与使用指南](../../KML_FFT_GUIDE_CN.md)。
 
 指南同时提供完整HPCKit安装和从HPCKit中只提取KML的极简安装方式，适合第一次接触HPCKit、KML或NumPy源码构建的用户。
 
