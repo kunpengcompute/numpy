@@ -35,18 +35,18 @@ wheel为 `cp314` 规格，**只能安装在Python 3.14上**，其他Python版本
 python3.14 --version
 # 预期输出: Python 3.14.x
 
-# 确认 pip 可用
+# 确认pip可用
 python3.14 -m pip --version
 ```
 
 若 `python3.14` 命令不存在或版本不对，任选一种方式获得Python 3.14：
 
 ```bash
-# 方式一（root）：安装 python3.14，提供 /usr/bin/python3.14 命令
+# 方式一（root）：安装python3.14，提供/usr/bin/python3.14命令
 dnf install -y python3.14
 
-# 方式二（推荐，任何环境通用）：conda 创建 3.14 环境并激活
-# 激活后 python 与 python3.14 均指向 3.14
+# 方式二（推荐，任何环境通用）：conda创建3.14环境并激活
+# 激活后python与python3.14均指向3.14
 conda create -n py314 python=3.14 -y
 conda activate py314
 ```
@@ -81,7 +81,7 @@ python3.14 -m pip show numpy
 ```bash
 mkdir -p ~/whl-install && cd ~/whl-install
 
-# 下载 wheel 与官方 sha256 校验文件
+# 下载wheel与官方sha256校验文件
 curl -fLO "https://gitcode.com/boostkit/numpy/releases/download/v2.4.3.0-rc2/numpy-2.4.3-cp314-cp314-manylinux_2_34_aarch64.whl"
 curl -fLO "https://gitcode.com/boostkit/numpy/releases/download/v2.4.3.0-rc2/numpy-2.4.3-cp314-cp314-manylinux_2_34_aarch64.whl.sha256"
 
@@ -110,11 +110,11 @@ cat    numpy-2.4.3-cp314-cp314-manylinux_2_34_aarch64.whl.sha256
 ```bash
 cd ~/whl-install
 
-# 创建 Python 3.14 虚拟环境
+# 创建Python 3.14虚拟环境
 python3.14 -m venv numpy-env
 source numpy-env/bin/activate
 
-python --version          # 确认在 venv 内使用的是 3.14
+python --version          # 确认在venv内使用的是3.14
 python -m pip install --upgrade pip
 python -m pip install numpy-2.4.3-cp314-cp314-manylinux_2_34_aarch64.whl
 ```
@@ -138,11 +138,11 @@ import sys
 print("python :", sys.version.split()[0])
 import numpy
 print("numpy  :", numpy.__version__)
-assert numpy.__version__ == "2.4.3", "不是优化版 NumPy！"
-# 制品源码级校验：git_revision 必须与 Release 发布制品一致
+assert numpy.__version__ == "2.4.3", "不是优化版NumPy！"
+# 制品源码级校验：git_revision必须与Release发布制品一致
 from numpy.version import git_revision
 print("git_rev:", git_revision)
-assert git_revision == "558304423d330034cfdc40b1f55175b4675d437c", "git_revision 与发布制品不符！"
+assert git_revision == "558304423d330034cfdc40b1f55175b4675d437c", "git_revision与发布制品不符！"
 print("VERSION_CHECK_OK")
 EOF
 ```
@@ -221,7 +221,7 @@ EOF
 
 ```
 CORRECTNESS_SMOKE_OK
-np.sort(1e7 int64): 172.0 ms     # 920b 实机参考值
+np.sort(1e7 int64): 172.0 ms     # 920b实机参考值
 ```
 
 ## 5. 常见问题
@@ -238,7 +238,7 @@ np.sort(1e7 int64): 172.0 ms     # 920b 实机参考值
 ## 6. 卸载
 
 ```bash
-python3.14 -m pip uninstall -y numpy     # 方式 B 安装时
-# 或（方式 A）：直接删除虚拟环境
+python3.14 -m pip uninstall -y numpy     # 方式B安装时
+# 或（方式A）：直接删除虚拟环境
 deactivate && rm -rf ~/whl-install/numpy-env
 ```
