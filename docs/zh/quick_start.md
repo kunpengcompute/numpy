@@ -49,10 +49,8 @@ conda create -n py314 python=3.14 -y
 conda activate py314
 ```
 
-![](./public_sys-resources/icon-note.gif)
-
-**说明：**
-本指南不覆盖、不改名系统已有的 `python` 命令（避免影响整机Python环境）。若你习惯使用 `python`，请在激活虚拟环境后再使用。
+> ![](./public_sys-resources/icon-note.gif) **说明：**
+> 本指南不覆盖、不改名系统已有的 `python` 命令（避免影响整机Python环境）。若你习惯使用 `python`，请在激活虚拟环境后再使用。
 
 ### 1.3 确认glibc版本 ≥ 2.34（必需）
 
@@ -127,10 +125,8 @@ python3.14 -m pip uninstall -y numpy
 python3.14 -m pip install ~/whl-install/numpy-2.4.3-cp314-cp314-manylinux_2_34_aarch64.whl
 ```
 
-![](./public_sys-resources/icon-note.gif)
-
-**说明：**
-`pip install` 本地wheel时pip不会联网改包；若之后执行 `pip install -U numpy` 之类命令，可能从PyPI拉取上游版本覆盖优化版，请避免，或配置pip只从内网源安装。
+> ![](./public_sys-resources/icon-note.gif) **说明：**
+> `pip install` 本地wheel时pip不会联网改包；若之后执行 `pip install -U numpy` 之类命令，可能从PyPI拉取上游版本覆盖优化版，请避免，或配置pip只从内网源安装。
 
 ## 4. 验证安装成功
 
