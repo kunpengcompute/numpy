@@ -28,7 +28,7 @@ jobs:
           fetch-tags: true
           persist-credentials: false
       - name: Install Cygwin
-        uses: egor-tensin/setup-cygwin@d2c752bab416d4b0662591bd366fc2686297c82d # v4
+        uses: egor-tensin/setup-cygwin@9d87facad6e2e0dc56614ec6edf86dbc60dcda39 # v4
         with:
           platform: x86_64
           install-dir: 'C:\tools\cygwin'
