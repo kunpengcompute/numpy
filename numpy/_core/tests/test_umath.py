@@ -5783,3 +5783,89 @@ class TestMultiKthHighwaySelect:
         for k in kths:
             assert np.all(a[result[:k]] <= a[result[k]])
             assert np.all(a[result[k+1:]] >= a[result[k]])
+
+
+class TestSinCosPathPurity:
+    """Float64 sin/cos must be a pure function of each input value.
+
+    The aarch64 SIMD implementation mixes a polynomial path with a libm
+    fallback for lanes it cannot handle.  The fallback used to be
+    selected for a whole vector - or, stickily, for the rest of the
+    array - as soon as one lane held NaN, infinity, a huge, or a
+    near-boundary value, so the same input value produced different bits
+    depending on its neighbors, the array length, the strides, or
+    operand overlap.  These tests pin the per-lane behavior.
+    """
+
+    # polynomial-path values, per-lane libm fixup values (near a
+    # multiple of pi, beyond the Cody-Waite range), zero/tiny, and the
+    # special values NaN / +-inf
+    VALUES = [
+        0.0, -0.0, 1.0, -1.0, 2.0, -2.0, 3.5, 100.0,
+        float(np.pi),        # within 1e-10 of a multiple of pi
+        1e-300,              # tiny
+        1e8, -1e8,           # beyond the Cody-Waite range
+        np.nan, np.inf, -np.inf,
+    ]
+
+    @pytest.mark.parametrize("ufunc", [np.sin, np.cos])
+    def test_value_purity_across_paths(self, ufunc):
+        def bits(x):
+            return np.float64(x).tobytes()
+
+        with np.errstate(all="ignore"):
+            for v in self.VALUES:
+                ref = bits(ufunc(np.array([v]))[0])
+
+                # same value in arrays of every length around the vector
+                # width and the unrolled block size
+                for n in list(range(1, 19)) + [32, 64]:
+                    a = np.full(n, 1.0)
+                    a[0] = v
+                    assert bits(ufunc(a)[0]) == ref
+                    a = np.full(n, 1.0)
+                    a[-1] = v
+                    assert bits(ufunc(a)[-1]) == ref
+
+                # surrounded by NaNs / infinities, before and after them
+                for filler in (np.nan, np.inf, -np.inf):
+                    a = np.full(8, filler)
+                    a[0] = v
+                    assert bits(ufunc(a)[0]) == ref
+                    a = np.full(8, v)
+                    a[4] = filler
+                    assert bits(ufunc(a)[0]) == ref
+                    ref_filler = bits(ufunc(np.full(8, filler))[4])
+                    assert bits(ufunc(a)[4]) == ref_filler
+
+                # large array with a poisoning value in the middle
+                a = np.full(1000, v)
+                a[500] = np.nan
+                r = ufunc(a)
+                assert bits(r[0]) == ref
+                assert bits(r[999]) == ref
+
+                # strided input
+                buf = np.full(64, 2.0)
+                buf[::2] = v
+                assert bits(ufunc(buf[::2])[0]) == ref
+
+                # overlapping in-place operation
+                a = np.full(16, v)
+                ufunc(a, out=a)
+                assert bits(a[0]) == ref
+
+                # scalar entry points take the same code path
+                assert bits(ufunc(np.float64(v))) == ref
+                assert bits(ufunc(v)) == ref
+
+    @pytest.mark.parametrize("ufunc", [np.sin, np.cos])
+    def test_inf_still_raises_invalid(self, ufunc):
+        # infinities must keep going through libm so the floating point
+        # invalid flag - and with it the RuntimeWarning - is preserved
+        with np.errstate(invalid="raise"):
+            with pytest.raises(FloatingPointError):
+                ufunc(np.array([np.inf, 1.0]))
+        with np.errstate(invalid="raise"):
+            with pytest.raises(FloatingPointError):
+                ufunc(np.full(9, np.inf))
