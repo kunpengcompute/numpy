@@ -308,6 +308,8 @@ inline V operator()(const V &x) const
     needs_libm = hn::AndNot(is_nan, needs_libm);
     needs_libm = hn::AndNot(is_tiny, needs_libm);
     
+    // Huge and infinite lanes yield unspecified integers from ConvertTo;
+    // their polynomial results are discarded by the per-lane libm fixup.
     auto n = hn::Round(hn::Mul(x_clean, inv_pi));
     auto n_int = hn::ConvertTo(di64, n);
     auto odd = hn::ShiftLeft<63>(hn::BitCast(du64, n_int));
@@ -346,8 +348,14 @@ inline V operator()(const V &x) const
         T NPY_DECL_ALIGNED(NPY_SIMD_WIDTH) result_arr[hn::MaxLanes(d)];
         hn::Store(x, d, input_arr);
         hn::Store(simd_result, d, result_arr);
-        npy_uint64 libm_mask;
+        npy_uint64 libm_mask = 0;
         hn::StoreMaskBits(d, needs_libm, (uint8_t *)&libm_mask);
+#if HWY_IS_BIG_ENDIAN
+        static_assert(hn::MaxLanes(d) <= 8,
+                      "This conversion is not supported for SIMD widths "
+                      "larger than 256 bits.");
+        libm_mask = ((uint8_t *)&libm_mask)[0];
+#endif
         size_t lanes_count = hn::Lanes(d);
         for (size_t i = 0; i < lanes_count; i++) {
             if ((libm_mask >> i) & 1) {
@@ -356,7 +364,7 @@ inline V operator()(const V &x) const
         }
         simd_result = hn::Load(d, result_arr);
     }
-    
+
     return simd_result;
 }
 };
@@ -426,6 +434,8 @@ auto is_nan = hn::IsNaN(x);
     needs_libm = hn::AndNot(is_nan, needs_libm);
     needs_libm = hn::AndNot(is_tiny, needs_libm);
     
+    // Huge and infinite lanes yield unspecified integers from ConvertTo;
+    // their polynomial results are discarded by the per-lane libm fixup.
     auto n = hn::Round(hn::MulAdd(x_clean, inv_pi, half));
     auto n_int = hn::ConvertTo(di64, n);
     auto odd = hn::ShiftLeft<63>(hn::BitCast(du64, n_int));
@@ -465,8 +475,14 @@ auto is_nan = hn::IsNaN(x);
         T NPY_DECL_ALIGNED(NPY_SIMD_WIDTH) result_arr[hn::MaxLanes(d)];
         hn::Store(x, d, input_arr);
         hn::Store(simd_result, d, result_arr);
-        npy_uint64 libm_mask;
+        npy_uint64 libm_mask = 0;
         hn::StoreMaskBits(d, needs_libm, (uint8_t *)&libm_mask);
+#if HWY_IS_BIG_ENDIAN
+        static_assert(hn::MaxLanes(d) <= 8,
+                      "This conversion is not supported for SIMD widths "
+                      "larger than 256 bits.");
+        libm_mask = ((uint8_t *)&libm_mask)[0];
+#endif
         size_t lanes_count = hn::Lanes(d);
         for (size_t i = 0; i < lanes_count; i++) {
             if ((libm_mask >> i) & 1) {
@@ -475,7 +491,7 @@ auto is_nan = hn::IsNaN(x);
         }
         simd_result = hn::Load(d, result_arr);
     }
-    
+
     return simd_result;
 }
 };
@@ -507,7 +523,7 @@ simd_unary_loop(const T *src, npy_intp ssrc, T *dst, npy_intp sdst, npy_intp len
             hn::Vec<decltype(tag_t)> x1 = hn::Load(tag_t, src + lanes);
             hn::Vec<decltype(tag_t)> x2 = hn::Load(tag_t, src + lanes * 2);
             hn::Vec<decltype(tag_t)> x3 = hn::Load(tag_t, src + lanes * 3);
-            
+
             hn::Store(op_func(x0), tag_t, dst);
             hn::Store(op_func(x1), tag_t, dst + lanes);
             hn::Store(op_func(x2), tag_t, dst + lanes * 2);
