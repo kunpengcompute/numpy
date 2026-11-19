@@ -3,10 +3,10 @@
 #include "hwy/contrib/sort/vqsort-inl.h"
 
 #include "highway_qsort.hpp"
+#include "highway_qsort_determinism.hpp"
 #include "quicksort.hpp"
 
 #include <algorithm>
-#include <vector>
 
 #include "common.hpp"
 
@@ -76,14 +76,21 @@ inline uint32_t ToSortableKey16(T val)
         return static_cast<uint32_t>(static_cast<uint16_t>(val) ^ 0x8000U);
     }
     else if constexpr (std::is_same_v<T, Half>) {
+        /* IEEE-754 order-preserving key at 16-bit scale: negatives map to
+         * [0, 0x7FFF] via the 16-bit complement, positives to
+         * [0x8000, 0xFFFF] via the sign bit, so that -x < 0 <= +x.
+         * Note the two zeros are adjacent but NOT equal: -0.0 -> 0x7FFF and
+         * +0.0 -> 0x8000, so the key order puts -0.0 first; both orders are
+         * valid sorted output. Complementing the zero-extended 32/64-bit
+         * word or OR-ing 0x80000000 would put negatives *after* positives. */
         uint16_t u = val.Bits();
         if (val.IsNaN()) {
             return 0xFFFFFFFFU;
         }
         if (u & 0x8000U) {
-            return ~static_cast<uint32_t>(u);
+            return static_cast<uint32_t>(static_cast<uint16_t>(~u));
         } else {
-            return static_cast<uint32_t>(u) | 0x80000000U;
+            return static_cast<uint32_t>(u) | 0x8000U;
         }
     }
 }
@@ -142,14 +149,30 @@ void NPY_CPU_DISPATCH_CURFX(ArgQSort)(T *arr, npy_intp* arg, npy_intp size)
     }
 
 #if VQSORT_ENABLED
-    std::vector<hwy::K32V32> pairs(size);
-    for (npy_intp i = 0; i < size; ++i) {
-        pairs[i].key = ToSortableKey16(arr[i]);
-        pairs[i].value = static_cast<uint32_t>(i);
+    // Deterministic pivot stream and sampling grid; see
+    // highway_qsort_determinism.hpp. Must happen before VQSortStatic.
+    ResetVQSortRNG();
+    if (static_cast<uint64_t>(size) > 0x100000000ULL) {
+        // K32V32's 32-bit value field cannot hold indices past 2^32-1.
+        for (npy_intp i = 0; i < size; ++i) {
+            arg[i] = i;
+        }
+        std::sort(arg, arg + size, [arr](npy_intp a, npy_intp b) {
+            return ArgLess16<T>(arr, a, b);
+        });
+        return;
     }
-    hwy::HWY_NAMESPACE::VQSortStatic(pairs.data(), static_cast<size_t>(size), hwy::SortAscending());
+    // 64-byte aligned buffer: DrawSamples() aligns its sampling grid to the
+    // runtime address of the keys, which must not depend on malloc.
+    AlignedPairs<hwy::K32V32> pairs(static_cast<size_t>(size));
+    hwy::K32V32 *kv = pairs.data();
     for (npy_intp i = 0; i < size; ++i) {
-        arg[i] = static_cast<npy_intp>(pairs[i].value);
+        kv[i].key = ToSortableKey16(arr[i]);
+        kv[i].value = static_cast<uint32_t>(i);
+    }
+    hwy::HWY_NAMESPACE::VQSortStatic(kv, static_cast<size_t>(size), hwy::SortAscending());
+    for (npy_intp i = 0; i < size; ++i) {
+        arg[i] = static_cast<npy_intp>(kv[i].value);
     }
 #else
     for (npy_intp i = 0; i < size; ++i) {
@@ -188,15 +211,29 @@ void NPY_CPU_DISPATCH_CURFX(ArgQSelect)(T *arr, npy_intp* arg, npy_intp num, npy
     }
 
 #if VQSORT_ENABLED
-    std::vector<hwy::K32V32> pairs(num);
-    for (npy_intp i = 0; i < num; ++i) {
-        pairs[i].key = ToSortableKey16(arr[i]);
-        pairs[i].value = static_cast<uint32_t>(i);
+    // Deterministic pivot stream and sampling grid; see
+    // highway_qsort_determinism.hpp. Must happen before VQSelectStatic.
+    ResetVQSortRNG();
+    if (static_cast<uint64_t>(num) > 0x100000000ULL) {
+        // K32V32's 32-bit value field cannot hold indices past 2^32-1.
+        for (npy_intp i = 0; i < num; ++i) {
+            arg[i] = i;
+        }
+        std::nth_element(arg, arg + kth, arg + num, [arr](npy_intp a, npy_intp b) {
+            return ArgLess16<T>(arr, a, b);
+        });
+        return;
     }
-    hwy::HWY_NAMESPACE::VQSelectStatic(pairs.data(), static_cast<size_t>(num),
+    AlignedPairs<hwy::K32V32> pairs(static_cast<size_t>(num));
+    hwy::K32V32 *kv = pairs.data();
+    for (npy_intp i = 0; i < num; ++i) {
+        kv[i].key = ToSortableKey16(arr[i]);
+        kv[i].value = static_cast<uint32_t>(i);
+    }
+    hwy::HWY_NAMESPACE::VQSelectStatic(kv, static_cast<size_t>(num),
                                        static_cast<size_t>(kth), hwy::SortAscending());
     for (npy_intp i = 0; i < num; ++i) {
-        arg[i] = static_cast<npy_intp>(pairs[i].value);
+        arg[i] = static_cast<npy_intp>(kv[i].value);
     }
 #else
     for (npy_intp i = 0; i < num; ++i) {

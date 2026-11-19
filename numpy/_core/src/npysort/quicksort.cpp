@@ -129,6 +129,10 @@ inline bool aquicksort_dispatch(T *start, npy_intp* arg, npy_intp num)
     }
 #else
     // ARM / POWER / etc: use Highway VQSort for large arrays.
+    // Guarded by NPY_HAVE_HIGHWAY_ARGSORT (meson option disable-highway-argsort)
+    // so the argsort/argpartition SIMD path can be turned off without
+    // disabling value sort; falls back to the built-in introsort below.
+#if NPY_HAVE_HIGHWAY_ARGSORT
     constexpr npy_intp kHwyArgQSort = 1024;
     if (num >= kHwyArgQSort) {
         // 16-bit types (including Half) use the dedicated 16-bit dispatch.
@@ -142,6 +146,7 @@ inline bool aquicksort_dispatch(T *start, npy_intp* arg, npy_intp num)
             NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::highway::qsort_simd::template ArgQSort, <TF>);
         }
     }
+#endif  // NPY_HAVE_HIGHWAY_ARGSORT
 #endif
     if (dispfunc) {
         (*dispfunc)(reinterpret_cast<TF*>(start), arg, num);

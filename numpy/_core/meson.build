@@ -126,6 +126,13 @@ endif
 
 cdata.set10('NPY_HAVE_HIGHWAY', use_highway)
 
+# Highway accelerates arg-sort/arg-select on non-x86 platforms. vqsort's
+# pivot sampling is made deterministic for those paths (see
+# src/npysort/highway_qsort_determinism.hpp); this option is the escape
+# hatch back to the built-in introsort/introselect.
+use_highway_argsort = use_highway and not get_option('disable-highway-argsort')
+cdata.set10('NPY_HAVE_HIGHWAY_ARGSORT', use_highway_argsort)
+
 use_intel_sort = not get_option('disable-intel-sort') and cpu_family in ['x86', 'x86_64']
 if use_intel_sort and not fs.exists('src/npysort/x86-simd-sort/README.md')
   error('Missing the `x86-simd-sort` git submodule! Run `git submodule update --init` to fix this.')

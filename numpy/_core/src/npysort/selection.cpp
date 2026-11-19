@@ -96,15 +96,21 @@ inline bool argquickselect_dispatch(T* v, npy_intp* arg, npy_intp num, npy_intp 
          * On ARM this is noticeably slower than introselect for 64-bit patterned
          * inputs such as sorted_block, while ordered/uniform inputs are already
          * handled by the already-partitioned fast path before this dispatch.
+         * Guarded by NPY_HAVE_HIGHWAY_ARGSORT (meson option
+         * disable-highway-argsort); falls back to introselect below.
          */
+#if NPY_HAVE_HIGHWAY_ARGSORT
         if constexpr (sizeof(T) != sizeof(uint64_t)) {
             #include "highway_qsort.dispatch.h"
             NPY_CPU_DISPATCH_CALL_XB(
                     dispfunc = np::highway::qsort_simd::template ArgQSelect, <TF>);
         }
+#endif  // NPY_HAVE_HIGHWAY_ARGSORT
 #else
+#if NPY_HAVE_HIGHWAY_ARGSORT
         #include "highway_qsort.dispatch.h"
         NPY_CPU_DISPATCH_CALL_XB(dispfunc = np::highway::qsort_simd::template ArgQSelect, <TF>);
+#endif  // NPY_HAVE_HIGHWAY_ARGSORT
 #endif
         if (dispfunc) {
             (*dispfunc)(reinterpret_cast<TF*>(v), arg, num, kth);

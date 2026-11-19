@@ -3,13 +3,13 @@
 #include "hwy/contrib/sort/vqsort-inl.h"
 
 #include "highway_qsort.hpp"
+#include "highway_qsort_determinism.hpp"
 #include "quicksort.hpp"
 
 #include <algorithm>
 #include <cstring>
 #include <cstdlib>
 #include <utility>
-#include <vector>
 
 #include "common.hpp"
 
@@ -206,29 +206,14 @@ void ArgInsertionSelect(T *arr, npy_intp *arg, npy_intp num, npy_intp kth)
 /*
  * ToSortableKey: Converts values to unsigned types for SIMD sorting.
  * Ensures proper ordering: negative < positive, NaNs go to end.
- * Returns uint64_t for consistency (16/32-bit types zero-extended).
+ * Returns uint64_t for consistency (32-bit types zero-extended).
+ * Only instantiated for 32/64-bit types; 16-bit types (incl. Half) use
+ * ToSortableKey16 in highway_qsort_16bit.dispatch.cpp.
  */
 template <typename T>
 inline uint64_t ToSortableKey(T val)
 {
-    if constexpr (std::is_same_v<T, uint16_t>) {
-        return static_cast<uint64_t>(val);
-    }
-    else if constexpr (std::is_same_v<T, int16_t>) {
-        return static_cast<uint64_t>(static_cast<uint16_t>(val) ^ 0x8000U);
-    }
-    else if constexpr (std::is_same_v<T, Half>) {
-        uint16_t u = val.Bits();
-        if (val.IsNaN()) {
-            return 0xFFFFFFFFFFFFFFFFULL;
-        }
-        if (u & 0x8000U) {
-            return ~static_cast<uint64_t>(u);
-        } else {
-            return static_cast<uint64_t>(u) | 0x8000000000000000ULL;
-        }
-    }
-    else if constexpr (std::is_same_v<T, uint32_t>) {
+    if constexpr (std::is_same_v<T, uint32_t>) {
         return static_cast<uint64_t>(val);
     }
     else if constexpr (std::is_same_v<T, uint64_t>) {
@@ -335,8 +320,15 @@ inline bool CheckSortedReversed(T *arr, npy_intp size, npy_intp *arg)
 } // anonymous namespace
 
 template <typename T>
-void ArgQSort_Impl(T *arr, npy_intp* arg, npy_intp size)
+void NPY_CPU_DISPATCH_CURFX(ArgQSort)(T *arr, npy_intp* arg, npy_intp size)
 {
+    // NOTE: the body must live directly inside the dispatched entry point.
+    // This TU is compiled once per CPU target (baseline/SVE/ASIMD) and a
+    // separate out-of-line helper (e.g. an unsuffixed ArgQSort_Impl<T>)
+    // would be a weak symbol whose per-target copies differ (each calls
+    // hwy::HWY_NAMESPACE::VQSortStatic of its own target); the linker
+    // keeps only one copy, so every entry point would silently run the
+    // same - usually baseline NEON - implementation.
     // Early exit for sorted/reversed arrays (optimization for sort)
     if (CheckSortedReversed<T>(arr, size, arg)) {
         return;
@@ -348,27 +340,38 @@ void ArgQSort_Impl(T *arr, npy_intp* arg, npy_intp size)
     }
 
 #if VQSORT_ENABLED
-    if constexpr (std::is_same_v<T, int16_t> || std::is_same_v<T, uint16_t> || std::is_same_v<T, Half> ||
-                  std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t> || std::is_same_v<T, float>) {
-        // Use std::vector for RAII memory management
-        std::vector<hwy::K32V32> pairs(size);
-        for (npy_intp i = 0; i < size; ++i) {
-            pairs[i].key = static_cast<uint32_t>(ToSortableKey(arr[i]));
-            pairs[i].value = static_cast<uint32_t>(i);
+    // Make the vqsort pivot stream and sampling grid deterministic; see
+    // highway_qsort_determinism.hpp. Must happen before VQSortStatic.
+    ResetVQSortRNG();
+    if constexpr (std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t> ||
+                  std::is_same_v<T, float>) {
+        if (static_cast<uint64_t>(size) > 0x100000000ULL) {
+            // K32V32's 32-bit value field cannot hold indices past 2^32-1.
+            ArgQSort_Fallback(arr, arg, size);
+            return;
         }
-        hwy::HWY_NAMESPACE::VQSortStatic(pairs.data(), static_cast<size_t>(size), hwy::SortAscending());
+        // 64-byte aligned buffer: DrawSamples() aligns its sampling grid to
+        // the runtime address of the keys, which must not depend on malloc.
+        AlignedPairs<hwy::K32V32> pairs(static_cast<size_t>(size));
+        hwy::K32V32 *kv = pairs.data();
         for (npy_intp i = 0; i < size; ++i) {
-            arg[i] = static_cast<npy_intp>(pairs[i].value);
+            kv[i].key = static_cast<uint32_t>(ToSortableKey(arr[i]));
+            kv[i].value = static_cast<uint32_t>(i);
+        }
+        hwy::HWY_NAMESPACE::VQSortStatic(kv, static_cast<size_t>(size), hwy::SortAscending());
+        for (npy_intp i = 0; i < size; ++i) {
+            arg[i] = static_cast<npy_intp>(kv[i].value);
         }
     } else {
-        std::vector<hwy::K64V64> pairs(size);
+        AlignedPairs<hwy::K64V64> pairs(static_cast<size_t>(size));
+        hwy::K64V64 *kv = pairs.data();
         for (npy_intp i = 0; i < size; ++i) {
-            pairs[i].key = ToSortableKey(arr[i]);
-            pairs[i].value = static_cast<uint64_t>(i);
+            kv[i].key = ToSortableKey(arr[i]);
+            kv[i].value = static_cast<uint64_t>(i);
         }
-        hwy::HWY_NAMESPACE::VQSortStatic(pairs.data(), static_cast<size_t>(size), hwy::SortAscending());
+        hwy::HWY_NAMESPACE::VQSortStatic(kv, static_cast<size_t>(size), hwy::SortAscending());
         for (npy_intp i = 0; i < size; ++i) {
-            arg[i] = static_cast<npy_intp>(pairs[i].value);
+            arg[i] = static_cast<npy_intp>(kv[i].value);
         }
     }
 #else
@@ -377,8 +380,10 @@ void ArgQSort_Impl(T *arr, npy_intp* arg, npy_intp size)
 }
 
 template <typename T>
-void ArgQSelect_Impl(T *arr, npy_intp* arg, npy_intp num, npy_intp kth)
+void NPY_CPU_DISPATCH_CURFX(ArgQSelect)(T *arr, npy_intp* arg, npy_intp num, npy_intp kth)
 {
+    // NOTE: body lives directly in the dispatched entry point for the same
+    // ODR/linker-dedup reason as ArgQSort above.
     // Note: For select operation, we cannot use sorted/reversed optimization
     // because we need to find the kth element position, not just initialize indices
 
@@ -393,28 +398,38 @@ void ArgQSelect_Impl(T *arr, npy_intp* arg, npy_intp num, npy_intp kth)
     }
 
 #if VQSORT_ENABLED
-    if constexpr (std::is_same_v<T, int16_t> || std::is_same_v<T, uint16_t> || std::is_same_v<T, Half> ||
-                  std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t> || std::is_same_v<T, float>) {
-        std::vector<hwy::K32V32> pairs(num);
-        for (npy_intp i = 0; i < num; ++i) {
-            pairs[i].key = static_cast<uint32_t>(ToSortableKey(arr[i]));
-            pairs[i].value = static_cast<uint32_t>(i);
+    // Deterministic pivot stream and sampling grid; see
+    // highway_qsort_determinism.hpp. Must happen before VQSelectStatic.
+    ResetVQSortRNG();
+    if constexpr (std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t> ||
+                  std::is_same_v<T, float>) {
+        if (static_cast<uint64_t>(num) > 0x100000000ULL) {
+            // K32V32's 32-bit value field cannot hold indices past 2^32-1.
+            ArgQSelect_Fallback(arr, arg, num, kth);
+            return;
         }
-        hwy::HWY_NAMESPACE::VQSelectStatic(pairs.data(), static_cast<size_t>(num),
+        AlignedPairs<hwy::K32V32> pairs(static_cast<size_t>(num));
+        hwy::K32V32 *kv = pairs.data();
+        for (npy_intp i = 0; i < num; ++i) {
+            kv[i].key = static_cast<uint32_t>(ToSortableKey(arr[i]));
+            kv[i].value = static_cast<uint32_t>(i);
+        }
+        hwy::HWY_NAMESPACE::VQSelectStatic(kv, static_cast<size_t>(num),
                                            static_cast<size_t>(kth), hwy::SortAscending());
         for (npy_intp i = 0; i < num; ++i) {
-            arg[i] = static_cast<npy_intp>(pairs[i].value);
+            arg[i] = static_cast<npy_intp>(kv[i].value);
         }
     } else {
-        std::vector<hwy::K64V64> pairs(num);
+        AlignedPairs<hwy::K64V64> pairs(static_cast<size_t>(num));
+        hwy::K64V64 *kv = pairs.data();
         for (npy_intp i = 0; i < num; ++i) {
-            pairs[i].key = ToSortableKey(arr[i]);
-            pairs[i].value = static_cast<uint64_t>(i);
+            kv[i].key = ToSortableKey(arr[i]);
+            kv[i].value = static_cast<uint64_t>(i);
         }
-        hwy::HWY_NAMESPACE::VQSelectStatic(pairs.data(), static_cast<size_t>(num),
+        hwy::HWY_NAMESPACE::VQSelectStatic(kv, static_cast<size_t>(num),
                                            static_cast<size_t>(kth), hwy::SortAscending());
         for (npy_intp i = 0; i < num; ++i) {
-            arg[i] = static_cast<npy_intp>(pairs[i].value);
+            arg[i] = static_cast<npy_intp>(kv[i].value);
         }
     }
 #else
@@ -422,24 +437,21 @@ void ArgQSelect_Impl(T *arr, npy_intp* arg, npy_intp num, npy_intp kth)
 #endif
 }
 
-template <typename T>
-void NPY_CPU_DISPATCH_CURFX(ArgQSelect)(T *arr, npy_intp* arg, npy_intp num, npy_intp kth)
-{
-    ArgQSelect_Impl(arr, arg, num, kth);
-}
-
-template <typename T>
-void NPY_CPU_DISPATCH_CURFX(ArgQSort)(T *arr, npy_intp* arg, npy_intp size)
-{
-    ArgQSort_Impl(arr, arg, size);
-}
-
 #define HWAY_DISPATCH_DECLARE(TYPE) \
     template void NPY_CPU_DISPATCH_CURFX(ArgQSort)<TYPE>(TYPE*, npy_intp*, npy_intp); \
     template void NPY_CPU_DISPATCH_CURFX(ArgQSelect)<TYPE>(TYPE*, npy_intp*, npy_intp, npy_intp)
 
-HWAY_DISPATCH_DECLARE(int16_t);
-HWAY_DISPATCH_DECLARE(uint16_t);
+/*
+ * 16-bit types (int16_t, uint16_t, Half) are instantiated ONLY in
+ * highway_qsort_16bit.dispatch.cpp, which has different bodies
+ * (ArgLess16/ToSortableKey16). Both files compile the same suffixed
+ * symbols for overlapping CPU targets (e.g. VSX2), and explicit
+ * instantiations are weak symbols the linker may deduplicate
+ * arbitrarily, so duplicating them here would make the executed body
+ * depend on link order. Nothing references the 16-bit entries from
+ * this file: quicksort.cpp routes sizeof(T)==2 to the 16-bit
+ * dispatcher and selection.cpp only dispatches 32/64-bit types.
+ */
 HWAY_DISPATCH_DECLARE(int32_t);
 HWAY_DISPATCH_DECLARE(uint32_t);
 HWAY_DISPATCH_DECLARE(int64_t);
@@ -447,10 +459,5 @@ HWAY_DISPATCH_DECLARE(uint64_t);
 HWAY_DISPATCH_DECLARE(float);
 HWAY_DISPATCH_DECLARE(double);
 #undef HWAY_DISPATCH_DECLARE
-
-#if HWY_HAVE_FLOAT16
-template void NPY_CPU_DISPATCH_CURFX(ArgQSort)<Half>(Half*, npy_intp*, npy_intp);
-template void NPY_CPU_DISPATCH_CURFX(ArgQSelect)<Half>(Half*, npy_intp*, npy_intp, npy_intp);
-#endif
 
 } // np::highway::qsort_simd
