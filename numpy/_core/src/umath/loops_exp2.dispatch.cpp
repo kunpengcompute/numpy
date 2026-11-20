@@ -84,6 +84,8 @@ simd_exp2_neon_FLOAT(const npy_float *src, npy_intp ssrc,
     }
 
     const float32x4_t safe_val = vdupq_n_f32(0.0f);
+    uint32x4_t any_libm = vdupq_n_u32(0);
+    uint32x4_t need_libm[UNROLL];
     for (int i = 0; i < UNROLL; i++) {
       uint32x4_t is_nan = vmvnq_u32(vceqq_f32(x[i], x[i]));
       /* inequality compares (FCMGE/FCMGT) raise IOC on QNaN lanes, unlike
@@ -92,29 +94,35 @@ simd_exp2_neon_FLOAT(const npy_float *src, npy_intp ssrc,
       float32x4_t x_nn = vbslq_f32(is_nan, vdupq_n_f32(0.0f), x[i]);
       uint32x4_t is_overflow = vcgeq_f32(x_nn, exp_max);
       uint32x4_t is_underflow = vcltq_f32(x_nn, exp_min);
-      uint32x4_t need_libm =
+      need_libm[i] =
           vorrq_u32(vorrq_u32(is_overflow, is_underflow),
                     vorrq_u32(is_nan,
                               vorrq_u32(vceqq_f32(x[i], pos_inf),
                                         vceqq_f32(x[i], neg_inf))));
+      any_libm = vorrq_u32(any_libm, need_libm[i]);
       /* Evaluate the polynomial on sanitized inputs unconditionally: with
        * the default -fno-trapping-math the compiler may speculate the
        * vector path, so it must never see the raw out-of-range/NaN bit
        * patterns, which would raise spurious FP flags. */
-      float32x4_t xs = vbslq_f32(need_libm, safe_val, x[i]);
+      float32x4_t xs = vbslq_f32(need_libm[i], safe_val, x[i]);
       result[i] = neon_exp2f_inline_core(xs, shift, exponent_bias, c0, c1, c2, c3, c4, d0, d1);
-      /* Lanes outside the polynomial's window (incl. NaN/inf) come from
-       * libm, which yields the exact scalar-path value and raises the
-       * overflow/underflow FP flags like the scalar path does. */
-      if (__builtin_expect(neon_has_any_lane_u32(need_libm), 0)) {
-        float vals[4], outs[4];
-        uint32_t m[4];
-        vst1q_f32(vals, x[i]);
-        vst1q_f32(outs, result[i]);
-        vst1q_u32(m, need_libm);
-        for (int j = 0; j < 4; j++)
-          if (m[j]) outs[j] = npy_exp2f(vals[j]);
-        result[i] = vld1q_f32(outs);
+    }
+    /* Lanes outside the polynomial's window (incl. NaN/inf) come from
+     * libm, which yields the exact scalar-path value and raises the
+     * overflow/underflow FP flags like the scalar path does. Deciding
+     * once per block keeps the common (all-in-window) case branch-free. */
+    if (__builtin_expect(neon_has_any_lane_u32(any_libm), 0)) {
+      for (int i = 0; i < UNROLL; i++) {
+        if (__builtin_expect(neon_has_any_lane_u32(need_libm[i]), 0)) {
+          float vals[4], outs[4];
+          uint32_t m[4];
+          vst1q_f32(vals, x[i]);
+          vst1q_f32(outs, result[i]);
+          vst1q_u32(m, need_libm[i]);
+          for (int j = 0; j < 4; j++)
+            if (m[j]) outs[j] = npy_exp2f(vals[j]);
+          result[i] = vld1q_f32(outs);
+        }
       }
     }
 
@@ -255,6 +263,8 @@ simd_exp2_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
     }
 
     const float64x2_t safe_val = vdupq_n_f64(0.0);
+    uint64x2_t any_libm = vdupq_n_u64(0);
+    uint64x2_t need_libm[UNROLL];
     for (int i = 0; i < UNROLL; i++) {
       /* |x| > 1022 (incl. +-inf) or NaN: the scale bit-trick behind the
        * polynomial breaks down across the overflow/subnormal boundaries;
@@ -264,21 +274,28 @@ simd_exp2_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
       /* mask NaN lanes out of the inequality compare (FCAGT raises IOC on
        * QNaN lanes, unlike vceqq) */
       float64x2_t x_nn = vbslq_f64(is_nan, vdupq_n_f64(0.0), x[i]);
-      uint64x2_t need_libm =
+      need_libm[i] =
           vorrq_u64(vcagtq_f64(x_nn, special_bound), is_nan);
+      any_libm = vorrq_u64(any_libm, need_libm[i]);
       /* sanitized polynomial evaluation (speculation-safe, see the
        * FLOAT kernel) */
-      float64x2_t xs = vbslq_f64(need_libm, safe_val, x[i]);
+      float64x2_t xs = vbslq_f64(need_libm[i], safe_val, x[i]);
       result[i] = neon_exp2_inline_core_f64(xs, shift, poly0, poly1, poly2, poly3);
-      if (__builtin_expect(neon_has_any_lane_u64(need_libm), 0)) {
-        double vals[2], outs[2];
-        uint64_t m[2];
-        vst1q_f64(vals, x[i]);
-        vst1q_f64(outs, result[i]);
-        vst1q_u64(m, need_libm);
-        for (int j = 0; j < 2; j++)
-          if (m[j]) outs[j] = npy_exp2(vals[j]);
-        result[i] = vld1q_f64(outs);
+    }
+    /* decide once per block: the common (all-in-window) case stays
+     * branch-free, see the FLOAT kernel */
+    if (__builtin_expect(neon_has_any_lane_u64(any_libm), 0)) {
+      for (int i = 0; i < UNROLL; i++) {
+        if (__builtin_expect(neon_has_any_lane_u64(need_libm[i]), 0)) {
+          double vals[2], outs[2];
+          uint64_t m[2];
+          vst1q_f64(vals, x[i]);
+          vst1q_f64(outs, result[i]);
+          vst1q_u64(m, need_libm[i]);
+          for (int j = 0; j < 2; j++)
+            if (m[j]) outs[j] = npy_exp2(vals[j]);
+          result[i] = vld1q_f64(outs);
+        }
       }
     }
 
@@ -386,6 +403,7 @@ simd_exp2_neon_HALF_stride2(const npy_half *src, npy_intp ssrc,
 
     const float32x4_t safe_val = vdupq_n_f32(0.0f);
     uint32_t libm_mask[16];
+    uint32x4_t any_libm = vdupq_n_u32(0);
     for (int k = 0; k < 4; k++) {
       uint32x4_t is_nan = vmvnq_u32(vceqq_f32(x[k], x[k]));
       /* mask NaN lanes out of the inequality compares (see the FLOAT
@@ -398,6 +416,7 @@ simd_exp2_neon_HALF_stride2(const npy_half *src, npy_intp ssrc,
                     vorrq_u32(is_nan,
                               vorrq_u32(vceqq_f32(x[k], pos_inf_v),
                                         vceqq_f32(x[k], neg_inf_v))));
+      any_libm = vorrq_u32(any_libm, need_libm);
       /* sanitized polynomial evaluation (speculation-safe, see the FLOAT
        * kernel); lanes routed to libm keep a placeholder (exp2(0) == 1.0)
        * that converts to half precision without raising FP flags */
@@ -423,11 +442,14 @@ simd_exp2_neon_HALF_stride2(const npy_half *src, npy_intp ssrc,
       }
     }
     /* libm-routed lanes: software evaluation + conversion, matching the
-     * scalar path for value and FP flags (the hardware f32->f16 conversion
-     * would raise IOC/UFC for these out-of-half-range results) */
-    for (int j = 0; j < 16; j++)
-      if (libm_mask[j])
-        outp[j * sdst] = npy_float_to_half(npy_exp2f(xin[j]));
+     * scalar path for value and FP flags (npy_float_to_half raises the
+     * same legitimate OFC/UFC conversion flags as the vector vcvt);
+     * the single any-lane check keeps clean blocks branch-free */
+    if (__builtin_expect(neon_has_any_lane_u32(any_libm), 0)) {
+      for (int j = 0; j < 16; j++)
+        if (libm_mask[j])
+          outp[j * sdst] = npy_float_to_half(npy_exp2f(xin[j]));
+    }
 
     infp += ssrc * 16;
     outp += sdst * 16;
@@ -467,12 +489,15 @@ simd_exp2_neon_HALF_stride2(const npy_half *src, npy_intp ssrc,
       u.f = vget_lane_f16(rh, j);
       outp[j * sdst] = u.h;
     }
-    /* libm-routed lanes: software evaluation + conversion (see above) */
-    uint32_t libm_mask[4];
-    vst1q_u32(libm_mask, need_libm);
-    for (int j = 0; j < 4; j++)
-      if (libm_mask[j])
-        outp[j * sdst] = npy_float_to_half(npy_exp2f(xin[j]));
+    /* libm-routed lanes: software evaluation + conversion (see above);
+     * the single any-lane check keeps clean blocks branch-free */
+    if (__builtin_expect(neon_has_any_lane_u32(need_libm), 0)) {
+      uint32_t libm_mask[4];
+      vst1q_u32(libm_mask, need_libm);
+      for (int j = 0; j < 4; j++)
+        if (libm_mask[j])
+          outp[j * sdst] = npy_float_to_half(npy_exp2f(xin[j]));
+    }
 
     infp += ssrc * 4;
     outp += sdst * 4;
@@ -523,6 +548,7 @@ simd_exp2_neon_HALF_stride1(const npy_half *src, npy_half *dst, npy_intp len)
 
     const float32x4_t safe_val = vdupq_n_f32(0.0f);
     uint32_t libm_mask[16];
+    uint32x4_t any_libm = vdupq_n_u32(0);
     for (int k = 0; k < 4; k++) {
       uint32x4_t is_nan = vmvnq_u32(vceqq_f32(x[k], x[k]));
       /* mask NaN lanes out of the inequality compares (see the FLOAT
@@ -535,6 +561,7 @@ simd_exp2_neon_HALF_stride1(const npy_half *src, npy_half *dst, npy_intp len)
                     vorrq_u32(is_nan,
                               vorrq_u32(vceqq_f32(x[k], pos_inf_v),
                                         vceqq_f32(x[k], neg_inf_v))));
+      any_libm = vorrq_u32(any_libm, need_libm);
       /* sanitized polynomial evaluation (speculation-safe, see the FLOAT
        * kernel); lanes routed to libm keep a placeholder (exp2(0) == 1.0)
        * that converts to half precision without raising FP flags */
@@ -555,11 +582,17 @@ simd_exp2_neon_HALF_stride1(const npy_half *src, npy_half *dst, npy_intp len)
       rh[k] = vcvt_f16_f32(res[k]);
     for (int k = 0; k < 2; k++)
       vst1q_f16((float16_t *)(outp + k * 8), vcombine_f16(rh[k*2], rh[k*2+1]));
-    /* libm-routed lanes: software evaluation + conversion (see the
-     * FLOAT kernel; the hardware conversion would raise IOC/UFC) */
-    for (int j = 0; j < 16; j++)
-      if (libm_mask[j])
-        outp[j] = npy_float_to_half(npy_exp2f(xin[j]));
+    /* libm-routed lanes: evaluate and convert per lane. npy_float_to_half
+     * raises the same legitimate OFC/UFC conversion flags as the vector
+     * vcvt above (aarch64 uses the same hardware fcvt), keeping the
+     * array path in flag parity with the scalar path for the
+     * out-of-half-range results; the single any-lane check keeps clean
+     * blocks branch-free */
+    if (__builtin_expect(neon_has_any_lane_u32(any_libm), 0)) {
+      for (int j = 0; j < 16; j++)
+        if (libm_mask[j])
+          outp[j] = npy_float_to_half(npy_exp2f(xin[j]));
+    }
 
     infp += 16;
     outp += 16;
@@ -575,6 +608,7 @@ simd_exp2_neon_HALF_stride1(const npy_half *src, npy_half *dst, npy_intp len)
 
     const float32x4_t safe_val = vdupq_n_f32(0.0f);
     uint32_t libm_mask[8];
+    uint32x4_t any_libm = vdupq_n_u32(0);
     for (int k = 0; k < 2; k++) {
       uint32x4_t is_nan = vmvnq_u32(vceqq_f32(x[k], x[k]));
       /* mask NaN lanes out of the inequality compares (see the FLOAT
@@ -587,6 +621,7 @@ simd_exp2_neon_HALF_stride1(const npy_half *src, npy_half *dst, npy_intp len)
                     vorrq_u32(is_nan,
                               vorrq_u32(vceqq_f32(x[k], pos_inf_v),
                                         vceqq_f32(x[k], neg_inf_v))));
+      any_libm = vorrq_u32(any_libm, need_libm);
       /* sanitized polynomial evaluation (see the 16-wide loop above) */
       float32x4_t xs = vbslq_f32(need_libm, safe_val, x[k]);
       res[k] = neon_exp2f_inline_core(xs, shift_v, bias_v, c0_v, c1_v, c2_v, c3_v, c4_v, d0_v, d1_v);
@@ -603,9 +638,11 @@ simd_exp2_neon_HALF_stride1(const npy_half *src, npy_half *dst, npy_intp len)
       rh[k] = vcvt_f16_f32(res[k]);
     vst1q_f16((float16_t *)outp, vcombine_f16(rh[0], rh[1]));
     /* libm-routed lanes: software evaluation + conversion (see above) */
-    for (int j = 0; j < 8; j++)
-      if (libm_mask[j])
-        outp[j] = npy_float_to_half(npy_exp2f(xin[j]));
+    if (__builtin_expect(neon_has_any_lane_u32(any_libm), 0)) {
+      for (int j = 0; j < 8; j++)
+        if (libm_mask[j])
+          outp[j] = npy_float_to_half(npy_exp2f(xin[j]));
+    }
 
     infp += 8;
     outp += 8;
@@ -693,14 +730,14 @@ simd_exp2_neon_HALF(const npy_half *src, npy_intp ssrc,
     simd_exp2_neon_FLOAT(src_buf, 1, dst_buf, 1, block_len);
     
     i = 0;
+    /* The vectorized f32->f16 narrowing conversion raises OFC/UFC for
+     * results that overflow or go subnormal in half precision, but these
+     * are legitimate: the scalar path converts through npy_float_to_half,
+     * which uses the same hardware fcvt on aarch64 (and a software
+     * conversion that explicitly generates the same flags elsewhere), so
+     * the flags must flow to the caller unmodified for parity. No
+     * save/clear/restore is wanted here. */
     if (sdst == 1) {
-      /* The vectorized f32->f16 conversion raises IOC/UFC FP flags for
-       * results that overflow or go subnormal in half precision; the
-       * scalar path (npy_float_to_half) never raises them. Keep only the
-       * flags raised by the computation itself around the conversions. */
-      int saved_fpstatus = fetestexcept(FE_DIVBYZERO | FE_OVERFLOW |
-                                        FE_UNDERFLOW | FE_INVALID);
-      feclearexcept(FE_ALL_EXCEPT);
       for (; i + UNROLL * VEC_SIZE <= block_len; i += UNROLL * VEC_SIZE) {
         for (int u = 0; u < 4; u++) {
           float16x8_t hv = vcombine_f16(vcvt_f16_f32(vld1q_f32(dst_buf + i + u * 8)),
@@ -711,9 +748,6 @@ simd_exp2_neon_HALF(const npy_half *src, npy_intp ssrc,
       for (; i + VEC_SIZE <= block_len; i += VEC_SIZE) {
         float16x8_t h_combined = vcombine_f16(vcvt_f16_f32(vld1q_f32(dst_buf + i)), vcvt_f16_f32(vld1q_f32(dst_buf + i + 4)));
         vst1q_f16((float16_t *)(block_dst + i), h_combined);
-      }
-      if (saved_fpstatus) {
-        feraiseexcept(saved_fpstatus);
       }
     } else {
       for (; i + 8 <= block_len; i += 8) {

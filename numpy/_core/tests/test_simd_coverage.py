@@ -7,6 +7,8 @@ Focuses on non-contiguous strides, float16, and edge cases for:
 - array mapping/indexing
 - compiled_base (searchsorted)
 """
+import warnings
+
 import pytest
 import numpy as np
 from numpy.testing import assert_allclose, assert_array_equal
@@ -2493,3 +2495,143 @@ class TestExpLogStridedExtended:
         np.log2(a, out=out[::2])
         expected = np.log2(a)
         assert_allclose(out[::2], expected, rtol=1e-2)
+
+
+class TestFPFlagParityExplog:
+    """FP-flag and special-value parity between array and scalar paths.
+
+    Regression guard for the aarch64 NEON explog kernels (defect report
+    BUG-2 and its follow-ups): the vectorized paths must raise exactly the
+    same RuntimeWarning set as the per-element scalar path, honor
+    ``np.errstate(..., 'raise')``, return bit-identical values for the
+    special inputs (negative, +-0, +-inf, NaN, subnormal), and never warn
+    on clean input. The scalar path (libm + software/hardware half
+    conversion) is the reference on every platform.
+    """
+
+    # probes: negative / zero (both signs) / normal / inf (both signs) /
+    # NaN / subnormal, tiled to the requested length
+    PROBES = {
+        np.float64: [-1.0, 0.0, -0.0, 2.0, np.inf, -np.inf, np.nan,
+                     1e-320, -1e-320, 1e300],
+        np.float32: [-1.0, 0.0, -0.0, 2.0, np.inf, -np.inf, np.nan,
+                     np.float32(1e-40), -np.float32(1e-40)],
+        np.float16: [-1.0, 0.0, -0.0, 2.0, np.inf, -np.inf, np.nan,
+                     np.float16(6e-8), -np.float16(6e-8), np.float16(15.5)],
+    }
+    LENGTHS = [2, 3, 4, 7, 8, 16, 17, 32, 33, 64]
+    # max deviation of the vector path from the scalar path for normal
+    # lanes (polynomial vs libm rounding); special lanes must match bitwise
+    ULP = 4
+
+    @staticmethod
+    def _warn_set(fn, arr):
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            r = fn(arr)
+        return set(str(x.message) for x in w), r
+
+    @classmethod
+    def _scalar_reference(cls, func, arr):
+        """per-element scalar evaluation with warnings captured"""
+        ws_sca = set()
+        vals = []
+        for v in arr:
+            w1, r1 = cls._warn_set(func, np.array([v], dtype=arr.dtype))
+            ws_sca |= w1
+            vals.append(r1.item())
+        return ws_sca, np.array(vals, dtype=arr.dtype)
+
+    @classmethod
+    def _assert_lane_parity(cls, res_arr, res_sca):
+        """special lanes bitwise-equal, normal lanes within ULP ulp"""
+        assert res_arr.shape == res_sca.shape
+        for a, b in zip(res_arr.tolist(), res_sca.tolist()):
+            if np.isnan(a) or np.isnan(b):
+                assert np.isnan(a) == np.isnan(b), (a, b)
+            elif a != b:
+                assert not (np.isinf(a) or np.isinf(b)), (a, b)
+                assert np.abs(a - b) <= cls.ULP * np.spacing(np.abs(b)), (a, b)
+
+    @pytest.mark.parametrize("func", [np.log, np.log2])
+    @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.float16])
+    def test_log_family_flag_parity(self, func, dtype):
+        probes = self.PROBES[dtype]
+        for n in self.LENGTHS:
+            arr = np.tile(np.array(probes, dtype=dtype), 8)[:n].copy()
+            ws_arr, res_arr = self._warn_set(func, arr)
+            ws_sca, res_sca = self._scalar_reference(func, arr)
+            self._assert_lane_parity(res_arr, res_sca)
+            assert ws_arr == ws_sca, (n, ws_arr, ws_sca)
+
+    @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.float16])
+    def test_exp2_flag_parity(self, dtype):
+        # window boundaries: f32 127.5, f64 1022, f16 16/-14/-24
+        extra = {
+            np.float64: [1022.0, 1023.5, 1030.0, -1022.0, -1030.0, -1075.0],
+            np.float32: [127.5, 127.6, 128.0, -126.0, -126.5, -130.0, -149.0],
+            np.float16: [16.0, 15.5, 15.9921875, -14.0, -14.5, -24.0, -30.0],
+        }[dtype]
+        probes = self.PROBES[dtype] + extra
+        for n in self.LENGTHS:
+            arr = np.tile(np.array(probes, dtype=dtype), 8)[:n].copy()
+            ws_arr, res_arr = self._warn_set(np.exp2, arr)
+            ws_sca, res_sca = self._scalar_reference(np.exp2, arr)
+            self._assert_lane_parity(res_arr, res_sca)
+            assert ws_arr == ws_sca, (n, ws_arr, ws_sca)
+
+    @pytest.mark.parametrize("func,flag", [(np.log, "invalid"), (np.log, "divide"),
+                                           (np.log2, "invalid"), (np.log2, "divide"),
+                                           (np.exp2, "over"), (np.exp2, "under")])
+    @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.float16])
+    def test_errstate_raise_on_array_path(self, func, flag, dtype):
+        bad = {
+            "invalid": -1.0, "divide": 0.0, "over": 1030.0, "under": -1030.0,
+        }[flag]
+        with np.errstate(**{flag: "raise"}):
+            with pytest.raises(FloatingPointError):
+                func(np.array([bad, 1.0], dtype=dtype))
+
+    @pytest.mark.parametrize("func", [np.log, np.log2, np.exp2])
+    @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.float16])
+    def test_no_spurious_warnings(self, func, dtype):
+        for arr in [np.linspace(0.1, 10, 64).astype(dtype),
+                    np.full(64, np.nan, dtype=dtype),
+                    np.full(64, np.inf, dtype=dtype)]:
+            ws, _ = self._warn_set(func, arr)
+            assert ws == set(), (arr[:4], ws)
+        sub = {np.float64: 1e-320, np.float32: np.float32(1e-40),
+               np.float16: np.float16(6e-8)}[dtype]
+        ws, _ = self._warn_set(func, np.array([sub, 1.0], dtype=dtype))
+        assert ws == set(), (sub, ws)
+
+    @pytest.mark.parametrize("func", [np.log, np.log2, np.exp2])
+    @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.float16])
+    def test_out_overlap_and_strided(self, func, dtype):
+        probes = self.PROBES[dtype]
+        base = np.tile(np.array(probes, dtype=dtype), 8)[:40].copy()
+        # strided views incl. [::3] (exercises the f16 general path)
+        for view in [base[::2], base[::3]]:
+            _, res_arr = self._warn_set(func, view)
+            _, res_sca = self._scalar_reference(func, view)
+            self._assert_lane_parity(res_arr, res_sca)
+        # in-place: the overlap path runs the scalar libm loop, so normal
+        # lanes may differ from the fresh-output vector path by ULP ulp
+        a = base.copy()
+        with np.errstate(all="ignore"):
+            func(a, out=a)
+            _, res_ref = self._warn_set(func, base)
+        self._assert_lane_parity(a, res_ref)
+
+    @pytest.mark.parametrize("func", [np.log, np.log2, np.exp2])
+    @pytest.mark.parametrize("poison", [np.nan, 1030.0, 1e300])
+    def test_poisoned_tail_memory(self, func, poison):
+        # odd-length arrays: the NEON tail loops must not leak FP flags
+        # from out-of-bounds lanes
+        for dtype in [np.float64, np.float32]:
+            buf = np.empty(8, dtype=dtype)
+            buf[:3] = [1.0, 2.0, 3.0]
+            with np.errstate(all="ignore"):
+                buf[3:] = poison
+            ws, _ = self._warn_set(func, buf[:3])
+            assert ws == set(), (dtype, poison, ws)
