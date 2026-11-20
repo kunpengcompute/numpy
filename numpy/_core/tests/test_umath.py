@@ -5918,5 +5918,8 @@ class TestSinCosPathPurity:
             expected = np.array([ref(v) for v in finite])
             assert_array_max_ulp(res, expected, maxulp=3)
         for ufunc in (np.sin, np.cos):
-            res = ufunc(np.array([np.nan, np.inf, -np.inf]))
+            # the inf lanes intentionally raise the FP invalid flag;
+            # keep the warning out of the way of filterwarnings=error
+            with np.errstate(invalid="ignore"):
+                res = ufunc(np.array([np.nan, np.inf, -np.inf]))
             assert np.isnan(res).all()
