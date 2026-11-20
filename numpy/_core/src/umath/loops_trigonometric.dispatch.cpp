@@ -355,24 +355,35 @@ inline V operator()(const V &x) const
     needs_libm = hn::AndNot(is_tiny, needs_libm);
     
     /*
-     * Fast path: no lane needs libm, run the shared polynomial on the
-     * cleaned input.  needs_libm only feeds this branch, so its mask
-     * chain stays off the polynomial's critical path.
+     * Fast path: no lane needs libm.  Tiny lanes are rare and handled
+     * on a separate (predicted-cold) branch: their r*r / r^4 terms
+     * would underflow and raise spurious FP flags, so they are zeroed
+     * before the polynomial there and restored by the blend afterwards;
+     * the common branch keeps the polynomial fed directly by x_clean,
+     * with no extra select on its critical path.
      */
     if (__builtin_expect(hn::AllFalse(d, needs_libm), 1)) {
+        if (__builtin_expect(!hn::AllFalse(d, is_tiny), 0)) {
+            auto simd_result = eval_poly(
+                    hn::IfThenElse(is_tiny, zeros, x_clean));
+            simd_result = hn::IfThenElse(is_tiny, x, simd_result);
+            return hn::IfThenElse(is_nan, nan_val, simd_result);
+        }
         auto simd_result = eval_poly(x_clean);
         simd_result = hn::IfThenElse(is_tiny, x, simd_result);
         return hn::IfThenElse(is_nan, nan_val, simd_result);
     }
 
     /*
-     * Slow path: zero the lanes destined for libm before the polynomial.
-     * Huge arguments would otherwise overflow the r*r term or saturate
-     * ConvertTo, raising spurious overflow/invalid FP flags that numpy
-     * would report even though libm computes those lanes cleanly.  Same
-     * safe-input pattern as the tan/exp loops in this file.
+     * Slow path: zero the libm-destined and the tiny lanes before the
+     * polynomial.  Huge arguments would otherwise overflow the r*r term
+     * or saturate ConvertTo (spurious overflow/invalid flags), and tiny
+     * arguments would underflow in r*r / r^4 (spurious underflow flag);
+     * the blends and the per-lane libm fixup restore the real results.
+     * Same safe-input pattern as the tan/exp loops in this file.
      */
-    auto simd_result = eval_poly(hn::IfThenElse(needs_libm, zeros, x_clean));
+    auto simd_result = eval_poly(
+            hn::IfThenElse(hn::Or(needs_libm, is_tiny), zeros, x_clean));
     simd_result = hn::IfThenElse(is_tiny, x, simd_result);
     simd_result = hn::IfThenElse(is_nan, nan_val, simd_result);
 
@@ -516,8 +527,11 @@ auto is_nan = hn::IsNaN(x);
     
     /*
      * Fast path: no lane needs libm, run the shared polynomial on the
-     * cleaned input.  needs_libm only feeds this branch, so its mask
-     * chain stays off the polynomial's critical path.
+     * cleaned input.  Unlike OpSin, tiny lanes need no zeroing here:
+     * the +half shift of the reduction maps them to the pi/2 domain,
+     * so the polynomial never sees tiny arguments and cannot underflow.
+     * needs_libm only feeds this branch, so its mask chain stays off
+     * the polynomial's critical path.
      */
     if (__builtin_expect(hn::AllFalse(d, needs_libm), 1)) {
         auto simd_result = eval_poly(x_clean);

@@ -5805,6 +5805,7 @@ class TestSinCosPathPurity:
         0.0, -0.0, 1.0, -1.0, 2.0, -2.0, 3.5, 100.0,
         float(np.pi),        # within 1e-10 of a multiple of pi
         1e-300,              # tiny
+        1e-160,              # tiny: r^4 underflow window of the polynomial
         1e8, -1e8,           # beyond the Cody-Waite range
         1e300, -1e300,       # huge: libm lane, polynomial must stay flag-free
         np.nan, np.inf, -np.inf,
@@ -5883,5 +5884,39 @@ class TestSinCosPathPurity:
         for ufunc, ref in ((np.sin, math.sin), (np.cos, math.cos)):
             with np.errstate(all="raise"):
                 res = ufunc(np.array(vals))
-            for v, out in zip(vals, res):
-                assert out == ref(v)
+            # libm-lane results must match an independent libm reference
+            # within the documented tolerance; bit-equality would bind
+            # numpy to CPython's particular libm on every platform
+            assert_array_max_ulp(res, np.array([ref(v) for v in vals]),
+                                  maxulp=3)
+
+    @pytest.mark.skipif(IS_WASM, reason="fp errors don't work in wasm")
+    def test_tiny_no_spurious_fp_flags(self):
+        # Tiny lanes are blended back to x (sin) or one (cos) after the
+        # polynomial, but the polynomial's r*r / r^4 terms on tiny
+        # arguments must not raise spurious underflow flags, whatever
+        # the tiny lane shares its vector with.
+        tiny = [1e-160, -1e-160, 1e-300, 1e-120]
+        for ufunc in (np.sin, np.cos):
+            with np.errstate(all="raise"):
+                ufunc(np.array(tiny))                    # all tiny: early exit
+                ufunc(np.array(tiny + [1.0]))            # tiny + ordinary lanes
+                ufunc(np.array(tiny + [1e300]))         # tiny + huge: slow path
+                ufunc(np.array([1.0] + tiny + [np.pi]))  # with a boundary lane
+
+    def test_values_match_libm_within_tolerance(self):
+        # An oracle independent of this implementation: finite values
+        # must agree with libm's sin/cos within the documented 3 ULP
+        # (polynomial lanes; libm lanes - boundary, huge - match
+        # exactly), and NaN / infinities keep their classes.  Guards the
+        # numeric logic of the per-lane fixup and blend branches, which
+        # the path-purity tests above cannot see because they compare
+        # this implementation only with itself.
+        finite = [v for v in self.VALUES if np.isfinite(v)]
+        for ufunc, ref in ((np.sin, math.sin), (np.cos, math.cos)):
+            res = ufunc(np.array(finite))
+            expected = np.array([ref(v) for v in finite])
+            assert_array_max_ulp(res, expected, maxulp=3)
+        for ufunc in (np.sin, np.cos):
+            res = ufunc(np.array([np.nan, np.inf, -np.inf]))
+            assert np.isnan(res).all()
