@@ -1,6 +1,7 @@
 import fnmatch
 import inspect
 import itertools
+import math
 import operator
 import platform
 import sys
@@ -5805,6 +5806,7 @@ class TestSinCosPathPurity:
         float(np.pi),        # within 1e-10 of a multiple of pi
         1e-300,              # tiny
         1e8, -1e8,           # beyond the Cody-Waite range
+        1e300, -1e300,       # huge: libm lane, polynomial must stay flag-free
         np.nan, np.inf, -np.inf,
     ]
 
@@ -5860,6 +5862,7 @@ class TestSinCosPathPurity:
                 assert bits(ufunc(v)) == ref
 
     @pytest.mark.parametrize("ufunc", [np.sin, np.cos])
+    @pytest.mark.skipif(IS_WASM, reason="fp errors don't work in wasm")
     def test_inf_still_raises_invalid(self, ufunc):
         # infinities must keep going through libm so the floating point
         # invalid flag - and with it the RuntimeWarning - is preserved
@@ -5869,3 +5872,16 @@ class TestSinCosPathPurity:
         with np.errstate(invalid="raise"):
             with pytest.raises(FloatingPointError):
                 ufunc(np.full(9, np.inf))
+
+    @pytest.mark.skipif(IS_WASM, reason="fp errors don't work in wasm")
+    def test_huge_finite_no_spurious_fp_flags(self):
+        # Huge but finite inputs take the per-lane libm path, which is
+        # mathematically fine and raises no flags; the polynomial that
+        # also runs on those lanes (r*r overflow, ConvertTo saturation)
+        # must not leak spurious overflow/invalid flags into the report.
+        vals = [1e30, -1e30, 1e200, -1e200, 1e300, -1e300]
+        for ufunc, ref in ((np.sin, math.sin), (np.cos, math.cos)):
+            with np.errstate(all="raise"):
+                res = ufunc(np.array(vals))
+            for v, out in zip(vals, res):
+                assert out == ref(v)
