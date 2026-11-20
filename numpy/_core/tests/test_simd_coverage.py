@@ -2582,17 +2582,39 @@ class TestFPFlagParityExplog:
 
     @pytest.mark.parametrize("func,flag", [(np.log, "invalid"), (np.log, "divide"),
                                            (np.log2, "invalid"), (np.log2, "divide"),
-                                           (np.exp2, "over"), (np.exp2, "under")])
+                                           (np.exp2, "over"), (np.exp2, "under"),
+                                           (np.exp, "over"), (np.exp, "under")])
     @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.float16])
     def test_errstate_raise_on_array_path(self, func, flag, dtype):
         bad = {
             "invalid": -1.0, "divide": 0.0, "over": 1030.0, "under": -1030.0,
         }[flag]
+        if func is np.exp and flag == "over":
+            bad = 1000.0
+        if func is np.exp and flag == "under":
+            bad = -1000.0
         with np.errstate(**{flag: "raise"}):
             with pytest.raises(FloatingPointError):
                 func(np.array([bad, 1.0], dtype=dtype))
 
-    @pytest.mark.parametrize("func", [np.log, np.log2, np.exp2])
+    @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.float16])
+    def test_exp_flag_parity(self, dtype):
+        # window boundaries: f64 -708.4/709.78 (scale sign-wrap/NaN
+        # zones), f32 -87.3/88.4 (inf-scale NaN zone), f16 11/-24
+        extra = {
+            np.float64: [709.0, 709.78, 709.782, 1000.0, -708.5, -710.0, -800.0],
+            np.float32: [88.0, 88.5, 88.72, 89.0, -87.5, -90.0, -110.0],
+            np.float16: [10.0, 11.0, 11.1, -20.0, -30.0],
+        }[dtype]
+        probes = self.PROBES[dtype] + extra
+        for n in self.LENGTHS:
+            arr = np.tile(np.array(probes, dtype=dtype), 8)[:n].copy()
+            ws_arr, res_arr = self._warn_set(np.exp, arr)
+            ws_sca, res_sca = self._scalar_reference(np.exp, arr)
+            self._assert_lane_parity(res_arr, res_sca)
+            assert ws_arr == ws_sca, (n, ws_arr, ws_sca)
+
+    @pytest.mark.parametrize("func", [np.log, np.log2, np.exp2, np.exp])
     @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.float16])
     def test_no_spurious_warnings(self, func, dtype):
         for arr in [np.linspace(0.1, 10, 64).astype(dtype),
@@ -2605,7 +2627,7 @@ class TestFPFlagParityExplog:
         ws, _ = self._warn_set(func, np.array([sub, 1.0], dtype=dtype))
         assert ws == set(), (sub, ws)
 
-    @pytest.mark.parametrize("func", [np.log, np.log2, np.exp2])
+    @pytest.mark.parametrize("func", [np.log, np.log2, np.exp2, np.exp])
     @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.float16])
     def test_out_overlap_and_strided(self, func, dtype):
         probes = self.PROBES[dtype]
@@ -2623,7 +2645,7 @@ class TestFPFlagParityExplog:
             _, res_ref = self._warn_set(func, base)
         self._assert_lane_parity(a, res_ref)
 
-    @pytest.mark.parametrize("func", [np.log, np.log2, np.exp2])
+    @pytest.mark.parametrize("func", [np.log, np.log2, np.exp2, np.exp])
     @pytest.mark.parametrize("poison", [np.nan, 1030.0, 1e300])
     def test_poisoned_tail_memory(self, func, poison):
         # odd-length arrays: the NEON tail loops must not leak FP flags
