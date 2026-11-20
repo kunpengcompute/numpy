@@ -484,6 +484,14 @@ simd_exp_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
   /* 709.7 keeps the n >= 131072 (scale = 2^1024 sign-wrap, NaN) zone
    * routed to libm; glibc returns finite DBL_MAX-adjacent values there */
   const float64x2_t poly_max = vdupq_n_f64(709.7);
+  /* Nonzero |x| < 2^-30: r == x there and r*r (and the r + poly*r*r
+   * sum) would go subnormal, raising a spurious underflow flag although
+   * exp(x) = fl(1+x) ~ 1.0.  libm returns fl(1+x) with the scalar
+   * path's (no) flags; +-0 stays in-band (exp(+-0) is exact).  Lanes
+   * with n != 0 cannot reach the subnormal zone: doubles near
+   * k*ln2/128 keep |r| >~ 2^-61, far above the 2^-511 r*r boundary. */
+  const float64x2_t tiny_bound = vdupq_n_f64(0x1p-30);
+  const float64x2_t zero_val = vdupq_n_f64(0.0);
 
   const npy_double *infp = src;
   npy_double *outp = dst;
@@ -518,6 +526,10 @@ simd_exp_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
           vorrq_u64(vorrq_u64(vcgtq_f64(x_nn, poly_max),
                               vcltq_f64(x_nn, poly_min)),
                     is_nan);
+      need_libm[i] = vorrq_u64(
+          need_libm[i],
+          vbicq_u64(vcltq_f64(vabsq_f64(x_nn), tiny_bound),
+                    vceqq_f64(x_nn, zero_val)));
       any_libm = vorrq_u64(any_libm, need_libm[i]);
     }
 
@@ -593,6 +605,10 @@ simd_exp_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
         vorrq_u64(vorrq_u64(vcgtq_f64(x_nn, poly_max),
                            vcltq_f64(x_nn, poly_min)),
                   is_nan);
+    need_libm = vorrq_u64(
+        need_libm,
+        vbicq_u64(vcltq_f64(vabsq_f64(x_nn), tiny_bound),
+                  vceqq_f64(x_nn, zero_val)));
 
     const float64x2_t safe_val = vdupq_n_f64(0.0);
     float64x2_t xs = vbslq_f64(need_libm, safe_val, x);
@@ -615,7 +631,7 @@ simd_exp_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
       vst1q_f64(vals, x);
       vst1q_f64(outs, result);
       vst1q_u64(m, need_libm);
-      for (int j = 0; j < 2; j++)
+      for (int j = 0; j < current_len; j++)
         if (m[j]) outs[j] = npy_exp(vals[j]);
       result = vld1q_f64(outs);
     }
@@ -663,6 +679,15 @@ simd_exp_neon_FLOAT(const npy_float *src, npy_intp ssrc,
   /* 88.0 keeps the n >= 128 (scale = 2^128 = inf, NaN via inf-inf) zone
    * routed to libm; glibc returns finite FLT_MAX-adjacent values there */
   const float32x4_t poly_max = vdupq_n_f32(88.0f);
+  /* The even-power products r2/r4/r6 are floored at |r| >= 2^-21 (see
+   * the polynomial evaluation below): a tiny in-band r -- a tiny x, or
+   * an x near a multiple of ln2 after range reduction -- would
+   * otherwise square into the subnormal range and raise a spurious
+   * underflow flag, while the floored terms stay < 2^-42 and cannot
+   * change the rounded result.  The linear term is c4 * r with
+   * c4 == 1.0, exact even for subnormal r, so no libm routing is
+   * needed for the tiny zone. */
+  const float32x4_t r_floor = vdupq_n_f32(0x1p-21f);
 
   const npy_float *infp = src;
   npy_float *outp = dst;
@@ -710,7 +735,8 @@ simd_exp_neon_FLOAT(const npy_float *src, npy_intp ssrc,
       int32x4_t ni = vcvtq_s32_f32(n);
       uint32x4_t e = vshlq_n_u32(vreinterpretq_u32_s32(ni), 23);
       float32x4_t scale = vreinterpretq_f32_u32(vaddq_u32(e, exponent_bias));
-      float32x4_t r2 = vmulq_f32(r, r);
+      float32x4_t r_even = vmaxq_f32(vabsq_f32(r), r_floor);
+      float32x4_t r2 = vmulq_f32(r_even, r_even);
       float32x4_t r4 = vmulq_f32(r2, r2);
       float32x4_t p = vfmaq_f32(c1, r, c0);
       float32x4_t q = vfmaq_f32(c3, r, c2);
@@ -782,7 +808,8 @@ simd_exp_neon_FLOAT(const npy_float *src, npy_intp ssrc,
     uint32x4_t e = vshlq_n_u32(vreinterpretq_u32_s32(ni), 23);
     float32x4_t scale = vreinterpretq_f32_u32(vaddq_u32(e, exponent_bias));
 
-    float32x4_t r2 = vmulq_f32(r, r);
+    float32x4_t r_even = vmaxq_f32(vabsq_f32(r), r_floor);
+    float32x4_t r2 = vmulq_f32(r_even, r_even);
     float32x4_t r4 = vmulq_f32(r2, r2);
     float32x4_t p = vfmaq_f32(c1, r, c0);
     float32x4_t q = vfmaq_f32(c3, r, c2);

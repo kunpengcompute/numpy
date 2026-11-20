@@ -7,11 +7,14 @@ Focuses on non-contiguous strides, float16, and edge cases for:
 - array mapping/indexing
 - compiled_base (searchsorted)
 """
+import platform
 import warnings
 
 import pytest
 import numpy as np
 from numpy.testing import assert_allclose, assert_array_equal
+
+_IS_AARCH64 = platform.machine() == "aarch64"
 
 
 class TestExp2Strided:
@@ -2546,10 +2549,25 @@ class TestFPFlagParityExplog:
     def _assert_lane_parity(cls, res_arr, res_sca):
         """special lanes bitwise-equal, normal lanes within ULP ulp"""
         assert res_arr.shape == res_sca.shape
-        for a, b in zip(res_arr.tolist(), res_sca.tolist()):
+        # bit-exactness for special lanes is a contract of the aarch64
+        # NEON kernels (which route specials through the same libm call
+        # as the scalar path); on other platforms vector NaN payloads
+        # legitimately differ from libm's, so only compare values there
+        bit_compare = _IS_AARCH64
+        uint = {np.float64: np.uint64, np.float32: np.uint32,
+                np.float16: np.uint16}[res_arr.dtype.type]
+        for a, b in zip(res_arr.ravel(), res_sca.ravel()):
             if np.isnan(a) or np.isnan(b):
                 assert np.isnan(a) == np.isnan(b), (a, b)
-            elif a != b:
+                if bit_compare:
+                    # NaN sign + payload must match too: e.g. the
+                    # -NaN -> +NaN change for negative log inputs
+                    assert a.view(uint) == b.view(uint), (a, b)
+            elif a == b:
+                if bit_compare:
+                    # catches +0.0 vs -0.0, which compare equal
+                    assert a.view(uint) == b.view(uint), (a, b)
+            else:
                 assert not (np.isinf(a) or np.isinf(b)), (a, b)
                 assert np.abs(a - b) <= cls.ULP * np.spacing(np.abs(b)), (a, b)
 
@@ -2596,6 +2614,36 @@ class TestFPFlagParityExplog:
         with np.errstate(**{flag: "raise"}):
             with pytest.raises(FloatingPointError):
                 func(np.array([bad, 1.0], dtype=dtype))
+
+    @pytest.mark.skipif(not _IS_AARCH64,
+                        reason="guards the aarch64 NEON explog kernels")
+    @pytest.mark.parametrize("func", [np.exp, np.exp2, np.log, np.log2])
+    @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.float16])
+    def test_tiny_inputs_no_spurious_raise(self, func, dtype):
+        """Tiny in-window inputs -- subnormals, and values that reduce
+        to a near-zero remainder near a multiple of the reduction step
+        (e.g. float32(ln2)) -- must not leak an underflow flag from the
+        polynomial's product chain on the array path: the results are
+        ~1.0 / plain finite logs and the scalar path raises nothing.
+        """
+        fi = np.finfo(dtype)
+        vals = [fi.smallest_subnormal, fi.smallest_subnormal * 7]
+        if dtype is np.float64:
+            vals += [2.0**-600, -2.0**-600, 1e-200,
+                     1.0 + 2.0**-600, 1.0 - 2.0**-600, 1e-12]
+        elif dtype is np.float32:
+            ln2 = np.float32(0.6931471805599453)
+            vals += [np.float32(2.0**-70), -np.float32(2.0**-70),
+                     ln2, -ln2, np.float32(2.0) * ln2,
+                     ln2 / np.float32(32.0),
+                     np.float32(1.0 + 2.0**-70), np.float32(1.0 - 2.0**-70)]
+        else:
+            vals += [np.float16(2.0**-14)]
+        if func in (np.log, np.log2):
+            vals = [v for v in vals if v > 0]
+        for v in vals:
+            with np.errstate(all="raise"):
+                func(np.array([v, dtype(1.5)], dtype=dtype))
 
     @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.float16])
     def test_exp_flag_parity(self, dtype):

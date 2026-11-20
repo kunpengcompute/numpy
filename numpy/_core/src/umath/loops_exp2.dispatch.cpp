@@ -20,7 +20,18 @@ neon_exp2f_inline_core(float32x4_t x,
   int32x4_t ni = vcvtq_s32_f32(n);
   uint32x4_t e = vshlq_n_u32(vreinterpretq_u32_s32(ni), 23);
   float32x4_t scale = vreinterpretq_f32_u32(vaddq_u32(e, exponent_bias));
-  float32x4_t r2 = vmulq_f32(r, r);
+  /* Floor the products at |r| >= 2^-21 (even powers) / 2^-124 (the
+   * inner*r term): a tiny in-band r -- a tiny x, or an x near a
+   * multiple of ln2/32 after range reduction -- would otherwise
+   * multiply into the subnormal range and raise a spurious underflow
+   * flag, while exp2(x) = fl(1 + x*ln2) still rounds to the same value
+   * there (1.0 for the floored zone).  The inner*r term keeps r's sign
+   * through the floored magnitude; +-0 stays exact (exp2(+-0) = 1). */
+  float32x4_t r_abs = vabsq_f32(r);
+  float32x4_t r_even = vmaxq_f32(r_abs, vdupq_n_f32(0x1p-21f));
+  float32x4_t r_lin = vbslq_f32(vdupq_n_u32(0x80000000u), r,
+                                vmaxq_f32(r_abs, vdupq_n_f32(0x1p-124f)));
+  float32x4_t r2 = vmulq_f32(r_even, r_even);
   float32x4_t r4 = vmulq_f32(r2, r2);
   /*
    * Degree-7 minimax approximation of 2^r - 1 for r in [-0.5, 0.5]:
@@ -35,7 +46,7 @@ neon_exp2f_inline_core(float32x4_t x,
   float32x4_t inner = vfmaq_f32(A, B, r2);
   inner = vfmaq_f32(inner, C, r4);
   inner = vfmaq_f32(inner, d0, vmulq_f32(r4, r2));
-  float32x4_t poly = vmulq_f32(inner, r);
+  float32x4_t poly = vmulq_f32(inner, r_lin);
   return vfmaq_f32(scale, poly, scale);
 }
 
@@ -174,7 +185,7 @@ simd_exp2_neon_FLOAT(const npy_float *src, npy_intp ssrc,
       vst1q_f32(vals, x);
       vst1q_f32(outs, result);
       vst1q_u32(m, need_libm);
-      for (int j = 0; j < 4; j++)
+      for (int j = 0; j < current_len; j++)
         if (m[j]) outs[j] = npy_exp2f(vals[j]);
       result = vld1q_f32(outs);
     }
@@ -233,6 +244,14 @@ simd_exp2_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
                       npy_double *dst, npy_intp sdst, npy_intp len)
 {
   const float64x2_t special_bound = vdupq_n_f64(1022.0);
+  /* Nonzero |x| < 2^-30: r == x there and the polynomial's r*r, r*p
+   * and r^3 products (and the pv sum) would go subnormal, raising a
+   * spurious underflow flag although exp2(x) = fl(1 + x*ln2) ~ 1.0.
+   * libm returns that value with the scalar path's (no) flags; +-0
+   * stays in-band (exp2(+-0) is exact).  Lanes with n != 0 keep
+   * |r| >~ 2^-57, far above every product's subnormal boundary. */
+  const float64x2_t tiny_bound = vdupq_n_f64(0x1p-30);
+  const float64x2_t zero_val = vdupq_n_f64(0.0);
   const float64x2_t shift = vdupq_n_f64(0x1.8p+52 / V_EXP_N);
   const float64x2_t poly0 = vdupq_n_f64(0x1.62e42fefa3686p-1);
   const float64x2_t poly1 = vdupq_n_f64(0x1.ebfbdff82c241p-3);
@@ -276,6 +295,10 @@ simd_exp2_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
       float64x2_t x_nn = vbslq_f64(is_nan, vdupq_n_f64(0.0), x[i]);
       need_libm[i] =
           vorrq_u64(vcagtq_f64(x_nn, special_bound), is_nan);
+      need_libm[i] = vorrq_u64(
+          need_libm[i],
+          vbicq_u64(vcltq_f64(vabsq_f64(x_nn), tiny_bound),
+                    vceqq_f64(x_nn, zero_val)));
       any_libm = vorrq_u64(any_libm, need_libm[i]);
       /* sanitized polynomial evaluation (speculation-safe, see the
        * FLOAT kernel) */
@@ -335,6 +358,10 @@ simd_exp2_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
     float64x2_t x_nn = vbslq_f64(is_nan, vdupq_n_f64(0.0), x);
     uint64x2_t need_libm =
         vorrq_u64(vcagtq_f64(x_nn, special_bound), is_nan);
+    need_libm = vorrq_u64(
+        need_libm,
+        vbicq_u64(vcltq_f64(vabsq_f64(x_nn), tiny_bound),
+                  vceqq_f64(x_nn, zero_val)));
 
     /* sanitized polynomial evaluation (see the main loop) */
     const float64x2_t safe_val = vdupq_n_f64(0.0);
