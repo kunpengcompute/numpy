@@ -647,7 +647,6 @@ simd_exp_neon_FLOAT(const npy_float *src, npy_intp ssrc,
   const float32x4_t c4 = vdupq_n_f32(0x1.0p+0f);
   const float32x4_t c5 = vdupq_n_f32(0x1.6c16c16cp-10f);
   const uint32x4_t exponent_bias = vdupq_n_u32(0x3f800000);
-  const uint32x4_t all_bits = vdupq_n_u32(0xFFFFFFFFu);
   /*
    * exp(x) = 2^n * e^r with x = n*ln2 + r and r in +-ln2/2; the scale is
    * assembled from the exponent bit-trick, which only produces a

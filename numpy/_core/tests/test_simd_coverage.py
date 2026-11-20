@@ -2631,8 +2631,10 @@ class TestFPFlagParityExplog:
     @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.float16])
     def test_out_overlap_and_strided(self, func, dtype):
         probes = self.PROBES[dtype]
-        base = np.tile(np.array(probes, dtype=dtype), 8)[:40].copy()
-        # strided views incl. [::3] (exercises the f16 general path)
+        # long enough that the strided views engage the NEON main loop
+        # (>= 32 lanes) with a strided tail left over; [::3] also
+        # exercises the f16 general path
+        base = np.tile(np.array(probes, dtype=dtype), 12)[:100].copy()
         for view in [base[::2], base[::3]]:
             _, res_arr = self._warn_set(func, view)
             _, res_sca = self._scalar_reference(func, view)
