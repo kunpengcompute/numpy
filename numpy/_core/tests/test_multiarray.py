@@ -10841,6 +10841,69 @@ def test_argsort_largearrays(dtype):
     arr = -0.5 + rnd.random(N).astype(dtype)
     assert_arg_sorted(arr, np.argsort(arr, kind='quick'))
 
+
+# The following regression tests exercise the Highway vqsort arg-sort path
+# (non-x86, n >= 1024, -Ddisable-highway-argsort=false). On x86 they still
+# pass, but vacuously: sizeof 2 types go to the built-in introsort and
+# 32/64-bit types to x86-simd-sort, so a regression in ResetVQSortRNG(),
+# AlignedPairs or ToSortableKey16 is only observable on aarch64/POWER CI.
+@pytest.mark.parametrize("dtype", [np.int64, np.int32, np.int16,
+                                   np.float64, np.float32, np.float16])
+@pytest.mark.parametrize("n", [1023, 1024, 5000])
+def test_argsort_quicksort_reproducible(n, dtype):
+    # Regression test for the Highway vqsort arg-sort path on non-x86:
+    # pivot candidates were drawn from an entropy-seeded generator whose
+    # state advances across calls, so repeated argsort of the same input
+    # could return different permutations of equal keys. 1024 is the
+    # dispatch threshold of the Highway path.
+    rng = np.random.default_rng(116112)
+    arr = rng.integers(0, 100, size=n).astype(dtype)
+    expected = np.argsort(arr)
+    for _ in range(5):
+        # keep scratch arrays alive across the calls so the internal
+        # key/value buffer is allocated at varying heap addresses
+        scratch = [np.empty(65536) for _ in range(2)]
+        assert_array_equal(np.argsort(arr), expected)
+        del scratch
+    assert_arg_sorted(arr, expected)
+
+
+@pytest.mark.parametrize("dtype", [np.int32, np.float32, np.int64, np.float64])
+def test_argpartition_reproducible(dtype):
+    # Same contract as test_argsort_quicksort_reproducible for the
+    # Highway arg-select path (32-bit types on aarch64).
+    rng = np.random.default_rng(116112)
+    arr = rng.integers(0, 100, size=5000).astype(dtype)
+    kth = 1234
+    expected = np.argpartition(arr, kth)
+    assert_arr_partitioned(np.sort(arr)[kth], kth, arr[expected])
+    for _ in range(5):
+        assert_array_equal(np.argpartition(arr, kth), expected)
+
+
+@pytest.mark.parametrize("dtype", [np.float64, np.float32, np.float16])
+def test_argsort_quicksort_largearrays_with_nan(dtype):
+    # NaN handling of the Highway arg-sort path for sizes beyond its
+    # dispatch threshold: NaNs last, and the permutation reproducible.
+    rng = np.random.default_rng(116112)
+    arr = rng.integers(0, 100, size=2000).astype(dtype)
+    arr[::37] = np.nan
+    expected = np.argsort(arr)
+    assert_arg_sorted(arr, expected)
+    assert_array_equal(np.argsort(arr), expected)
+
+
+def test_argsort_quicksort_float16_negative():
+    # Regression test: the order-preserving key for float16 in the
+    # Highway arg-sort path was computed at the wrong scale, sorting
+    # negative values after positive ones.
+    rng = np.random.default_rng(116112)
+    arr = rng.integers(-50, 50, size=2000).astype(np.float16)
+    assert_arg_sorted(arr, np.argsort(arr))
+    # and reproducible, like every other quicksort permutation
+    expected = np.argsort(arr)
+    assert_array_equal(np.argsort(arr), expected)
+
 @pytest.mark.skipif(not HAS_REFCOUNT, reason="Python lacks refcounts")
 @pytest.mark.thread_unsafe(reason="test result depends on the reference count of a global object")
 def test_gh_22683():

@@ -18,6 +18,8 @@ option('disable-svml', type: 'boolean', value: false,
         description: 'Disable building against SVML')
 option('disable-highway', type: 'boolean', value: false,
         description: 'Disables SIMD-optimized operations related to Google Highway')
+option('disable-highway-argsort', type: 'boolean', value: false,
+        description: 'Disables Highway SIMD acceleration for argsort/argpartition only (falls back to introsort/introselect)')
 option('disable-intel-sort', type: 'boolean', value: false,
         description: 'Disables SIMD-optimized operations related to Intel x86-simd-sort')
 option('disable-threading', type: 'boolean', value: false,
