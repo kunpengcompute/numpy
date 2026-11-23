@@ -1,6 +1,7 @@
 import fnmatch
 import inspect
 import itertools
+import math
 import operator
 import platform
 import sys
@@ -5783,3 +5784,142 @@ class TestMultiKthHighwaySelect:
         for k in kths:
             assert np.all(a[result[:k]] <= a[result[k]])
             assert np.all(a[result[k+1:]] >= a[result[k]])
+
+
+class TestSinCosPathPurity:
+    """Float64 sin/cos must be a pure function of each input value.
+
+    The aarch64 SIMD implementation mixes a polynomial path with a libm
+    fallback for lanes it cannot handle.  The fallback used to be
+    selected for a whole vector - or, stickily, for the rest of the
+    array - as soon as one lane held NaN, infinity, a huge, or a
+    near-boundary value, so the same input value produced different bits
+    depending on its neighbors, the array length, the strides, or
+    operand overlap.  These tests pin the per-lane behavior.
+    """
+
+    # polynomial-path values, per-lane libm fixup values (near a
+    # multiple of pi, beyond the Cody-Waite range), zero/tiny, and the
+    # special values NaN / +-inf
+    VALUES = [
+        0.0, -0.0, 1.0, -1.0, 2.0, -2.0, 3.5, 100.0,
+        float(np.pi),        # within 1e-10 of a multiple of pi
+        1e-300,              # tiny
+        1e-160,              # tiny: r^4 underflow window of the polynomial
+        1e8, -1e8,           # beyond the Cody-Waite range
+        1e300, -1e300,       # huge: libm lane, polynomial must stay flag-free
+        np.nan, np.inf, -np.inf,
+    ]
+
+    @pytest.mark.parametrize("ufunc", [np.sin, np.cos])
+    def test_value_purity_across_paths(self, ufunc):
+        def bits(x):
+            return np.float64(x).tobytes()
+
+        with np.errstate(all="ignore"):
+            for v in self.VALUES:
+                ref = bits(ufunc(np.array([v]))[0])
+
+                # same value in arrays of every length around the vector
+                # width and the unrolled block size
+                for n in list(range(1, 19)) + [32, 64]:
+                    a = np.full(n, 1.0)
+                    a[0] = v
+                    assert bits(ufunc(a)[0]) == ref
+                    a = np.full(n, 1.0)
+                    a[-1] = v
+                    assert bits(ufunc(a)[-1]) == ref
+
+                # surrounded by NaNs / infinities, before and after them
+                for filler in (np.nan, np.inf, -np.inf):
+                    a = np.full(8, filler)
+                    a[0] = v
+                    assert bits(ufunc(a)[0]) == ref
+                    a = np.full(8, v)
+                    a[4] = filler
+                    assert bits(ufunc(a)[0]) == ref
+                    ref_filler = bits(ufunc(np.full(8, filler))[4])
+                    assert bits(ufunc(a)[4]) == ref_filler
+
+                # large array with a poisoning value in the middle
+                a = np.full(1000, v)
+                a[500] = np.nan
+                r = ufunc(a)
+                assert bits(r[0]) == ref
+                assert bits(r[999]) == ref
+
+                # strided input
+                buf = np.full(64, 2.0)
+                buf[::2] = v
+                assert bits(ufunc(buf[::2])[0]) == ref
+
+                # overlapping in-place operation
+                a = np.full(16, v)
+                ufunc(a, out=a)
+                assert bits(a[0]) == ref
+
+                # scalar entry points take the same code path
+                assert bits(ufunc(np.float64(v))) == ref
+                assert bits(ufunc(v)) == ref
+
+    @pytest.mark.parametrize("ufunc", [np.sin, np.cos])
+    @pytest.mark.skipif(IS_WASM, reason="fp errors don't work in wasm")
+    def test_inf_still_raises_invalid(self, ufunc):
+        # infinities must keep going through libm so the floating point
+        # invalid flag - and with it the RuntimeWarning - is preserved
+        with np.errstate(invalid="raise"):
+            with pytest.raises(FloatingPointError):
+                ufunc(np.array([np.inf, 1.0]))
+        with np.errstate(invalid="raise"):
+            with pytest.raises(FloatingPointError):
+                ufunc(np.full(9, np.inf))
+
+    @pytest.mark.skipif(IS_WASM, reason="fp errors don't work in wasm")
+    def test_huge_finite_no_spurious_fp_flags(self):
+        # Huge but finite inputs take the per-lane libm path, which is
+        # mathematically fine and raises no flags; the polynomial that
+        # also runs on those lanes (r*r overflow, ConvertTo saturation)
+        # must not leak spurious overflow/invalid flags into the report.
+        vals = [1e30, -1e30, 1e200, -1e200, 1e300, -1e300]
+        for ufunc, ref in ((np.sin, math.sin), (np.cos, math.cos)):
+            with np.errstate(all="raise"):
+                res = ufunc(np.array(vals))
+            # libm-lane results must match an independent libm reference
+            # within the documented tolerance; bit-equality would bind
+            # numpy to CPython's particular libm on every platform
+            assert_array_max_ulp(res, np.array([ref(v) for v in vals]),
+                                  maxulp=3)
+
+    @pytest.mark.skipif(IS_WASM, reason="fp errors don't work in wasm")
+    def test_tiny_no_spurious_fp_flags(self):
+        # Tiny lanes are blended back to x (sin) or one (cos) after the
+        # polynomial, but the polynomial's r*r / r^4 terms on tiny
+        # arguments must not raise spurious underflow flags, whatever
+        # the tiny lane shares its vector with.
+        tiny = [1e-160, -1e-160, 1e-300, 1e-120]
+        for ufunc in (np.sin, np.cos):
+            with np.errstate(all="raise"):
+                ufunc(np.array(tiny))                    # all tiny: early exit
+                ufunc(np.array(tiny + [1.0]))            # tiny + ordinary lanes
+                ufunc(np.array(tiny + [1e300]))         # tiny + huge: slow path
+                ufunc(np.array([1.0] + tiny + [np.pi]))  # with a boundary lane
+
+    def test_values_match_libm_within_tolerance(self):
+        # An oracle independent of this implementation: finite values
+        # must agree with libm's sin/cos within the documented 3 ULP
+        # (polynomial lanes; libm lanes - boundary, huge - match
+        # exactly), and NaN / infinities keep their classes.  Guards the
+        # numeric logic of the per-lane fixup and blend branches, which
+        # the path-purity tests above cannot see because they compare
+        # this implementation only with itself.
+        finite = [v for v in self.VALUES if np.isfinite(v)]
+        for ufunc, ref in ((np.sin, math.sin), (np.cos, math.cos)):
+            res = ufunc(np.array(finite))
+            expected = np.array([ref(v) for v in finite])
+            assert_array_max_ulp(res, expected, maxulp=3)
+        for ufunc in (np.sin, np.cos):
+            # the inf lanes intentionally raise the FP invalid flag;
+            # keep the warning out of the way of filterwarnings=error
+            with np.errstate(invalid="ignore"):
+                res = ufunc(np.array([np.nan, np.inf, -np.inf]))
+            assert np.isnan(res).all()

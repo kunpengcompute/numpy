@@ -261,42 +261,63 @@ static constexpr T c_poly4 = -0x1.ae633919987c6p-26;
 static constexpr T c_poly5 = 0x1.60e277ae07cecp-33;
 static constexpr T c_poly6 = -0x1.9e9540300a1p-41;
 
-static inline bool has_special_value(T val) {
-    uint64_t bits;
-    memcpy(&bits, &val, sizeof(T));
-    uint64_t exp = (bits >> 52) & 0x7FF;
-    return exp == 0x7FF;
-}
+/*
+ * Polynomial evaluation for x in [-pi/4, pi/4] after Cody-Waite
+ * reduction.  Shared by the fast path (no libm lanes: fed x_clean)
+ * and the slow path (libm lanes zeroed first, so their huge r*r or
+ * ConvertTo steps cannot raise spurious FP flags).
+ */
+template <typename V, typename = std::enable_if_t<np::simd::kSupportLane<T>>>
+inline V eval_poly(const V &x_in) const
+{
+    const hn::ScalableTag<T> d;
+    const hn::Rebind<uint64_t, decltype(d)> du64;
+    const hn::Rebind<int64_t, decltype(d)> di64;
 
-static inline bool needs_scalar_path(T val) {
-    uint64_t bits;
-    memcpy(&bits, &val, sizeof(T));
-    uint64_t exp = (bits >> 52) & 0x7FF;
-    if (exp == 0x7FF) return true;
-    if (exp > 23 + 1023) return true;
-    T abs_val = std::fabs(val);
-    if (abs_val < c_tiny_threshold) return false;
-    T k = std::round(abs_val * c_inv_pi);
-    T k_pi = k * c_pi_1;
-    T delta = std::fabs(abs_val - k_pi);
-    return delta < c_pi_threshold;
-}
+    const auto inv_pi = hn::Set(d, c_inv_pi);
+    const auto pi_1 = hn::Set(d, c_pi_1);
+    const auto pi_2 = hn::Set(d, c_pi_2);
+    const auto pi_3 = hn::Set(d, c_pi_3);
 
-static inline T scalar_call(T val) {
-    return std::isnan(val) ? NPY_NAN : npy_sin(val);
+    auto n = hn::Round(hn::Mul(x_in, inv_pi));
+    auto n_int = hn::ConvertTo(di64, n);
+    auto odd = hn::ShiftLeft<63>(hn::BitCast(du64, n_int));
+
+    auto r = hn::NegMulAdd(n, pi_1, x_in);
+    r = hn::NegMulAdd(n, pi_2, r);
+    r = hn::NegMulAdd(n, pi_3, r);
+
+    auto r2 = hn::Mul(r, r);
+    auto r3 = hn::Mul(r2, r);
+    auto r4 = hn::Mul(r2, r2);
+
+    const auto c0 = hn::Set(d, c_poly0);
+    const auto c1 = hn::Set(d, c_poly1);
+    const auto c2 = hn::Set(d, c_poly2);
+    const auto c3 = hn::Set(d, c_poly3);
+    const auto c4 = hn::Set(d, c_poly4);
+    const auto c5 = hn::Set(d, c_poly5);
+    const auto c6 = hn::Set(d, c_poly6);
+
+    auto p01 = hn::MulAdd(r2, c1, c0);
+    auto p23 = hn::MulAdd(r2, c3, c2);
+    auto p45 = hn::MulAdd(r2, c5, c4);
+    auto p46 = hn::MulAdd(r4, c6, p45);
+
+    auto p26 = hn::MulAdd(r4, p46, p23);
+    auto p06 = hn::MulAdd(r4, p26, p01);
+    auto y = hn::MulAdd(r3, p06, r);
+
+    return hn::BitCast(d, hn::Xor(hn::BitCast(du64, y), odd));
 }
 
 template <typename V, typename = std::enable_if_t<np::simd::kSupportLane<T>>>
 inline V operator()(const V &x) const
 {
     const hn::ScalableTag<T> d;
-    const hn::Rebind<uint64_t, decltype(d)> du64;
-    const hn::Rebind<int64_t, decltype(d)> di64;
-    
+
     const auto inv_pi = hn::Set(d, c_inv_pi);
     const auto pi_1 = hn::Set(d, c_pi_1);
-    const auto pi_2 = hn::Set(d, c_pi_2);
-    const auto pi_3 = hn::Set(d, c_pi_3);
     const auto range_val = hn::Set(d, c_range_val);
     const auto tiny_threshold = hn::Set(d, c_tiny_threshold);
     const auto pi_threshold = hn::Set(d, c_pi_threshold);
@@ -320,56 +341,75 @@ inline V operator()(const V &x) const
     auto delta = hn::Abs(hn::Sub(abs_x, k_pi));
     auto is_boundary = hn::Lt(delta, pi_threshold);
     
-    auto needs_scalar = hn::Or(is_large, is_boundary);
-    needs_scalar = hn::Or(needs_scalar, is_inf);
+    /*
+     * Lanes the polynomial cannot handle accurately (huge arguments where
+     * Cody-Waite reduction cancels, arguments very close to a multiple of
+     * pi, and infinities) are fixed up by libm lane by lane below.  NaN
+     * and tiny lanes stay on the polynomial path: their reduced argument
+     * is zero and their result is replaced by the blends afterwards, so no
+     * lane's bits ever depend on the values held by its neighbors.
+     */
+    auto needs_libm = hn::Or(is_large, is_boundary);
+    needs_libm = hn::Or(needs_libm, is_inf);
+    needs_libm = hn::AndNot(is_nan, needs_libm);
+    needs_libm = hn::AndNot(is_tiny, needs_libm);
     
-    if (__builtin_expect(!hn::AllFalse(d, needs_scalar), 0)) {
+    /*
+     * Fast path: no lane needs libm.  Tiny lanes are rare and handled
+     * on a separate (predicted-cold) branch: their r*r / r^4 terms
+     * would underflow and raise spurious FP flags, so they are zeroed
+     * before the polynomial there and restored by the blend afterwards;
+     * the common branch keeps the polynomial fed directly by x_clean,
+     * with no extra select on its critical path.
+     */
+    if (__builtin_expect(hn::AllFalse(d, needs_libm), 1)) {
+        if (__builtin_expect(!hn::AllFalse(d, is_tiny), 0)) {
+            auto simd_result = eval_poly(
+                    hn::IfThenElse(is_tiny, zeros, x_clean));
+            simd_result = hn::IfThenElse(is_tiny, x, simd_result);
+            return hn::IfThenElse(is_nan, nan_val, simd_result);
+        }
+        auto simd_result = eval_poly(x_clean);
+        simd_result = hn::IfThenElse(is_tiny, x, simd_result);
+        return hn::IfThenElse(is_nan, nan_val, simd_result);
+    }
+
+    /*
+     * Slow path: zero the libm-destined and the tiny lanes before the
+     * polynomial.  Huge arguments would otherwise overflow the r*r term
+     * or saturate ConvertTo (spurious overflow/invalid flags), and tiny
+     * arguments would underflow in r*r / r^4 (spurious underflow flag);
+     * the blends and the per-lane libm fixup restore the real results.
+     * Same safe-input pattern as the tan/exp loops in this file.
+     */
+    auto simd_result = eval_poly(
+            hn::IfThenElse(hn::Or(needs_libm, is_tiny), zeros, x_clean));
+    simd_result = hn::IfThenElse(is_tiny, x, simd_result);
+    simd_result = hn::IfThenElse(is_nan, nan_val, simd_result);
+
+    /* per-lane libm fixup (we are in the slow path, the mask is not empty) */
+    {
         T NPY_DECL_ALIGNED(NPY_SIMD_WIDTH) input_arr[hn::MaxLanes(d)];
         T NPY_DECL_ALIGNED(NPY_SIMD_WIDTH) result_arr[hn::MaxLanes(d)];
         hn::Store(x, d, input_arr);
-        
+        hn::Store(simd_result, d, result_arr);
+        npy_uint64 libm_mask = 0;
+        hn::StoreMaskBits(d, needs_libm, (uint8_t *)&libm_mask);
+#if HWY_IS_BIG_ENDIAN
+        static_assert(hn::MaxLanes(d) <= 8,
+                      "This conversion is not supported for SIMD widths "
+                      "larger than 256 bits.");
+        libm_mask = ((uint8_t *)&libm_mask)[0];
+#endif
         size_t lanes_count = hn::Lanes(d);
         for (size_t i = 0; i < lanes_count; i++) {
-            T val = input_arr[i];
-            result_arr[i] = std::isnan(val) ? NPY_NAN : npy_sin(val);
+            if ((libm_mask >> i) & 1) {
+                result_arr[i] = npy_sin(input_arr[i]);
+            }
         }
-        
-        return hn::Load(d, result_arr);
+        simd_result = hn::Load(d, result_arr);
     }
-    
-    auto n = hn::Round(hn::Mul(x_clean, inv_pi));
-    auto n_int = hn::ConvertTo(di64, n);
-    auto odd = hn::ShiftLeft<63>(hn::BitCast(du64, n_int));
-    
-    auto r = hn::NegMulAdd(n, pi_1, x_clean);
-    r = hn::NegMulAdd(n, pi_2, r);
-    r = hn::NegMulAdd(n, pi_3, r);
-    
-    auto r2 = hn::Mul(r, r);
-    auto r3 = hn::Mul(r2, r);
-    auto r4 = hn::Mul(r2, r2);
-    
-    const auto c0 = hn::Set(d, c_poly0);
-    const auto c1 = hn::Set(d, c_poly1);
-    const auto c2 = hn::Set(d, c_poly2);
-    const auto c3 = hn::Set(d, c_poly3);
-    const auto c4 = hn::Set(d, c_poly4);
-    const auto c5 = hn::Set(d, c_poly5);
-    const auto c6 = hn::Set(d, c_poly6);
-    
-    auto p01 = hn::MulAdd(r2, c1, c0);
-    auto p23 = hn::MulAdd(r2, c3, c2);
-    auto p45 = hn::MulAdd(r2, c5, c4);
-    auto p46 = hn::MulAdd(r4, c6, p45);
-    
-    auto p26 = hn::MulAdd(r4, p46, p23);
-    auto p06 = hn::MulAdd(r4, p26, p01);
-    auto y = hn::MulAdd(r3, p06, r);
-    
-    auto simd_result = hn::BitCast(d, hn::Xor(hn::BitCast(du64, y), odd));
-    simd_result = hn::IfThenElse(is_tiny, x, simd_result);
-    simd_result = hn::IfThenElse(is_nan, nan_val, simd_result);
-    
+
     return simd_result;
 }
 };
@@ -393,46 +433,67 @@ static constexpr T c_poly4 = -0x1.ae633919987c6p-26;
 static constexpr T c_poly5 = 0x1.60e277ae07cecp-33;
 static constexpr T c_poly6 = -0x1.9e9540300a1p-41;
 
-static inline bool has_special_value(T val) {
-    uint64_t bits;
-    memcpy(&bits, &val, sizeof(T));
-    uint64_t exp = (bits >> 52) & 0x7FF;
-    return exp == 0x7FF;
-}
+/*
+ * Polynomial evaluation after Cody-Waite reduction around the nearest
+ * odd multiple of pi/2.  Shared by the fast and slow paths exactly
+ * like OpSin::eval_poly.
+ */
+template <typename V, typename = std::enable_if_t<np::simd::kSupportLane<T>>>
+inline V eval_poly(const V &x_in) const
+{
+    const hn::ScalableTag<T> d;
+    const hn::Rebind<uint64_t, decltype(d)> du64;
+    const hn::Rebind<int64_t, decltype(d)> di64;
 
-static inline bool needs_scalar_path(T val) {
-    uint64_t bits;
-    memcpy(&bits, &val, sizeof(T));
-    uint64_t exp = (bits >> 52) & 0x7FF;
-    if (exp == 0x7FF) return true;
-    if (exp > 23 + 1023) return true;
-    T abs_val = std::fabs(val);
-    if (abs_val < c_tiny_threshold) return false;
-    T k = std::round(abs_val * c_inv_pi);
-    T k_pi = k * c_pi_1;
-    T delta = std::fabs(abs_val - k_pi);
-    return delta < c_pi_threshold;
-}
+    const auto inv_pi = hn::Set(d, c_inv_pi);
+    const auto pi_1 = hn::Set(d, c_pi_1);
+    const auto pi_2 = hn::Set(d, c_pi_2);
+    const auto pi_3 = hn::Set(d, c_pi_3);
+    const auto half = hn::Set(d, c_half);
 
-static inline T scalar_call(T val) {
-    return std::isnan(val) ? NPY_NAN : npy_cos(val);
+    auto n = hn::Round(hn::MulAdd(x_in, inv_pi, half));
+    auto n_int = hn::ConvertTo(di64, n);
+    auto odd = hn::ShiftLeft<63>(hn::BitCast(du64, n_int));
+    auto n_shifted = hn::Sub(n, half);
+
+    auto r = hn::NegMulAdd(n_shifted, pi_1, x_in);
+    r = hn::NegMulAdd(n_shifted, pi_2, r);
+    r = hn::NegMulAdd(n_shifted, pi_3, r);
+
+    auto r2 = hn::Mul(r, r);
+    auto r3 = hn::Mul(r2, r);
+    auto r4 = hn::Mul(r2, r2);
+
+    const auto c0 = hn::Set(d, c_poly0);
+    const auto c1 = hn::Set(d, c_poly1);
+    const auto c2 = hn::Set(d, c_poly2);
+    const auto c3 = hn::Set(d, c_poly3);
+    const auto c4 = hn::Set(d, c_poly4);
+    const auto c5 = hn::Set(d, c_poly5);
+    const auto c6 = hn::Set(d, c_poly6);
+
+    auto p01 = hn::MulAdd(r2, c1, c0);
+    auto p23 = hn::MulAdd(r2, c3, c2);
+    auto p45 = hn::MulAdd(r2, c5, c4);
+    auto p46 = hn::MulAdd(r4, c6, p45);
+
+    auto p26 = hn::MulAdd(r4, p46, p23);
+    auto p06 = hn::MulAdd(r4, p26, p01);
+    auto y = hn::MulAdd(r3, p06, r);
+
+    return hn::BitCast(d, hn::Xor(hn::BitCast(du64, y), odd));
 }
 
 template <typename V, typename = std::enable_if_t<np::simd::kSupportLane<T>>>
 inline V operator()(const V &x) const
 {
     const hn::ScalableTag<T> d;
-    const hn::Rebind<uint64_t, decltype(d)> du64;
-    const hn::Rebind<int64_t, decltype(d)> di64;
-    
+
     const auto inv_pi = hn::Set(d, c_inv_pi);
     const auto pi_1 = hn::Set(d, c_pi_1);
-    const auto pi_2 = hn::Set(d, c_pi_2);
-    const auto pi_3 = hn::Set(d, c_pi_3);
     const auto range_val = hn::Set(d, c_range_val);
     const auto tiny_threshold = hn::Set(d, c_tiny_threshold);
     const auto pi_threshold = hn::Set(d, c_pi_threshold);
-    const auto half = hn::Set(d, c_half);
     const auto one = hn::Set(d, c_one);
     const auto zeros = hn::Zero(d);
     const auto nan_val = hn::Set(d, NPY_NAN);
@@ -454,61 +515,73 @@ auto is_nan = hn::IsNaN(x);
     auto delta = hn::Abs(hn::Sub(abs_x, k_pi));
     auto is_boundary = hn::Lt(delta, pi_threshold);
     
-    auto needs_scalar = hn::Or(is_large, is_boundary);
-    needs_scalar = hn::Or(needs_scalar, is_inf);
+    /*
+     * Same per-lane strategy as OpSin: only lanes the polynomial cannot
+     * handle (huge, near a multiple of pi, or infinite) go to libm, so no
+     * lane's bits depend on its neighbors, the array length, or layout.
+     */
+    auto needs_libm = hn::Or(is_large, is_boundary);
+    needs_libm = hn::Or(needs_libm, is_inf);
+    needs_libm = hn::AndNot(is_nan, needs_libm);
+    needs_libm = hn::AndNot(is_tiny, needs_libm);
     
-    if (__builtin_expect(!hn::AllFalse(d, needs_scalar), 0)) {
+    /*
+     * Fast path: no lane needs libm, run the shared polynomial on the
+     * cleaned input.  Unlike OpSin, tiny lanes need no zeroing here:
+     * the +half shift of the reduction maps them to the pi/2 domain,
+     * so the polynomial never sees tiny arguments and cannot underflow.
+     * needs_libm only feeds this branch, so its mask chain stays off
+     * the polynomial's critical path.
+     */
+    if (__builtin_expect(hn::AllFalse(d, needs_libm), 1)) {
+        auto simd_result = eval_poly(x_clean);
+        simd_result = hn::IfThenElse(is_tiny, one, simd_result);
+        return hn::IfThenElse(is_nan, nan_val, simd_result);
+    }
+
+    /*
+     * Slow path: zero the lanes destined for libm before the polynomial,
+     * as in OpSin: huge arguments must not raise spurious FP flags from
+     * the polynomial's r*r or ConvertTo steps.
+     */
+    auto simd_result = eval_poly(hn::IfThenElse(needs_libm, zeros, x_clean));
+    simd_result = hn::IfThenElse(is_tiny, one, simd_result);
+    simd_result = hn::IfThenElse(is_nan, nan_val, simd_result);
+
+    /* per-lane libm fixup (we are in the slow path, the mask is not empty) */
+    {
         T NPY_DECL_ALIGNED(NPY_SIMD_WIDTH) input_arr[hn::MaxLanes(d)];
         T NPY_DECL_ALIGNED(NPY_SIMD_WIDTH) result_arr[hn::MaxLanes(d)];
         hn::Store(x, d, input_arr);
-        
+        hn::Store(simd_result, d, result_arr);
+        npy_uint64 libm_mask = 0;
+        hn::StoreMaskBits(d, needs_libm, (uint8_t *)&libm_mask);
+#if HWY_IS_BIG_ENDIAN
+        static_assert(hn::MaxLanes(d) <= 8,
+                      "This conversion is not supported for SIMD widths "
+                      "larger than 256 bits.");
+        libm_mask = ((uint8_t *)&libm_mask)[0];
+#endif
         size_t lanes_count = hn::Lanes(d);
         for (size_t i = 0; i < lanes_count; i++) {
-            T val = input_arr[i];
-            result_arr[i] = std::isnan(val) ? NPY_NAN : npy_cos(val);
+            if ((libm_mask >> i) & 1) {
+                result_arr[i] = npy_cos(input_arr[i]);
+            }
         }
-        
-        return hn::Load(d, result_arr);
+        simd_result = hn::Load(d, result_arr);
     }
-    
-    auto n = hn::Round(hn::MulAdd(x_clean, inv_pi, half));
-    auto n_int = hn::ConvertTo(di64, n);
-    auto odd = hn::ShiftLeft<63>(hn::BitCast(du64, n_int));
-    auto n_shifted = hn::Sub(n, half);
-    
-    auto r = hn::NegMulAdd(n_shifted, pi_1, x_clean);
-    r = hn::NegMulAdd(n_shifted, pi_2, r);
-    r = hn::NegMulAdd(n_shifted, pi_3, r);
-    
-    auto r2 = hn::Mul(r, r);
-    auto r3 = hn::Mul(r2, r);
-    auto r4 = hn::Mul(r2, r2);
-    
-    const auto c0 = hn::Set(d, c_poly0);
-    const auto c1 = hn::Set(d, c_poly1);
-    const auto c2 = hn::Set(d, c_poly2);
-    const auto c3 = hn::Set(d, c_poly3);
-    const auto c4 = hn::Set(d, c_poly4);
-    const auto c5 = hn::Set(d, c_poly5);
-    const auto c6 = hn::Set(d, c_poly6);
-    
-    auto p01 = hn::MulAdd(r2, c1, c0);
-    auto p23 = hn::MulAdd(r2, c3, c2);
-    auto p45 = hn::MulAdd(r2, c5, c4);
-    auto p46 = hn::MulAdd(r4, c6, p45);
-    
-    auto p26 = hn::MulAdd(r4, p46, p23);
-    auto p06 = hn::MulAdd(r4, p26, p01);
-    auto y = hn::MulAdd(r3, p06, r);
-    
-    auto simd_result = hn::BitCast(d, hn::Xor(hn::BitCast(du64, y), odd));
-    simd_result = hn::IfThenElse(is_tiny, one, simd_result);
-    simd_result = hn::IfThenElse(is_nan, nan_val, simd_result);
-    
+
     return simd_result;
 }
 };
 
+/*
+ * Value-pure unary loop: every element passes through the same vectorized
+ * Op regardless of NaNs or infinities sharing the vector, the array
+ * length, strides, or operand overlap.  Op handles special values lane
+ * by lane; short tails use zero-padded vector loads whose inactive lanes
+ * are dropped by the masked stores.
+ */
 template <typename T, typename Op>
 NPY_FINLINE void HWY_ATTR
 simd_unary_loop(const T *src, npy_intp ssrc, T *dst, npy_intp sdst, npy_intp len)
@@ -522,73 +595,28 @@ simd_unary_loop(const T *src, npy_intp ssrc, T *dst, npy_intp sdst, npy_intp len
     npy_intp remaining = len;
     
     if (ssrc == 1 && sdst == 1) {
-        bool use_scalar = false;
-        
         for (; remaining >= unroll_lanes; remaining -= unroll_lanes, src += unroll_lanes, dst += unroll_lanes) {
             __builtin_prefetch(src + unroll_lanes * 2, 0, 3);
             
-            if (use_scalar) {
-                for (int j = 0; j < unroll_lanes; j++) {
-                    dst[j] = Op::scalar_call(src[j]);
-                }
-            }
-            else {
-                hn::Vec<decltype(tag_t)> x0 = hn::Load(tag_t, src);
-                hn::Vec<decltype(tag_t)> x1 = hn::Load(tag_t, src + lanes);
-                hn::Vec<decltype(tag_t)> x2 = hn::Load(tag_t, src + lanes * 2);
-                hn::Vec<decltype(tag_t)> x3 = hn::Load(tag_t, src + lanes * 3);
-                
-                auto has_special = hn::Or(hn::IsNaN(x0), hn::IsInf(x0));
-                has_special = hn::Or(has_special, hn::Or(hn::IsNaN(x1), hn::IsInf(x1)));
-                has_special = hn::Or(has_special, hn::Or(hn::IsNaN(x2), hn::IsInf(x2)));
-                has_special = hn::Or(has_special, hn::Or(hn::IsNaN(x3), hn::IsInf(x3)));
-                
-                if (!hn::AllFalse(tag_t, has_special)) {
-                    use_scalar = true;
-                    for (int j = 0; j < unroll_lanes; j++) {
-                        dst[j] = Op::scalar_call(src[j]);
-                    }
-                }
-                else {
-                    hn::Vec<decltype(tag_t)> y0 = op_func(x0);
-                    hn::Vec<decltype(tag_t)> y1 = op_func(x1);
-                    hn::Vec<decltype(tag_t)> y2 = op_func(x2);
-                    hn::Vec<decltype(tag_t)> y3 = op_func(x3);
-                    
-                    hn::Store(y0, tag_t, dst);
-                    hn::Store(y1, tag_t, dst + lanes);
-                    hn::Store(y2, tag_t, dst + lanes * 2);
-                    hn::Store(y3, tag_t, dst + lanes * 3);
-                }
-            }
+            hn::Vec<decltype(tag_t)> x0 = hn::Load(tag_t, src);
+            hn::Vec<decltype(tag_t)> x1 = hn::Load(tag_t, src + lanes);
+            hn::Vec<decltype(tag_t)> x2 = hn::Load(tag_t, src + lanes * 2);
+            hn::Vec<decltype(tag_t)> x3 = hn::Load(tag_t, src + lanes * 3);
+
+            hn::Store(op_func(x0), tag_t, dst);
+            hn::Store(op_func(x1), tag_t, dst + lanes);
+            hn::Store(op_func(x2), tag_t, dst + lanes * 2);
+            hn::Store(op_func(x3), tag_t, dst + lanes * 3);
         }
         
         for (; remaining >= lanes; remaining -= lanes, src += lanes, dst += lanes) {
-            if (use_scalar) {
-                for (int j = 0; j < lanes; j++) {
-                    dst[j] = Op::scalar_call(src[j]);
-                }
-            }
-            else {
-                hn::Vec<decltype(tag_t)> x_in = hn::Load(tag_t, src);
-                auto has_special = hn::Or(hn::IsNaN(x_in), hn::IsInf(x_in));
-                if (!hn::AllFalse(tag_t, has_special)) {
-                    use_scalar = true;
-                    for (int j = 0; j < lanes; j++) {
-                        dst[j] = Op::scalar_call(src[j]);
-                    }
-                }
-                else {
-                    auto x_out = op_func(x_in);
-                    hn::Store(x_out, tag_t, dst);
-                }
-            }
+            hn::Vec<decltype(tag_t)> x_in = hn::Load(tag_t, src);
+            hn::Store(op_func(x_in), tag_t, dst);
         }
         
         if (remaining > 0) {
-            for (int j = 0; j < remaining; j++) {
-                dst[j] = Op::scalar_call(src[j]);
-            }
+            hn::Vec<decltype(tag_t)> x_in = hn::LoadN(tag_t, src, remaining);
+            hn::StoreN(op_func(x_in), tag_t, dst, remaining);
         }
     }
     else {
@@ -596,27 +624,22 @@ simd_unary_loop(const T *src, npy_intp ssrc, T *dst, npy_intp sdst, npy_intp len
         const hn::Vec<decltype(ind_tag_t)> src_index0 = hn::Mul(hn::Iota(ind_tag_t, 0), hn::Set(ind_tag_t, ssrc));
         const hn::Vec<decltype(ind_tag_t)> dst_index0 = hn::Mul(hn::Iota(ind_tag_t, 0), hn::Set(ind_tag_t, sdst));
         
-        bool use_scalar = false;
-        
         for (; remaining >= lanes; remaining -= lanes, src += ssrc * lanes, dst += sdst * lanes) {
-            if (use_scalar) {
-                for (int j = 0; j < lanes; j++) {
-                    dst[j * sdst] = Op::scalar_call(src[j * ssrc]);
-                }
-            }
-            else {
-                hn::Vec<decltype(tag_t)> x_in = hn::GatherIndex(tag_t, src, src_index0);
-                auto x_out = op_func(x_in);
-                hn::ScatterIndex(x_out, tag_t, dst, dst_index0);
-                
-                if (!hn::AllFalse(tag_t, hn::Or(hn::IsNaN(x_in), hn::IsInf(x_in)))) {
-                    use_scalar = true;
-                }
-            }
+            hn::Vec<decltype(tag_t)> x_in = hn::GatherIndex(tag_t, src, src_index0);
+            hn::ScatterIndex(op_func(x_in), tag_t, dst, dst_index0);
         }
         
-        for (npy_intp i = 0; i < remaining; i++) {
-            dst[i * sdst] = Op::scalar_call(src[i * ssrc]);
+        if (remaining > 0) {
+            T NPY_DECL_ALIGNED(NPY_SIMD_WIDTH) tmp_in[hn::MaxLanes(tag_t)] = {};
+            T NPY_DECL_ALIGNED(NPY_SIMD_WIDTH) tmp_out[hn::MaxLanes(tag_t)] = {};
+            for (npy_intp i = 0; i < remaining; i++) {
+                tmp_in[i] = src[i * ssrc];
+            }
+            hn::Vec<decltype(tag_t)> x_in = hn::LoadN(tag_t, tmp_in, remaining);
+            hn::StoreN(op_func(x_in), tag_t, tmp_out, remaining);
+            for (npy_intp i = 0; i < remaining; i++) {
+                dst[i * sdst] = tmp_out[i];
+            }
         }
     }
 }
