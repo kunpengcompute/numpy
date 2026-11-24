@@ -609,200 +609,115 @@ simd_exp_hwy_FLOAT(const npy_float *src, npy_intp ssrc,
         }
         exp_store_vector<vec_x_f32>(result, dst, sdst, len);
     }
-}static void
-simd_exp_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
-                       npy_double *dst, npy_intp sdst, npy_intp len)
+}HWY_ATTR NPY_FINLINE vec_x_f64
+exp_lookup_sbits(vec_x_u64 idx)
 {
-  const float64x2_t ln2_hi = vdupq_n_f64(0x1.62e42fefa39efp-8);
-  const float64x2_t ln2_lo = vdupq_n_f64(0x1.abc9e3b39803fp-63);
-  const float64x2_t c0 = vdupq_n_f64(0x1.ffffffffffd43p-2);
-  const float64x2_t c1 = vdupq_n_f64(0x1.55555c75adbb2p-3);
-  const float64x2_t c2 = vdupq_n_f64(0x1.55555da646206p-5);
-  const uint64x2_t all_bits = vdupq_n_u64(0xFFFFFFFFFFFFFFFFULL);
-  /*
-   * exp(x) = 2^(n/128) * e^r with x = n*ln2/128 + r and r in
-   * +-ln2/256; the scale is assembled from the shared 128-entry sbits
-   * table.  The bit-trick only produces a normal scale while
-   * -1022 <= n/128 < 1024 (i.e. -708.4 < x < 709.78); past the top the
-   * scale wraps through the sign bit and yields NaN (inf - inf).
-   * Lanes outside the window (incl. +-inf and NaN) are evaluated via
-   * libm, which yields the exact scalar-path value (subnormals
-   * included) and raises the overflow/underflow FP flags like the
-   * scalar path does.
-   */
-  const float64x2_t shift = vdupq_n_f64(0x1.8p+52);
-  const float64x2_t inv_ln2 = vdupq_n_f64(0x1.71547652b82fep7);
-  const float64x2_t poly_min = vdupq_n_f64(-708.0);
-  /* 709.7 keeps the n >= 131072 (scale = 2^1024 sign-wrap, NaN) zone
-   * routed to libm; glibc returns finite DBL_MAX-adjacent values there */
-  const float64x2_t poly_max = vdupq_n_f64(709.7);
-  /* Nonzero |x| < 2^-30: r == x there and r*r (and the r + poly*r*r
-   * sum) would go subnormal, raising a spurious underflow flag although
-   * exp(x) = fl(1+x) ~ 1.0.  libm returns fl(1+x) with the scalar
-   * path's (no) flags; +-0 stays in-band (exp(+-0) is exact).  Lanes
-   * with n != 0 cannot reach the subnormal zone: doubles near
-   * k*ln2/128 keep |r| >~ 2^-61, far above the 2^-511 r*r boundary. */
-  const float64x2_t tiny_bound = vdupq_n_f64(0x1p-30);
-  const float64x2_t zero_val = vdupq_n_f64(0.0);
-
-  const npy_double *infp = src;
-  npy_double *outp = dst;
-  npy_intp remaining = len;
-
-  const npy_intp UNROLL = 8;
-  const npy_intp VEC_SIZE = 2;
-
-  while (remaining >= UNROLL * VEC_SIZE) {
-    float64x2_t x[UNROLL], result[UNROLL];
-
-    if (ssrc == 1) {
-      __builtin_prefetch(infp + 64, 0, 3);
-      for (int i = 0; i < UNROLL; i++)
-        x[i] = vld1q_f64(infp + i * VEC_SIZE);
+    if constexpr (hn::MaxLanes(exp_f64) == 2) {
+        uint64_t i0 = hn::ExtractLane(idx, 0);
+        uint64_t i1 = hn::ExtractLane(idx, 1);
+        /* table holds bit patterns: insert as u64 then BitCast (a numeric
+         * (double) cast would convert the integer, not reinterpret it). */
+        vec_x_u64 t = hn::InsertLane(hn::Zero(exp_u64), 0, neon_exp_table[i0]);
+        t = hn::InsertLane(t, 1, neon_exp_table[i1]);
+        return hn::BitCast(exp_f64, t);
     } else {
-      for (int i = 0; i < UNROLL; i++) {
-        const npy_double *pair = infp + (2 * i) * ssrc;
-        x[i] = vld1q_dup_f64(pair);
-        x[i] = vsetq_lane_f64(pair[ssrc], x[i], 1);
-      }
+        return hn::GatherIndex(exp_f64, (const double *)neon_exp_table,
+                               hn::BitCast(exp_s64, idx));
     }
-
-    uint64x2_t any_libm = vdupq_n_u64(0);
-    uint64x2_t need_libm[UNROLL];
-    for (int i = 0; i < UNROLL; i++) {
-      uint64x2_t is_nan = veorq_u64(vceqq_f64(x[i], x[i]), all_bits);
-      /* mask NaN lanes out of the window compares (FCMGT/FCMLT raise
-       * IOC on QNaN lanes, unlike vceqq) */
-      float64x2_t x_nn = vbslq_f64(is_nan, vdupq_n_f64(0.0), x[i]);
-      need_libm[i] =
-          vorrq_u64(vorrq_u64(vcgtq_f64(x_nn, poly_max),
-                              vcltq_f64(x_nn, poly_min)),
-                    is_nan);
-      need_libm[i] = vorrq_u64(
-          need_libm[i],
-          vbicq_u64(vcltq_f64(vabsq_f64(x_nn), tiny_bound),
-                    vceqq_f64(x_nn, zero_val)));
-      any_libm = vorrq_u64(any_libm, need_libm[i]);
-    }
-
-    const float64x2_t safe_val = vdupq_n_f64(0.0);
-    for (int i = 0; i < UNROLL; i++) {
-      /* sanitized polynomial evaluation (speculation-safe); the scale
-       * bit-trick must never see out-of-window bit patterns */
-      float64x2_t xs = vbslq_f64(need_libm[i], safe_val, x[i]);
-      float64x2_t z = vfmaq_f64(shift, xs, inv_ln2);
-      uint64x2_t u = vreinterpretq_u64_f64(z);
-      float64x2_t n = vsubq_f64(z, shift);
-      float64x2_t r = vfmsq_f64(vfmsq_f64(xs, n, ln2_hi), n, ln2_lo);
-      uint64x2_t e = vshlq_n_u64(u, 52 - V_EXP_TABLE_BITS);
-      uint64x2_t tab = neon_exp_lookup_sbits(u);
-      float64x2_t scale = vreinterpretq_f64_u64(vaddq_u64(tab, e));
-      float64x2_t r2 = vmulq_f64(r, r);
-      float64x2_t poly = vfmaq_f64(vfmaq_f64(c0, r, c1), r2, c2);
-      poly = vfmaq_f64(r, poly, r2);
-      result[i] = vfmaq_f64(scale, poly, scale);
-    }
-    /* out-of-window lanes (incl. NaN/inf) come from libm; decided once
-     * per block so the common case stays branch-free */
-    if (__builtin_expect(neon_has_any_lane_u64(any_libm), 0)) {
-      for (int i = 0; i < UNROLL; i++) {
-        if (__builtin_expect(neon_has_any_lane_u64(need_libm[i]), 0)) {
-          double vals[2], outs[2];
-          uint64_t m[2];
-          vst1q_f64(vals, x[i]);
-          vst1q_f64(outs, result[i]);
-          vst1q_u64(m, need_libm[i]);
-          for (int j = 0; j < 2; j++)
-            if (m[j]) outs[j] = npy_exp(vals[j]);
-          result[i] = vld1q_f64(outs);
-        }
-      }
-    }
-
-    if (sdst == 1) {
-      __builtin_prefetch(outp + 64, 1, 3);
-      for (int i = 0; i < UNROLL; i++)
-        vst1q_f64(outp + i * VEC_SIZE, result[i]);
-    } else {
-      for (int i = 0; i < UNROLL; i++) {
-        outp[(2*i) * sdst] = vgetq_lane_f64(result[i], 0);
-        outp[(2*i+1) * sdst] = vgetq_lane_f64(result[i], 1);
-      }
-    }
-
-    infp += ssrc * UNROLL * VEC_SIZE;
-    outp += sdst * UNROLL * VEC_SIZE;
-    remaining -= UNROLL * VEC_SIZE;
-  }
-
-  while (remaining > 0) {
-    int current_len = (remaining < VEC_SIZE) ? remaining : VEC_SIZE;
-    float64x2_t x;
-    if (ssrc == 1) {
-      /* broadcast the single valid lane: loading the full vector would
-       * read one element past the buffer (and its garbage bits must
-       * never reach the polynomial) */
-      if (current_len == 1) x = vld1q_dup_f64(infp);
-      else x = vld1q_f64(infp);
-    } else {
-      x = vld1q_dup_f64(infp);
-      if (remaining > 1) {
-        x = vsetq_lane_f64(infp[ssrc], x, 1);
-      }
-    }
-
-    uint64x2_t is_nan = veorq_u64(vceqq_f64(x, x), all_bits);
-    float64x2_t x_nn = vbslq_f64(is_nan, vdupq_n_f64(0.0), x);
-    uint64x2_t need_libm =
-        vorrq_u64(vorrq_u64(vcgtq_f64(x_nn, poly_max),
-                           vcltq_f64(x_nn, poly_min)),
-                  is_nan);
-    need_libm = vorrq_u64(
-        need_libm,
-        vbicq_u64(vcltq_f64(vabsq_f64(x_nn), tiny_bound),
-                  vceqq_f64(x_nn, zero_val)));
-
-    const float64x2_t safe_val = vdupq_n_f64(0.0);
-    float64x2_t xs = vbslq_f64(need_libm, safe_val, x);
-    float64x2_t z = vfmaq_f64(shift, xs, inv_ln2);
-    uint64x2_t u = vreinterpretq_u64_f64(z);
-    float64x2_t n = vsubq_f64(z, shift);
-    float64x2_t r = vfmsq_f64(vfmsq_f64(xs, n, ln2_hi), n, ln2_lo);
-    uint64x2_t e = vshlq_n_u64(u, 52 - V_EXP_TABLE_BITS);
-    u = neon_exp_lookup_sbits(u);
-    float64x2_t scale = vreinterpretq_f64_u64(vaddq_u64(u, e));
-
-    float64x2_t r2 = vmulq_f64(r, r);
-    float64x2_t poly = vfmaq_f64(vfmaq_f64(c0, r, c1), r2, c2);
-    poly = vfmaq_f64(r, poly, r2);
-    float64x2_t result = vfmaq_f64(scale, poly, scale);
-
-    if (__builtin_expect(neon_has_any_lane_u64(need_libm), 0)) {
-      double vals[2], outs[2];
-      uint64_t m[2];
-      vst1q_f64(vals, x);
-      vst1q_f64(outs, result);
-      vst1q_u64(m, need_libm);
-      for (int j = 0; j < current_len; j++)
-        if (m[j]) outs[j] = npy_exp(vals[j]);
-      result = vld1q_f64(outs);
-    }
-
-    if (sdst == 1) {
-      if (current_len == 1) vst1q_lane_f64(outp, result, 0);
-      else vst1q_f64(outp, result);
-    } else {
-      outp[0] = vgetq_lane_f64(result, 0);
-      if (current_len > 1) outp[sdst] = vgetq_lane_f64(result, 1);
-    }
-
-    infp += ssrc * current_len;
-    outp += sdst * current_len;
-    remaining -= current_len;
-  }
 }
 
-static void
+HWY_ATTR static void
+simd_exp_hwy_DOUBLE(const npy_double *src, npy_intp ssrc,
+                    npy_double *dst, npy_intp sdst, npy_intp len)
+{
+    const auto D = exp_f64;
+    const int nlanes = hn::Lanes(D);
+    const vec_x_f64 zero = hn::Zero(D);
+    const vec_x_f64 one = hn::Set(D, 1.0);
+    const vec_x_f64 shift = hn::Set(D, 0x1.8p+52);
+    const vec_x_f64 inv_ln2 = hn::Set(D, 0x1.71547652b82fep7);
+    const vec_x_f64 ln2_hi = hn::Set(D, -0x1.62e42fefa39efp-8);
+    const vec_x_f64 ln2_lo = hn::Set(D, -0x1.abc9e3b39803f3p-63);
+    const vec_x_f64 c0 = hn::Set(D, 0x1.ffffffffffd43p-2);
+    const vec_x_f64 c1 = hn::Set(D, 0x1.55555c75adbb2p-3);
+    const vec_x_f64 c2 = hn::Set(D, 0x1.55555da646206p-5);
+    const vec_x_u64 abs_mask = hn::Set(exp_u64, 0x7fffffffffffffffull);
+    const vec_x_u64 inf_bits = hn::Set(exp_u64, 0x7ff0000000000000ull);
+    const vec_x_u64 bound_bits = hn::Set(exp_u64, 0x4086232bdd76683cull); /*708.396*/
+    const vec_x_u64 tiny_bits = hn::Set(exp_u64, 0x3e10000000000000ull); /*2^-30*/
+    const vec_x_u64 idx_mask = hn::Set(exp_u64, V_EXP_INDEX_MASK);
+
+    for (; len > 0; len -= nlanes, src += ssrc * nlanes, dst += sdst * nlanes) {
+        vec_x_f64 x = exp_load_vector<vec_x_f64>(src, ssrc, len);
+        vec_x_u64 abs_bits = hn::And(hn::BitCast(exp_u64, x), abs_mask);
+        auto special_m = hn::Gt(abs_bits, bound_bits);
+        auto tiny_m = hn::And(hn::Lt(abs_bits, tiny_bits),
+                              hn::Gt(abs_bits, hn::Zero(exp_u64)));  /* nonzero |x|<2^-30 */
+        vec_x_f64 result;
+        if (__builtin_expect(!hn::AllFalse(exp_u64, hn::Or(special_m, tiny_m)), 0)) {
+            auto nan_m = hn::Gt(abs_bits, inf_bits);
+            auto inf_m = hn::Eq(abs_bits, inf_bits);
+            auto cmp_f = hn::And(special_m, hn::Lt(abs_bits, inf_bits));
+            auto care_m = hn::Or(hn::Or(nan_m, inf_m), tiny_m);
+            vec_x_f64 xs = hn::IfThenElse(hn::RebindMask(D, care_m), zero, x);
+            vec_x_f64 z = hn::MulAdd(xs, inv_ln2, shift);
+            vec_x_u64 u = hn::BitCast(exp_u64, z);
+            vec_x_f64 n = hn::Sub(z, shift);
+            vec_x_f64 r = hn::MulAdd(n, ln2_hi, xs);
+            r = hn::MulAdd(n, ln2_lo, r);
+            vec_x_u64 e = hn::ShiftLeft<52 - V_EXP_TABLE_BITS>(u);
+            vec_x_f64 tab = exp_lookup_sbits(hn::And(u, idx_mask));
+            vec_x_f64 scale = hn::BitCast(D, hn::Add(hn::BitCast(exp_u64, tab), e));
+            vec_x_f64 r2 = hn::Mul(r, r);
+            vec_x_f64 p = hn::MulAdd(r, c1, c0);
+            p = hn::MulAdd(r2, c2, p);
+            vec_x_f64 poly = hn::MulAdd(p, r2, r);
+            vec_x_f64 scale_r = hn::IfThenElse(hn::RebindMask(D, cmp_f), one, scale);
+            result = hn::MulAdd(poly, scale_r, scale_r);
+            if (__builtin_expect(!hn::AllFalse(exp_u64, cmp_f), 0)) {
+                const vec_x_u64 sp_offset = hn::Set(exp_u64, 0x6000000000000000ull);
+                const vec_x_u64 sp_bias1 = hn::Set(exp_u64, 0x7000000000000000ull);
+                const vec_x_u64 sp_bias2 = hn::Set(exp_u64, 0x3010000000000000ull);
+                const vec_x_f64 scale_bound = hn::Set(D, 163840.0);
+                vec_x_u64 b = hn::IfThenElse(
+                    hn::RebindMask(exp_u64, hn::Le(n, zero)),
+                    sp_offset, hn::Zero(exp_u64));
+                vec_x_f64 s1 = hn::BitCast(D, hn::Sub(sp_bias1, b));
+                vec_x_f64 s2 = hn::BitCast(D, hn::Add(
+                    hn::Sub(hn::BitCast(exp_u64, scale), sp_bias2), b));
+                auto cmp2 = hn::Gt(hn::Abs(n), scale_bound);
+                auto cmp_neg = hn::And(hn::RebindMask(D, cmp_f), hn::Le(n, zero));
+                auto ov_mask = hn::Or(cmp2, cmp_neg);
+                vec_x_f64 s1_ov = hn::IfThenElse(ov_mask, s1, one);
+                vec_x_f64 r_ov = hn::Mul(s1_ov, s1_ov);
+                vec_x_f64 r_sp = hn::Mul(hn::MulAdd(poly, s2, s2), s1);
+                vec_x_f64 sp_val = hn::IfThenElse(cmp2, r_ov, r_sp);
+                result = hn::IfThenElse(hn::RebindMask(D, cmp_f), sp_val, result);
+            }
+            /* exp(x) = fl(1 + x) for |x|<2^-30 (x^2/2 < 2^-61 below half
+             * ULP); adding subnormal x to 1 rounds normal, no UF. */
+            vec_x_f64 tiny_res = hn::Add(x, one);
+            result = hn::IfThenElse(hn::RebindMask(D, tiny_m), tiny_res, result);
+            result = hn::IfThenElse(hn::RebindMask(D, nan_m), x, result);
+            result = hn::IfThenElse(hn::RebindMask(D, inf_m), hn::Max(x, zero), result);
+        } else {
+            vec_x_f64 z = hn::MulAdd(x, inv_ln2, shift);
+            vec_x_u64 u = hn::BitCast(exp_u64, z);
+            vec_x_f64 n = hn::Sub(z, shift);
+            vec_x_f64 r = hn::MulAdd(n, ln2_hi, x);
+            r = hn::MulAdd(n, ln2_lo, r);
+            vec_x_u64 e = hn::ShiftLeft<52 - V_EXP_TABLE_BITS>(u);
+            vec_x_f64 tab = exp_lookup_sbits(hn::And(u, idx_mask));
+            vec_x_f64 scale = hn::BitCast(D, hn::Add(hn::BitCast(exp_u64, tab), e));
+            vec_x_f64 r2 = hn::Mul(r, r);
+            vec_x_f64 p = hn::MulAdd(r, c1, c0);
+            p = hn::MulAdd(r2, c2, p);
+            vec_x_f64 poly = hn::MulAdd(p, r2, r);
+            result = hn::MulAdd(poly, scale, scale);
+        }
+        exp_store_vector<vec_x_f64>(result, dst, sdst, len);
+    }
+}static void
 simd_exp_neon_HALF(const npy_half *src, npy_intp ssrc,
                     npy_half *dst, npy_intp sdst, npy_intp len)
 {
@@ -954,7 +869,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_exp)
         npy_double *dst = (npy_double*)args[1];
         const npy_intp ssrc = steps[0] / sizeof(npy_double);
         const npy_intp sdst = steps[1] / sizeof(npy_double);
-        simd_exp_neon_DOUBLE(src, ssrc, dst, sdst, len);
+        simd_exp_hwy_DOUBLE(src, ssrc, dst, sdst, len);
     }
     else {
         UNARY_LOOP {
