@@ -294,14 +294,18 @@ simd_log2_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
   const float64x2_t pos_inf = vdupq_n_f64(NPY_INFINITY);
   const float64x2_t neg_inf_val = vdupq_n_f64(-NPY_INFINITY);
   const float64x2_t nan_val = vdupq_n_f64(NPY_NAN);
-  const float64x2_t neg_nan = vdupq_n_f64(-NPY_NAN);
   const uint64x2_t all_ones = vdupq_n_u64(0xFFFFFFFFFFFFFFFFULL);
+  /* subnormal detection mask: biased exponent == 0 with a nonzero
+   * mantissa (positive subnormals; negative ones take the is_neg path) */
+  const uint64x2_t sub_exp_mask = vdupq_n_u64(0x7FF0000000000000ULL);
+  const uint64x2_t zero_u64 = vdupq_n_u64(0);
 
   const npy_double *infp = src;
   npy_double *outp = dst;
   npy_intp remaining = len;
 
-  feclearexcept(FE_ALL_EXCEPT);
+  uint64x2_t invalid_any = vdupq_n_u64(0);
+  uint64x2_t divbyzero_any = vdupq_n_u64(0);
 
   const npy_intp UNROLL = 4;
   const npy_intp VEC_SIZE = 2;
@@ -309,7 +313,8 @@ simd_log2_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
   while (remaining >= UNROLL * VEC_SIZE) {
     float64x2_t x[UNROLL], safe[UNROLL], result[UNROLL];
     uint64x2_t u[UNROLL], is_nan[UNROLL], is_pos_inf[UNROLL], is_neg_inf[UNROLL];
-    uint64x2_t is_zero[UNROLL], is_neg[UNROLL], full_mask[UNROLL];
+    uint64x2_t is_zero[UNROLL], is_neg[UNROLL], is_sub[UNROLL], full_mask[UNROLL];
+    uint64x2_t any_sub = vdupq_n_u64(0);
 
     if (ssrc == 1) {
       __builtin_prefetch(infp + 128, 0, 3);
@@ -330,11 +335,23 @@ simd_log2_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
       is_pos_inf[i] = vceqq_f64(x[i], pos_inf);
       is_neg_inf[i] = vceqq_f64(x[i], neg_inf_val);
       is_zero[i] = vceqq_f64(x[i], zeros_f);
-      is_neg[i] = vcltq_f64(x[i], zeros_f);
+      /* inequality vector compares (FCMGT/FCMGE) raise IOC on QNaN lanes,
+       * unlike vceqq; mask NaN lanes out before comparing */
+      float64x2_t x_nn = vbslq_f64(is_nan[i], zeros_f, x[i]);
+      is_neg[i] = vcltq_f64(x_nn, zeros_f);
       is_neg[i] = vbicq_u64(is_neg[i], vorrq_u64(is_neg_inf[i], is_zero[i]));
       uint64x2_t special_mask = vorrq_u64(vorrq_u64(is_nan[i], is_pos_inf[i]),
                                            vorrq_u64(is_neg_inf[i], is_zero[i]));
-      full_mask[i] = vorrq_u64(special_mask, is_neg[i]);
+      /* positive subnormals (biased exponent 0, nonzero mantissa): the
+       * table reduction assumes a normalized mantissa, so they are
+       * sanitized like the other specials and fixed up from libm below */
+      is_sub[i] = vbicq_u64(
+          vceqq_u64(vandq_u64(u[i], sub_exp_mask), zero_u64),
+          is_zero[i]);
+      any_sub = vorrq_u64(any_sub, is_sub[i]);
+      full_mask[i] = vorrq_u64(special_mask, vorrq_u64(is_neg[i], is_sub[i]));
+      invalid_any = vorrq_u64(invalid_any, vorrq_u64(is_neg[i], is_neg_inf[i]));
+      divbyzero_any = vorrq_u64(divbyzero_any, is_zero[i]);
       safe[i] = vbslq_f64(full_mask[i], ones_f, x[i]);
       u[i] = vreinterpretq_u64_f64(safe[i]);
     }
@@ -372,7 +389,23 @@ simd_log2_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
       result[i] = vbslq_f64(is_pos_inf[i], pos_inf, result[i]);
       result[i] = vbslq_f64(is_neg_inf[i], nan_val, result[i]);
       result[i] = vbslq_f64(is_zero[i], neg_inf_val, result[i]);
-      result[i] = vbslq_f64(is_neg[i], neg_nan, result[i]);
+      result[i] = vbslq_f64(is_neg[i], nan_val, result[i]);
+    }
+    /* subnormal lanes: evaluate via libm (bit-identical to the scalar
+     * path); decided once per block, so the common case stays cheap */
+    if (__builtin_expect(neon_has_any_lane_u64(any_sub), 0)) {
+      for (int i = 0; i < UNROLL; i++) {
+        if (__builtin_expect(neon_has_any_lane_u64(is_sub[i]), 0)) {
+          double vals[2], outs[2];
+          uint64_t m[2];
+          vst1q_f64(vals, x[i]);
+          vst1q_f64(outs, result[i]);
+          vst1q_u64(m, is_sub[i]);
+          for (int j = 0; j < 2; j++)
+            if (m[j]) outs[j] = npy_log2(vals[j]);
+          result[i] = vld1q_f64(outs);
+        }
+      }
     }
 
     if (sdst == 1) {
@@ -407,10 +440,29 @@ simd_log2_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
     uint64x2_t is_pos_inf = vceqq_f64(x, pos_inf);
     uint64x2_t is_neg_inf = vceqq_f64(x, neg_inf_val);
     uint64x2_t is_zero = vceqq_f64(x, zeros_f);
-    uint64x2_t is_neg = vcltq_f64(x, zeros_f);
+    /* mask NaN lanes out of the inequality compare (see the main loop) */
+    float64x2_t x_nn = vbslq_f64(is_nan, zeros_f, x);
+    uint64x2_t is_neg = vcltq_f64(x_nn, zeros_f);
     is_neg = vbicq_u64(is_neg, vorrq_u64(is_neg_inf, is_zero));
 
-    uint64x2_t need_scalar = vorrq_u64(is_neg, vorrq_u64(is_zero, vorrq_u64(is_nan, is_neg_inf)));
+    invalid_any = vorrq_u64(invalid_any, vorrq_u64(is_neg, is_neg_inf));
+    divbyzero_any = vorrq_u64(divbyzero_any, is_zero);
+
+    /* positive subnormals: the table reduction assumes a normalized
+     * mantissa; route them to the per-lane fallback (its else branch
+     * evaluates them with libm), like the other special values */
+    uint64x2_t is_sub = vbicq_u64(
+        vceqq_u64(vandq_u64(u, sub_exp_mask), zero_u64), is_zero);
+
+    uint64x2_t need_scalar = vorrq_u64(is_sub,
+        vorrq_u64(is_neg, vorrq_u64(is_zero, vorrq_u64(is_nan, is_neg_inf))));
+
+    /* Sanitize special lanes before the polynomial: with the default
+     * -fno-trapping-math the compiler may speculate the vector path below
+     * onto the fallback iterations, and evaluating it on raw NaN/inf bit
+     * patterns can raise spurious FP flags. */
+    x = vbslq_f64(need_scalar, ones_f, x);
+    u = vreinterpretq_u64_f64(x);
 
     if (__builtin_expect(!neon_has_any_lane_u64(need_scalar), 1)) {
       uint64x2_t u_off = vsubq_u64(u, off);
@@ -426,7 +478,6 @@ simd_log2_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
         if (current_len > 1) outp[sdst] = vgetq_lane_f64(result, 1);
       }
     } else {
-      feclearexcept(FE_ALL_EXCEPT);
       uint64_t arr_nan[2], arr_pinf[2], arr_ninf[2], arr_neg[2], arr_zero[2];
       vst1q_u64(arr_nan, is_nan);
       vst1q_u64(arr_pinf, is_pos_inf);
@@ -441,7 +492,7 @@ simd_log2_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
         else if (arr_pinf[i]) r = NPY_INFINITY;
         else if (arr_ninf[i]) r = NPY_NAN;
         else if (arr_zero[i]) r = -NPY_INFINITY;
-        else if (arr_neg[i])  r = -NPY_NAN;
+        else if (arr_neg[i])  r = NPY_NAN;
         else                  r = npy_log2(val);
         outp[i * ds] = r;
       }
@@ -451,7 +502,15 @@ simd_log2_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
     outp += sdst * current_len;
     remaining -= current_len;
   }
-  feclearexcept(FE_ALL_EXCEPT);
+  /* The masked SIMD lanes above never execute a trapping instruction, so
+   * raise the FP flags that libm's log2 would have raised for the special
+   * inputs (invalid: x < 0 or -inf, divide-by-zero: +-0) explicitly. */
+  if (neon_has_any_lane_u64(invalid_any)) {
+    npy_set_floatstatus_invalid();
+  }
+  if (neon_has_any_lane_u64(divbyzero_any)) {
+    npy_set_floatstatus_divbyzero();
+  }
 }
 
 static inline float32x4_t
@@ -498,14 +557,17 @@ simd_log2_neon_FLOAT(const npy_float *src, npy_intp ssrc,
   const float32x4_t pos_inf = vdupq_n_f32(NPY_INFINITYF);
   const float32x4_t neg_inf_val = vdupq_n_f32(-NPY_INFINITYF);
   const float32x4_t nan_val = vdupq_n_f32(NPY_NANF);
-  const float32x4_t neg_nan = vdupq_n_f32(-NPY_NANF);
+  /* subnormal detection (see the DOUBLE kernel) */
+  const uint32x4_t sub_exp_mask = vdupq_n_u32(0x7F800000u);
+  const uint32x4_t zero_u32 = vdupq_n_u32(0);
   const float32x4_t c1357 = vld1q_f32(c1357_arr);
 
   const npy_float *infp = src;
   npy_float *outp = dst;
   npy_intp remaining = len;
 
-  feclearexcept(FE_ALL_EXCEPT);
+  uint32x4_t invalid_any = vdupq_n_u32(0);
+  uint32x4_t divbyzero_any = vdupq_n_u32(0);
 
   const npy_intp UNROLL = 4;
   const npy_intp VEC_SIZE = 4;
@@ -513,7 +575,8 @@ simd_log2_neon_FLOAT(const npy_float *src, npy_intp ssrc,
   while (remaining >= UNROLL * VEC_SIZE) {
     float32x4_t x[UNROLL], result[UNROLL];
     uint32x4_t u[UNROLL], is_nan[UNROLL], is_pos_inf[UNROLL], is_neg_inf[UNROLL];
-    uint32x4_t is_zero[UNROLL], is_neg[UNROLL], full_mask[UNROLL];
+    uint32x4_t is_zero[UNROLL], is_neg[UNROLL], is_sub[UNROLL], full_mask[UNROLL];
+    uint32x4_t any_sub = vdupq_n_u32(0);
 
     if (ssrc == 1) {
       __builtin_prefetch(infp + 128, 0, 3);
@@ -535,11 +598,22 @@ simd_log2_neon_FLOAT(const npy_float *src, npy_intp ssrc,
       is_pos_inf[i] = vceqq_f32(x[i], pos_inf);
       is_neg_inf[i] = vceqq_f32(x[i], neg_inf_val);
       is_zero[i] = vceqq_f32(x[i], zeros_f);
-      is_neg[i] = vcltq_f32(x[i], zeros_f);
+      /* inequality vector compares raise IOC on QNaN lanes (see the
+       * DOUBLE kernel); mask NaN lanes out before comparing */
+      float32x4_t x_nn = vbslq_f32(is_nan[i], zeros_f, x[i]);
+      is_neg[i] = vcltq_f32(x_nn, zeros_f);
       is_neg[i] = vbicq_u32(is_neg[i], vorrq_u32(is_neg_inf[i], is_zero[i]));
       uint32x4_t special_mask = vorrq_u32(vorrq_u32(is_nan[i], is_pos_inf[i]),
                                            vorrq_u32(is_neg_inf[i], is_zero[i]));
-      full_mask[i] = vorrq_u32(special_mask, is_neg[i]);
+      /* positive subnormals: sanitized like the other specials, fixed up
+       * from libm below (see the DOUBLE kernel) */
+      is_sub[i] = vbicq_u32(
+          vceqq_u32(vandq_u32(u[i], sub_exp_mask), zero_u32),
+          is_zero[i]);
+      any_sub = vorrq_u32(any_sub, is_sub[i]);
+      full_mask[i] = vorrq_u32(special_mask, vorrq_u32(is_neg[i], is_sub[i]));
+      invalid_any = vorrq_u32(invalid_any, vorrq_u32(is_neg[i], is_neg_inf[i]));
+      divbyzero_any = vorrq_u32(divbyzero_any, is_zero[i]);
       float32x4_t safe = vbslq_f32(full_mask[i], ones_f, x[i]);
       u[i] = vreinterpretq_u32_f32(safe);
     }
@@ -555,7 +629,23 @@ simd_log2_neon_FLOAT(const npy_float *src, npy_intp ssrc,
       result[i] = vbslq_f32(is_pos_inf[i], pos_inf, result[i]);
       result[i] = vbslq_f32(is_neg_inf[i], nan_val, result[i]);
       result[i] = vbslq_f32(is_zero[i], neg_inf_val, result[i]);
-      result[i] = vbslq_f32(is_neg[i], neg_nan, result[i]);
+      result[i] = vbslq_f32(is_neg[i], nan_val, result[i]);
+    }
+    /* subnormal lanes: evaluate via libm (bit-identical to the scalar
+     * path); decided once per block, so the common case stays cheap */
+    if (__builtin_expect(neon_has_any_lane_u32(any_sub), 0)) {
+      for (int i = 0; i < UNROLL; i++) {
+        if (__builtin_expect(neon_has_any_lane_u32(is_sub[i]), 0)) {
+          float vals[4], outs[4];
+          uint32_t m[4];
+          vst1q_f32(vals, x[i]);
+          vst1q_f32(outs, result[i]);
+          vst1q_u32(m, is_sub[i]);
+          for (int j = 0; j < 4; j++)
+            if (m[j]) outs[j] = npy_log2f(vals[j]);
+          result[i] = vld1q_f32(outs);
+        }
+      }
     }
 
     if (sdst == 1) {
@@ -590,10 +680,28 @@ simd_log2_neon_FLOAT(const npy_float *src, npy_intp ssrc,
     uint32x4_t is_pos_inf = vceqq_f32(x, pos_inf);
     uint32x4_t is_neg_inf = vceqq_f32(x, neg_inf_val);
     uint32x4_t is_zero = vceqq_f32(x, zeros_f);
-    uint32x4_t is_neg = vcltq_f32(x, zeros_f);
+    /* mask NaN lanes out of the inequality compare (see the main loop) */
+    float32x4_t x_nn = vbslq_f32(is_nan, zeros_f, x);
+    uint32x4_t is_neg = vcltq_f32(x_nn, zeros_f);
     is_neg = vbicq_u32(is_neg, vorrq_u32(is_neg_inf, is_zero));
 
-    uint32x4_t need_scalar = vorrq_u32(is_neg, vorrq_u32(is_zero, vorrq_u32(is_nan, is_neg_inf)));
+    invalid_any = vorrq_u32(invalid_any, vorrq_u32(is_neg, is_neg_inf));
+    divbyzero_any = vorrq_u32(divbyzero_any, is_zero);
+
+    /* positive subnormals: the table reduction assumes a normalized
+     * mantissa; route them to the per-lane fallback (its else branch
+     * evaluates them with libm), like the other special values */
+    uint32x4_t is_sub = vbicq_u32(
+        vceqq_u32(vandq_u32(u, sub_exp_mask), zero_u32), is_zero);
+
+    uint32x4_t need_scalar = vorrq_u32(is_sub,
+        vorrq_u32(is_neg, vorrq_u32(is_zero, vorrq_u32(is_nan, is_neg_inf))));
+
+    /* Sanitize special lanes before the polynomial (see the DOUBLE kernel
+     * above: FP speculation of the vector path must not evaluate it on raw
+     * NaN/inf bit patterns). */
+    x = vbslq_f32(need_scalar, ones_f, x);
+    u = vreinterpretq_u32_f32(x);
 
     if (__builtin_expect(!neon_has_any_lane_u32(need_scalar), 1)) {
       uint32x4_t u_off = vsubq_u32(u, off);
@@ -614,7 +722,6 @@ simd_log2_neon_FLOAT(const npy_float *src, npy_intp ssrc,
         for (int i = 0; i < current_len; i++) outp[i * sdst] = vgetq_lane_f32(result, i);
       }
     } else {
-      feclearexcept(FE_ALL_EXCEPT);
       uint32_t arr_nan[4], arr_pinf[4], arr_ninf[4], arr_neg[4], arr_zero[4];
       vst1q_u32(arr_nan, is_nan);
       vst1q_u32(arr_pinf, is_pos_inf);
@@ -629,7 +736,7 @@ simd_log2_neon_FLOAT(const npy_float *src, npy_intp ssrc,
         else if (arr_pinf[k]) r = NPY_INFINITYF;
         else if (arr_ninf[k]) r = NPY_NANF;
         else if (arr_zero[k]) r = -NPY_INFINITYF;
-        else if (arr_neg[k])  r = -NPY_NANF;
+        else if (arr_neg[k])  r = NPY_NANF;
         else                  r = npy_log2f(val);
         outp[k * ds] = r;
       }
@@ -639,7 +746,15 @@ simd_log2_neon_FLOAT(const npy_float *src, npy_intp ssrc,
     outp += sdst * current_len;
     remaining -= current_len;
   }
-  feclearexcept(FE_ALL_EXCEPT);
+  /* The masked SIMD lanes above never execute a trapping instruction, so
+   * raise the FP flags that libm's log2 would have raised for the special
+   * inputs (invalid: x < 0 or -inf, divide-by-zero: +-0) explicitly. */
+  if (neon_has_any_lane_u32(invalid_any)) {
+    npy_set_floatstatus_invalid();
+  }
+  if (neon_has_any_lane_u32(divbyzero_any)) {
+    npy_set_floatstatus_divbyzero();
+  }
 }
 
 static inline void
@@ -651,7 +766,6 @@ simd_log2_neon_HALF_stride1(const npy_half *src, npy_half *dst, npy_intp len)
   const float32x4_t pos_inf_v = vdupq_n_f32(NPY_INFINITYF);
   const float32x4_t neg_inf_v = vdupq_n_f32(-NPY_INFINITYF);
   const float32x4_t nan_v = vdupq_n_f32(NPY_NANF);
-  const float32x4_t neg_nan_v = vdupq_n_f32(-NPY_NANF);
 
   const float32x4_t c0 = vdupq_n_f32(0x1.715476p0f);
   const float32x4_t c2 = vdupq_n_f32(0x1.ec701cp-2f);
@@ -667,7 +781,8 @@ simd_log2_neon_HALF_stride1(const npy_half *src, npy_half *dst, npy_intp len)
   npy_half *outp = dst;
   npy_intp remaining = len;
 
-  feclearexcept(FE_ALL_EXCEPT);
+  uint32x4_t invalid_any = vdupq_n_u32(0);
+  uint32x4_t divbyzero_any = vdupq_n_u32(0);
 
   while (remaining >= 16) {
     __builtin_prefetch(infp + 64, 0, 3);
@@ -690,8 +805,13 @@ simd_log2_neon_HALF_stride1(const npy_half *src, npy_half *dst, npy_intp len)
       isp[k] = vceqq_f32(x[k], pos_inf_v);
       isni[k] = vceqq_f32(x[k], neg_inf_v);
       isz[k] = vceqq_f32(x[k], zeros_v);
-      isneg[k] = vbicq_u32(vcltq_f32(x[k], zeros_v), vorrq_u32(isni[k], isz[k]));
+      /* mask NaN lanes out of the inequality compare (FCMGT raises IOC
+       * on QNaN lanes, unlike vceqq) */
+      float32x4_t x_nn = vbslq_f32(isn[k], zeros_v, x[k]);
+      isneg[k] = vbicq_u32(vcltq_f32(x_nn, zeros_v), vorrq_u32(isni[k], isz[k]));
       full[k] = vorrq_u32(vorrq_u32(vorrq_u32(isn[k], isp[k]), vorrq_u32(isni[k], isz[k])), isneg[k]);
+      invalid_any = vorrq_u32(invalid_any, vorrq_u32(isneg[k], isni[k]));
+      divbyzero_any = vorrq_u32(divbyzero_any, isz[k]);
       sf[k] = vbslq_f32(full[k], ones_v, x[k]);
       u_off[k] = vsubq_u32(vreinterpretq_u32_f32(sf[k]), off_v);
       n_val[k] = vcvtq_f32_s32(vshrq_n_s32(vreinterpretq_s32_u32(u_off[k]), 23));
@@ -700,7 +820,7 @@ simd_log2_neon_HALF_stride1(const npy_half *src, npy_half *dst, npy_intp len)
       res[k] = vbslq_f32(isp[k], pos_inf_v, res[k]);
       res[k] = vbslq_f32(isni[k], nan_v, res[k]);
       res[k] = vbslq_f32(isz[k], neg_inf_v, res[k]);
-      res[k] = vbslq_f32(isneg[k], neg_nan_v, res[k]);
+      res[k] = vbslq_f32(isneg[k], nan_v, res[k]);
     }
 
     float16x4_t rh[4];
@@ -728,8 +848,13 @@ simd_log2_neon_HALF_stride1(const npy_half *src, npy_half *dst, npy_intp len)
       isp[k] = vceqq_f32(x[k], pos_inf_v);
       isni[k] = vceqq_f32(x[k], neg_inf_v);
       isz[k] = vceqq_f32(x[k], zeros_v);
-      isneg[k] = vbicq_u32(vcltq_f32(x[k], zeros_v), vorrq_u32(isni[k], isz[k]));
+      /* mask NaN lanes out of the inequality compare (FCMGT raises IOC
+       * on QNaN lanes, unlike vceqq) */
+      float32x4_t x_nn = vbslq_f32(isn[k], zeros_v, x[k]);
+      isneg[k] = vbicq_u32(vcltq_f32(x_nn, zeros_v), vorrq_u32(isni[k], isz[k]));
       full[k] = vorrq_u32(vorrq_u32(vorrq_u32(isn[k], isp[k]), vorrq_u32(isni[k], isz[k])), isneg[k]);
+      invalid_any = vorrq_u32(invalid_any, vorrq_u32(isneg[k], isni[k]));
+      divbyzero_any = vorrq_u32(divbyzero_any, isz[k]);
       sf[k] = vbslq_f32(full[k], ones_v, x[k]);
       u_off[k] = vsubq_u32(vreinterpretq_u32_f32(sf[k]), off_v);
       n_val[k] = vcvtq_f32_s32(vshrq_n_s32(vreinterpretq_s32_u32(u_off[k]), 23));
@@ -738,7 +863,7 @@ simd_log2_neon_HALF_stride1(const npy_half *src, npy_half *dst, npy_intp len)
       res[k] = vbslq_f32(isp[k], pos_inf_v, res[k]);
       res[k] = vbslq_f32(isni[k], nan_v, res[k]);
       res[k] = vbslq_f32(isz[k], neg_inf_v, res[k]);
-      res[k] = vbslq_f32(isneg[k], neg_nan_v, res[k]);
+      res[k] = vbslq_f32(isneg[k], nan_v, res[k]);
     }
 
     float16x4_t rh[2];
@@ -755,7 +880,15 @@ simd_log2_neon_HALF_stride1(const npy_half *src, npy_half *dst, npy_intp len)
     outp[i] = npy_float_to_half(npy_log2f(npy_half_to_float(infp[i])));
   }
 
-  feclearexcept(FE_ALL_EXCEPT);
+  /* The masked SIMD lanes above never execute a trapping instruction, so
+   * raise the FP flags that libm's log2 would have raised for the special
+   * inputs (invalid: x < 0 or -inf, divide-by-zero: +-0) explicitly. */
+  if (neon_has_any_lane_u32(invalid_any)) {
+    npy_set_floatstatus_invalid();
+  }
+  if (neon_has_any_lane_u32(divbyzero_any)) {
+    npy_set_floatstatus_divbyzero();
+  }
 }
 
 static void
@@ -776,7 +909,6 @@ simd_log2_neon_HALF(const npy_half *src, npy_intp ssrc,
     if (!tmp_src || !tmp_dst) {
       if (tmp_src) free(tmp_src);
       if (tmp_dst) free(tmp_dst);
-      feclearexcept(FE_ALL_EXCEPT);
       for (npy_intp i = 0; i < len; i++) {
         npy_float in1 = npy_half_to_float(src[i * ssrc]);
         dst[i * sdst] = npy_float_to_half(npy_log2f(in1));
