@@ -6,208 +6,166 @@
 #include "loops.h"
 
 #if SIMD_ARM
+#include "simd/simd.hpp"
+#include <hwy/highway.h>
+namespace hn = hwy::HWY_NAMESPACE;
+#endif
 
-static inline float32x4_t __attribute__((always_inline))
-neon_exp2f_inline_core(float32x4_t x,
-                        float32x4_t shift, uint32x4_t exponent_bias,
-                        float32x4_t c0, float32x4_t c1, float32x4_t c2,
-                        float32x4_t c3, float32x4_t c4,
-                        float32x4_t d0, float32x4_t d1)
+#if SIMD_ARM
+
+/* ---- Highway (Google Highway) AOR advsimd exp2 kernels -------------------
+ * Algorithm ported from ARM optimized-routines math/aarch64/advsimd/exp2f.c
+ * and exp2.c (MIT OR Apache-2.0 WITH LLVM-exception), expressed with Highway
+ * scalable vectors following the official numpy SIMD mode (ScalableTag +
+ * HWY_ATTR, LoadN/StoreN/GatherIndexN tails, GatherIndex table lookup).
+ *
+ * Copyright (c) 2019-2026, Arm Limited.
+ * SPDX-License-Identifier: MIT OR Apache-2.0 WITH LLVM-exception
+ *
+ * numpy contract adaptations (see PR #200 / commit c73289f):
+ *  - NaN sign+payload passthrough; +-inf mapped to constants. NaN/inf lanes
+ *    are sanitized to 0 before the polynomial so the raw AOR s1*s1 overflow
+ *    term never raises a spurious OF/UF on them.
+ *  - the s1*s2 bias-split special path keeps OF/UF raised naturally by the
+ *    split arithmetic (no libm, no manual flag writes).
+ *  - tiny-input product flooring so subnormal/near-zero remainders do not
+ *    leak a spurious underflow flag (f32 |r|>=2^-21 even powers; f64
+ *    |r|>=2^-511 for r^2 and |r|>=2^-1019 for the linear term).
+ */
+const hn::ScalableTag<float> exp2_f32;
+const hn::ScalableTag<int32_t> exp2_s32;
+const hn::ScalableTag<uint32_t> exp2_u32;
+using vec_e_f32 = hn::Vec<decltype(exp2_f32)>;
+using vec_e_s32 = hn::Vec<decltype(exp2_s32)>;
+using vec_e_u32 = hn::Vec<decltype(exp2_u32)>;
+
+const hn::ScalableTag<double> exp2_f64;
+const hn::ScalableTag<int64_t> exp2_s64;
+const hn::ScalableTag<uint64_t> exp2_u64;
+using vec_e_f64 = hn::Vec<decltype(exp2_f64)>;
+using vec_e_s64 = hn::Vec<decltype(exp2_s64)>;
+using vec_e_u64 = hn::Vec<decltype(exp2_u64)>;
+
+template <typename vtype, typename type_t>
+HWY_ATTR NPY_FINLINE vtype
+exp2_load_vector(type_t *src, npy_intp ssrc, npy_intp len)
 {
-  float32x4_t z = vaddq_f32(x, shift);
-  float32x4_t n = vsubq_f32(z, shift);
-  float32x4_t r = vsubq_f32(x, n);
-  int32x4_t ni = vcvtq_s32_f32(n);
-  uint32x4_t e = vshlq_n_u32(vreinterpretq_u32_s32(ni), 23);
-  float32x4_t scale = vreinterpretq_f32_u32(vaddq_u32(e, exponent_bias));
-  /* Floor the products at |r| >= 2^-21 (even powers) / 2^-124 (the
-   * inner*r term): a tiny in-band r -- a tiny x, or an x near a
-   * multiple of ln2/32 after range reduction -- would otherwise
-   * multiply into the subnormal range and raise a spurious underflow
-   * flag, while exp2(x) = fl(1 + x*ln2) still rounds to the same value
-   * there (1.0 for the floored zone).  The inner*r term keeps r's sign
-   * through the floored magnitude; +-0 stays exact (exp2(+-0) = 1). */
-  float32x4_t r_abs = vabsq_f32(r);
-  float32x4_t r_even = vmaxq_f32(r_abs, vdupq_n_f32(0x1p-21f));
-  float32x4_t r_lin = vbslq_f32(vdupq_n_u32(0x80000000u), r,
-                                vmaxq_f32(r_abs, vdupq_n_f32(0x1p-124f)));
-  float32x4_t r2 = vmulq_f32(r_even, r_even);
-  float32x4_t r4 = vmulq_f32(r2, r2);
-  /*
-   * Degree-7 minimax approximation of 2^r - 1 for r in [-0.5, 0.5]:
-   *   r * (c4 + c3*r + (c2 + c1*r)*r^2 + (c0 + d1*r)*r^4 + d0*r^6)
-   * Measured over the whole [-126, 127.5] window: max 1 ulp, ~88%
-   * correctly rounded. (The previous degree-5 Taylor coefficients were
-   * up to ~41 ulp off across this range.)
-   */
-  float32x4_t A = vfmaq_f32(c4, r, c3);
-  float32x4_t B = vfmaq_f32(c2, r, c1);
-  float32x4_t C = vfmaq_f32(c0, r, d1);
-  float32x4_t inner = vfmaq_f32(A, B, r2);
-  inner = vfmaq_f32(inner, C, r4);
-  inner = vfmaq_f32(inner, d0, vmulq_f32(r4, r2));
-  float32x4_t poly = vmulq_f32(inner, r_lin);
-  return vfmaq_f32(scale, poly, scale);
+    auto D = hn::DFromV<vtype>();
+    using DI = hn::RebindToSigned<decltype(D)>;
+    DI di;
+    auto indices = hn::Mul(hn::Iota(di, 0), hn::Set(di, ssrc));
+    if (len < hn::Lanes(D)) {
+        if (ssrc == 1) return hn::LoadN(D, src, len);
+        return hn::GatherIndexN(D, src, indices, len);
+    }
+    if (ssrc == 1) return hn::LoadU(D, src);
+    return hn::GatherIndex(D, src, indices);
 }
 
-static void
-simd_exp2_neon_FLOAT(const npy_float *src, npy_intp ssrc,
-                     npy_float *dst, npy_intp sdst, npy_intp len)
+template <typename vtype, typename type_t>
+HWY_ATTR NPY_FINLINE void
+exp2_store_vector(vtype vec, type_t *dst, npy_intp sdst, npy_intp len)
 {
-  const float32x4_t pos_inf = vdupq_n_f32(NPY_INFINITYF);
-  const float32x4_t neg_inf = vdupq_n_f32(-NPY_INFINITYF);
-  const float32x4_t shift = vdupq_n_f32(0x1.8p+23f);
-  const uint32x4_t exponent_bias = vdupq_n_u32(0x3f800000);
-  /* the scale bit-trick inside the polynomial only produces a valid float
-   * while the rounded exponent stays within [-126, 127]; lanes outside
-   * (incl. +-inf) fall back to libm, which also raises the overflow/
-   * underflow FP flags like the scalar path does */
-  const float32x4_t exp_max = vdupq_n_f32(127.5f);
-  const float32x4_t exp_min = vdupq_n_f32(-126.0f);
-  const float32x4_t c0 = vdupq_n_f32(0x1.5d95e6p-10f);
-  const float32x4_t c1 = vdupq_n_f32(0x1.3b29f4p-7f);
-  const float32x4_t c2 = vdupq_n_f32(0x1.c6b08p-5f);
-  const float32x4_t c3 = vdupq_n_f32(0x1.ebfbe0p-3f);
-  const float32x4_t c4 = vdupq_n_f32(0x1.62e430p-1f);
-  const float32x4_t d0 = vdupq_n_f32(0x1.f1a68ap-17f);
-  const float32x4_t d1 = vdupq_n_f32(0x1.44627p-13f);
-
-  const npy_float *infp = src;
-  npy_float *outp = dst;
-  npy_intp remaining = len;
-
-  const npy_intp UNROLL = 8;
-  const npy_intp VEC_SIZE = 4;
-
-  while (remaining >= UNROLL * VEC_SIZE) {
-    float32x4_t x[UNROLL], result[UNROLL];
-
-    if (ssrc == 1) {
-      for (int i = 0; i < UNROLL; i++)
-        x[i] = vld1q_f32(infp + i * VEC_SIZE);
-    } else {
-      for (int i = 0; i < UNROLL; i++) {
-        float vals[VEC_SIZE];
-        for (int j = 0; j < VEC_SIZE; j++)
-          vals[j] = infp[(i * VEC_SIZE + j) * ssrc];
-        x[i] = vld1q_f32(vals);
-      }
+    auto D = hn::DFromV<vtype>();
+    using DI = hn::RebindToSigned<decltype(D)>;
+    DI di;
+    auto indices = hn::Mul(hn::Iota(di, 0), hn::Set(di, sdst));
+    if (len < hn::Lanes(D)) {
+        if (sdst == 1) { hn::StoreN(vec, D, dst, len); return; }
+        hn::ScatterIndexN(vec, D, dst, indices, len);
+        return;
     }
+    if (sdst == 1) { hn::StoreU(vec, D, dst); return; }
+    hn::ScatterIndex(vec, D, dst, indices);
+}
 
-    const float32x4_t safe_val = vdupq_n_f32(0.0f);
-    uint32x4_t any_libm = vdupq_n_u32(0);
-    uint32x4_t need_libm[UNROLL];
-    for (int i = 0; i < UNROLL; i++) {
-      uint32x4_t is_nan = vmvnq_u32(vceqq_f32(x[i], x[i]));
-      /* inequality compares (FCMGE/FCMGT) raise IOC on QNaN lanes, unlike
-       * vceqq; mask NaN lanes out before comparing (they compare false
-       * anyway) */
-      float32x4_t x_nn = vbslq_f32(is_nan, vdupq_n_f32(0.0f), x[i]);
-      uint32x4_t is_overflow = vcgeq_f32(x_nn, exp_max);
-      uint32x4_t is_underflow = vcltq_f32(x_nn, exp_min);
-      need_libm[i] =
-          vorrq_u32(vorrq_u32(is_overflow, is_underflow),
-                    vorrq_u32(is_nan,
-                              vorrq_u32(vceqq_f32(x[i], pos_inf),
-                                        vceqq_f32(x[i], neg_inf))));
-      any_libm = vorrq_u32(any_libm, need_libm[i]);
-      /* Evaluate the polynomial on sanitized inputs unconditionally: with
-       * the default -fno-trapping-math the compiler may speculate the
-       * vector path, so it must never see the raw out-of-range/NaN bit
-       * patterns, which would raise spurious FP flags. */
-      float32x4_t xs = vbslq_f32(need_libm[i], safe_val, x[i]);
-      result[i] = neon_exp2f_inline_core(xs, shift, exponent_bias, c0, c1, c2, c3, c4, d0, d1);
-    }
-    /* Lanes outside the polynomial's window (incl. NaN/inf) come from
-     * libm, which yields the exact scalar-path value and raises the
-     * overflow/underflow FP flags like the scalar path does. Deciding
-     * once per block keeps the common (all-in-window) case branch-free. */
-    if (__builtin_expect(neon_has_any_lane_u32(any_libm), 0)) {
-      for (int i = 0; i < UNROLL; i++) {
-        if (__builtin_expect(neon_has_any_lane_u32(need_libm[i]), 0)) {
-          float vals[4], outs[4];
-          uint32_t m[4];
-          vst1q_f32(vals, x[i]);
-          vst1q_f32(outs, result[i]);
-          vst1q_u32(m, need_libm[i]);
-          for (int j = 0; j < 4; j++)
-            if (m[j]) outs[j] = npy_exp2f(vals[j]);
-          result[i] = vld1q_f32(outs);
+HWY_ATTR static void
+simd_exp2_hwy_FLOAT(const npy_float *src, npy_intp ssrc,
+                    npy_float *dst, npy_intp sdst, npy_intp len)
+{
+    const auto D = exp2_f32;
+    const int nlanes = hn::Lanes(D);
+    const vec_e_f32 zero = hn::Zero(D);
+    const vec_e_f32 one = hn::Set(D, 1.0f);
+    const vec_e_f32 shift = hn::Set(D, 0x1.8p+23f);
+    const vec_e_u32 bias = hn::Set(exp2_u32, 0x3f800000u);
+    const vec_e_f32 c0 = hn::Set(D, 0x1.59977ap-10f);
+    const vec_e_f32 c1 = hn::Set(D, 0x1.3ce9e4p-7f);
+    const vec_e_f32 c2 = hn::Set(D, 0x1.c6bd32p-5f);
+    const vec_e_f32 c3 = hn::Set(D, 0x1.ebf9bcp-3f);
+    const vec_e_f32 c4 = hn::Set(D, 0x1.62e422p-1f);
+    const vec_e_f32 r_floor_even = hn::Set(D, 0x1p-21f);
+    /* expf_special: 2^n split into s1*s2; |n| > 192 overflows even split. */
+    const vec_e_u32 sp_offset = hn::Set(exp2_u32, 0x82000000u);
+    const vec_e_u32 sp_bias = hn::Set(exp2_u32, 0x7f000000u);
+    const vec_e_f32 scale_bound = hn::Set(D, 0x1.8p+7f);
+    const vec_e_u32 abs_mask = hn::Set(exp2_u32, 0x7fffffffu);
+    const vec_e_u32 inf_bits = hn::Set(exp2_u32, 0x7f800000u);
+    /* |x| >= 126.5 (AOR exp2f SpecialBound) as an unsigned abs-bits compare;
+     * the same ordering also separates NaN/inf (exponent bits all ones). */
+    const vec_e_u32 bound_bits = hn::Set(exp2_u32, 0x42fd0000u);
+
+    for (; len > 0; len -= nlanes, src += ssrc * nlanes, dst += sdst * nlanes) {
+        vec_e_f32 x = exp2_load_vector<vec_e_f32>(src, ssrc, len);
+        vec_e_u32 abs_bits = hn::And(hn::BitCast(exp2_u32, x), abs_mask);
+        auto naninf_m = hn::Ge(abs_bits, inf_bits);
+        auto special_any = hn::Ge(abs_bits, bound_bits);
+        /* Sanitize NaN/inf to 0 so the reduction never forms inf - inf
+         * (spurious invalid); they are patched back to constants below. */
+        vec_e_f32 xs = hn::IfThenElse(hn::RebindMask(D, naninf_m), zero, x);
+        /* exp2(x) = 2^n (1 + poly(r)), x = n + r, r in [-1/2, 1/2]. */
+        vec_e_f32 z = hn::Add(xs, shift);
+        vec_e_f32 n = hn::Sub(z, shift);
+        vec_e_f32 r = hn::Sub(xs, n);
+        vec_e_u32 e = hn::ShiftLeft<23>(hn::BitCast(exp2_u32, hn::NearestInt(n)));
+        vec_e_f32 scale = hn::BitCast(D, hn::Add(e, bias));
+        /* Floor |r| for the even powers so a tiny remainder cannot square
+         * into the subnormal range and raise a spurious underflow flag
+         * (the near-multiple lattice makes an |x| mask incomplete). */
+        vec_e_f32 r_even = hn::Max(hn::Abs(r), r_floor_even);
+        vec_e_f32 r2 = hn::Mul(r_even, r_even);
+        vec_e_f32 p = hn::MulAdd(r, c0, c1);
+        vec_e_f32 q = hn::MulAdd(r, c2, c3);
+        q = hn::MulAdd(p, r2, q);
+        /* poly = c4*r + q*r2; the FMA addend q*r2 (>= ~2^-44 after the
+         * even-power floor) keeps the result normal for tiny r. */
+        vec_e_f32 poly = hn::MulAdd(r, c4, hn::Mul(q, r2));
+
+        vec_e_f32 result;
+        if (__builtin_expect(!hn::AllFalse(exp2_u32, special_any), 0)) {
+            auto nan_m = hn::Gt(abs_bits, inf_bits);
+            auto inf_m = hn::Eq(abs_bits, inf_bits);
+            auto cmp = hn::And(special_any, hn::Lt(abs_bits, inf_bits));
+            /* Sanitize the reconstruction scale on overflow lanes so the
+             * main path never forms inf - inf (spurious invalid). */
+            vec_e_f32 scale_r = hn::IfThenElse(hn::RebindMask(D, cmp), one, scale);
+            result = hn::MulAdd(poly, scale_r, scale_r);
+            if (__builtin_expect(!hn::AllFalse(exp2_u32, cmp), 0)) {
+                /* s1*s2 bias split (AOR expf_special); OF/UF arise naturally.
+                 * NaN/inf were sanitized (cmp false) so never reach s1*s1. */
+                vec_e_u32 b = hn::IfThenElse(
+                    hn::RebindMask(exp2_u32, hn::Le(n, zero)),
+                    sp_offset, hn::Zero(exp2_u32));
+                vec_e_f32 s1 = hn::BitCast(D, hn::Add(b, sp_bias));
+                vec_e_f32 s2 = hn::BitCast(D, hn::Sub(e, b));
+                auto cmp2 = hn::Gt(hn::Abs(n), scale_bound);
+                /* s1*s1 overflows (n>0 -> s1=2^127) even on lanes where it
+                 * is not selected; sanitize so only |n|>192 lanes flag. */
+                vec_e_f32 s1_ov = hn::IfThenElse(cmp2, s1, one);
+                vec_e_f32 r_ov = hn::Mul(s1_ov, s1_ov);
+                vec_e_f32 r_sp = hn::Mul(hn::MulAdd(poly, s2, s2), s1);
+                vec_e_f32 sp_val = hn::IfThenElse(cmp2, r_ov, r_sp);
+                result = hn::IfThenElse(hn::RebindMask(D, cmp), sp_val, result);
+            }
+            /* NaN payload passthrough; +-inf -> constants (exp2(+inf)=+inf,
+             * exp2(-inf)=+0) without the split's spurious OF/UF. */
+            result = hn::IfThenElse(hn::RebindMask(D, nan_m), x, result);
+            result = hn::IfThenElse(hn::RebindMask(D, inf_m), hn::Max(x, zero), result);
+        } else {
+            result = hn::MulAdd(poly, scale, scale);
         }
-      }
+        exp2_store_vector<vec_e_f32>(result, dst, sdst, len);
     }
-
-    if (sdst == 1) {
-      for (int i = 0; i < UNROLL; i++)
-        vst1q_f32(outp + i * VEC_SIZE, result[i]);
-    } else {
-      for (int j = 0; j < UNROLL; j++) {
-        float tmp[VEC_SIZE];
-        vst1q_f32(tmp, result[j]);
-        for (int i = 0; i < VEC_SIZE; i++)
-          outp[(i + j * VEC_SIZE) * sdst] = tmp[i];
-      }
-    }
-
-    infp += ssrc * UNROLL * VEC_SIZE;
-    outp += sdst * UNROLL * VEC_SIZE;
-    remaining -= UNROLL * VEC_SIZE;
-  }
-
-  while (remaining > 0) {
-    int current_len = (remaining < VEC_SIZE) ? remaining : VEC_SIZE;
-    float32x4_t x;
-    if (ssrc == 1 && current_len == VEC_SIZE) {
-      x = vld1q_f32(infp);
-    } else {
-      float vals[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-      for (int i = 0; i < current_len; i++) vals[i] = infp[i * ssrc];
-      x = vld1q_f32(vals);
-    }
-
-    uint32x4_t is_nan = vmvnq_u32(vceqq_f32(x, x));
-    /* mask NaN lanes out of the inequality compares (see the main loop) */
-    float32x4_t x_nn = vbslq_f32(is_nan, vdupq_n_f32(0.0f), x);
-    uint32x4_t is_overflow = vcgeq_f32(x_nn, exp_max);
-    uint32x4_t is_underflow = vcltq_f32(x_nn, exp_min);
-    uint32x4_t need_libm = vorrq_u32(vorrq_u32(is_overflow, is_underflow),
-                                     vorrq_u32(is_nan,
-                                               vorrq_u32(vceqq_f32(x, pos_inf),
-                                                         vceqq_f32(x, neg_inf))));
-
-    /* sanitized polynomial evaluation (see the main loop) */
-    const float32x4_t safe_val = vdupq_n_f32(0.0f);
-    float32x4_t xs = vbslq_f32(need_libm, safe_val, x);
-    float32x4_t result = neon_exp2f_inline_core(xs, shift, exponent_bias, c0, c1, c2, c3, c4, d0, d1);
-    if (__builtin_expect(neon_has_any_lane_u32(need_libm), 0)) {
-      float vals[4], outs[4];
-      uint32_t m[4];
-      vst1q_f32(vals, x);
-      vst1q_f32(outs, result);
-      vst1q_u32(m, need_libm);
-      for (int j = 0; j < current_len; j++)
-        if (m[j]) outs[j] = npy_exp2f(vals[j]);
-      result = vld1q_f32(outs);
-    }
-
-    if (sdst == 1) {
-      if (current_len == 1) vst1q_lane_f32(outp, result, 0);
-      else if (current_len == 2) vst1_f32(outp, vget_low_f32(result));
-      else if (current_len == 3) {
-        vst1q_lane_f32(outp, result, 0);
-        vst1q_lane_f32(outp + 1, result, 1);
-        vst1q_lane_f32(outp + 2, result, 2);
-      } else vst1q_f32(outp, result);
-    } else {
-      float tmp[4];
-      vst1q_f32(tmp, result);
-      for (int i = 0; i < current_len; i++) outp[i * sdst] = tmp[i];
-    }
-
-    infp += ssrc * current_len;
-    outp += sdst * current_len;
-    remaining -= current_len;
-  }
 }
 
 static inline float64x2_t __attribute__((always_inline))
@@ -392,307 +350,10 @@ simd_exp2_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
   }
 }
 
-static inline void
-simd_exp2_neon_HALF_stride2(const npy_half *src, npy_intp ssrc,
-                             npy_half *dst, npy_intp sdst, npy_intp len)
-{
-  const float32x4_t pos_inf_v = vdupq_n_f32(NPY_INFINITYF);
-  const float32x4_t neg_inf_v = vdupq_n_f32(-NPY_INFINITYF);
-  const float32x4_t shift_v = vdupq_n_f32(0x1.8p+23f);
-  const uint32x4_t bias_v = vdupq_n_u32(0x3f800000);
-  /* half precision results overflow past 2^16 and go subnormal below
-   * 2^-14; lanes outside that window (incl. NaN/inf) fall back to libm
-   * plus software conversion, matching the scalar path for both value
-   * and FP flags */
-  const float32x4_t exp_max_v = vdupq_n_f32(16.0f);
-  const float32x4_t exp_min_v = vdupq_n_f32(-14.0f);
-  const float32x4_t c0_v = vdupq_n_f32(0x1.5d95e6p-10f);
-  const float32x4_t c1_v = vdupq_n_f32(0x1.3b29f4p-7f);
-  const float32x4_t c2_v = vdupq_n_f32(0x1.c6b08p-5f);
-  const float32x4_t c3_v = vdupq_n_f32(0x1.ebfbe0p-3f);
-  const float32x4_t c4_v = vdupq_n_f32(0x1.62e430p-1f);
-  const float32x4_t d0_v = vdupq_n_f32(0x1.f1a68ap-17f);
-  const float32x4_t d1_v = vdupq_n_f32(0x1.44627p-13f);
-
-  const npy_half *infp = src;
-  npy_half *outp = dst;
-  npy_intp remaining = len;
-
-  while (remaining >= 16) {
-
-    float32x4_t x[4], result[4];
-    for (int k = 0; k < 4; k++) {
-      uint16_t h_raw[4];
-      for (int j = 0; j < 4; j++)
-        h_raw[j] = infp[(k * 4 + j) * ssrc];
-      x[k] = vcvt_f32_f16(vld1_f16((const float16_t *)h_raw));
-    }
-
-    const float32x4_t safe_val = vdupq_n_f32(0.0f);
-    uint32_t libm_mask[16];
-    uint32x4_t any_libm = vdupq_n_u32(0);
-    for (int k = 0; k < 4; k++) {
-      uint32x4_t is_nan = vmvnq_u32(vceqq_f32(x[k], x[k]));
-      /* mask NaN lanes out of the inequality compares (see the FLOAT
-       * kernel) */
-      float32x4_t x_nn = vbslq_f32(is_nan, vdupq_n_f32(0.0f), x[k]);
-      uint32x4_t is_overflow = vcgeq_f32(x_nn, exp_max_v);
-      uint32x4_t is_underflow = vcltq_f32(x_nn, exp_min_v);
-      uint32x4_t need_libm =
-          vorrq_u32(vorrq_u32(is_overflow, is_underflow),
-                    vorrq_u32(is_nan,
-                              vorrq_u32(vceqq_f32(x[k], pos_inf_v),
-                                        vceqq_f32(x[k], neg_inf_v))));
-      any_libm = vorrq_u32(any_libm, need_libm);
-      /* sanitized polynomial evaluation (speculation-safe, see the FLOAT
-       * kernel); lanes routed to libm keep a placeholder (exp2(0) == 1.0)
-       * that converts to half precision without raising FP flags */
-      float32x4_t xs = vbslq_f32(need_libm, safe_val, x[k]);
-      result[k] = neon_exp2f_inline_core(xs, shift_v, bias_v,
-                                           c0_v, c1_v, c2_v, c3_v, c4_v, d0_v, d1_v);
-      vst1q_u32(&libm_mask[k * 4], need_libm);
-    }
-
-    /* save the raw inputs before the store below: when the views overlap
-     * (src == dst with matching strides) the vector store overwrites
-     * them, and the libm fixup must not re-read the clobbered memory */
-    float xin[16];
-    for (int k = 0; k < 4; k++)
-      vst1q_f32(&xin[k * 4], x[k]);
-
-    for (int k = 0; k < 4; k++) {
-      float16x4_t rh = vcvt_f16_f32(result[k]);
-      for (int j = 0; j < 4; j++) {
-        union { float16_t f; npy_half h; } u;
-        u.f = vget_lane_f16(rh, j);
-        outp[(k * 4 + j) * sdst] = u.h;
-      }
-    }
-    /* libm-routed lanes: software evaluation + conversion, matching the
-     * scalar path for value and FP flags (npy_float_to_half raises the
-     * same legitimate OFC/UFC conversion flags as the vector vcvt);
-     * the single any-lane check keeps clean blocks branch-free */
-    if (__builtin_expect(neon_has_any_lane_u32(any_libm), 0)) {
-      for (int j = 0; j < 16; j++)
-        if (libm_mask[j])
-          outp[j * sdst] = npy_float_to_half(npy_exp2f(xin[j]));
-    }
-
-    infp += ssrc * 16;
-    outp += sdst * 16;
-    remaining -= 16;
-  }
-
-  while (remaining >= 4) {
-    uint16_t h_raw[4];
-    for (int j = 0; j < 4; j++)
-      h_raw[j] = infp[j * ssrc];
-    float32x4_t x = vcvt_f32_f16(vld1_f16((const float16_t *)h_raw));
-
-    uint32x4_t is_nan = vmvnq_u32(vceqq_f32(x, x));
-    /* mask NaN lanes out of the inequality compares (see the FLOAT
-     * kernel) */
-    float32x4_t x_nn = vbslq_f32(is_nan, vdupq_n_f32(0.0f), x);
-    uint32x4_t is_overflow = vcgeq_f32(x_nn, exp_max_v);
-    uint32x4_t is_underflow = vcltq_f32(x_nn, exp_min_v);
-    uint32x4_t need_libm = vorrq_u32(vorrq_u32(is_overflow, is_underflow),
-                                     vorrq_u32(is_nan,
-                                               vorrq_u32(vceqq_f32(x, pos_inf_v),
-                                                         vceqq_f32(x, neg_inf_v))));
-
-    /* sanitized polynomial evaluation (see the 16-wide loop above) */
-    const float32x4_t safe_val = vdupq_n_f32(0.0f);
-    float32x4_t xs = vbslq_f32(need_libm, safe_val, x);
-    float32x4_t result = neon_exp2f_inline_core(xs, shift_v, bias_v,
-                                                  c0_v, c1_v, c2_v, c3_v, c4_v, d0_v, d1_v);
-
-    /* save the raw inputs before the store below (see the 16-wide loop) */
-    float xin[4];
-    vst1q_f32(xin, x);
-
-    float16x4_t rh = vcvt_f16_f32(result);
-    for (int j = 0; j < 4; j++) {
-      union { float16_t f; npy_half h; } u;
-      u.f = vget_lane_f16(rh, j);
-      outp[j * sdst] = u.h;
-    }
-    /* libm-routed lanes: software evaluation + conversion (see above);
-     * the single any-lane check keeps clean blocks branch-free */
-    if (__builtin_expect(neon_has_any_lane_u32(need_libm), 0)) {
-      uint32_t libm_mask[4];
-      vst1q_u32(libm_mask, need_libm);
-      for (int j = 0; j < 4; j++)
-        if (libm_mask[j])
-          outp[j * sdst] = npy_float_to_half(npy_exp2f(xin[j]));
-    }
-
-    infp += ssrc * 4;
-    outp += sdst * 4;
-    remaining -= 4;
-  }
-
-  for (npy_intp i = 0; i < remaining; i++) {
-    outp[i * sdst] = npy_float_to_half(npy_exp2f(npy_half_to_float(infp[i * ssrc])));
-  }
-}
-
-static inline void
-simd_exp2_neon_HALF_stride1(const npy_half *src, npy_half *dst, npy_intp len)
-{
-  const float32x4_t pos_inf_v = vdupq_n_f32(NPY_INFINITYF);
-  const float32x4_t neg_inf_v = vdupq_n_f32(-NPY_INFINITYF);
-  const float32x4_t shift_v = vdupq_n_f32(0x1.8p+23f);
-  const uint32x4_t bias_v = vdupq_n_u32(0x3f800000);
-  /* half precision results overflow past 2^16 and go subnormal below
-   * 2^-14; lanes outside that window (incl. NaN/inf) fall back to libm
-   * plus software conversion, matching the scalar path for both value
-   * and FP flags */
-  const float32x4_t exp_max_v = vdupq_n_f32(16.0f);
-  const float32x4_t exp_min_v = vdupq_n_f32(-14.0f);
-  const float32x4_t c0_v = vdupq_n_f32(0x1.5d95e6p-10f);
-  const float32x4_t c1_v = vdupq_n_f32(0x1.3b29f4p-7f);
-  const float32x4_t c2_v = vdupq_n_f32(0x1.c6b08p-5f);
-  const float32x4_t c3_v = vdupq_n_f32(0x1.ebfbe0p-3f);
-  const float32x4_t c4_v = vdupq_n_f32(0x1.62e430p-1f);
-  const float32x4_t d0_v = vdupq_n_f32(0x1.f1a68ap-17f);
-  const float32x4_t d1_v = vdupq_n_f32(0x1.44627p-13f);
-
-  const npy_half *infp = src;
-  npy_half *outp = dst;
-  npy_intp remaining = len;
-
-  while (remaining >= 16) {
-
-    float16x8_t h0 = vld1q_f16((const float16_t *)infp);
-    float16x8_t h1 = vld1q_f16((const float16_t *)(infp + 8));
-
-    float32x4_t x[4], res[4];
-
-    x[0] = vcvt_f32_f16(vget_low_f16(h0));
-    x[1] = vcvt_f32_f16(vget_high_f16(h0));
-    x[2] = vcvt_f32_f16(vget_low_f16(h1));
-    x[3] = vcvt_f32_f16(vget_high_f16(h1));
-
-    const float32x4_t safe_val = vdupq_n_f32(0.0f);
-    uint32_t libm_mask[16];
-    uint32x4_t any_libm = vdupq_n_u32(0);
-    for (int k = 0; k < 4; k++) {
-      uint32x4_t is_nan = vmvnq_u32(vceqq_f32(x[k], x[k]));
-      /* mask NaN lanes out of the inequality compares (see the FLOAT
-       * kernel) */
-      float32x4_t x_nn = vbslq_f32(is_nan, vdupq_n_f32(0.0f), x[k]);
-      uint32x4_t is_overflow = vcgeq_f32(x_nn, exp_max_v);
-      uint32x4_t is_underflow = vcltq_f32(x_nn, exp_min_v);
-      uint32x4_t need_libm =
-          vorrq_u32(vorrq_u32(is_overflow, is_underflow),
-                    vorrq_u32(is_nan,
-                              vorrq_u32(vceqq_f32(x[k], pos_inf_v),
-                                        vceqq_f32(x[k], neg_inf_v))));
-      any_libm = vorrq_u32(any_libm, need_libm);
-      /* sanitized polynomial evaluation (speculation-safe, see the FLOAT
-       * kernel); lanes routed to libm keep a placeholder (exp2(0) == 1.0)
-       * that converts to half precision without raising FP flags */
-      float32x4_t xs = vbslq_f32(need_libm, safe_val, x[k]);
-      res[k] = neon_exp2f_inline_core(xs, shift_v, bias_v, c0_v, c1_v, c2_v, c3_v, c4_v, d0_v, d1_v);
-      vst1q_u32(&libm_mask[k * 4], need_libm);
-    }
-
-    /* save the raw inputs before the store below: when src == dst the
-     * vector store overwrites them, and the libm fixup must not re-read
-     * the clobbered memory */
-    float xin[16];
-    for (int k = 0; k < 4; k++)
-      vst1q_f32(&xin[k * 4], x[k]);
-
-    float16x4_t rh[4];
-    for (int k = 0; k < 4; k++)
-      rh[k] = vcvt_f16_f32(res[k]);
-    for (int k = 0; k < 2; k++)
-      vst1q_f16((float16_t *)(outp + k * 8), vcombine_f16(rh[k*2], rh[k*2+1]));
-    /* libm-routed lanes: evaluate and convert per lane. npy_float_to_half
-     * raises the same legitimate OFC/UFC conversion flags as the vector
-     * vcvt above (aarch64 uses the same hardware fcvt), keeping the
-     * array path in flag parity with the scalar path for the
-     * out-of-half-range results; the single any-lane check keeps clean
-     * blocks branch-free */
-    if (__builtin_expect(neon_has_any_lane_u32(any_libm), 0)) {
-      for (int j = 0; j < 16; j++)
-        if (libm_mask[j])
-          outp[j] = npy_float_to_half(npy_exp2f(xin[j]));
-    }
-
-    infp += 16;
-    outp += 16;
-    remaining -= 16;
-  }
-
-  while (remaining >= 8) {
-    float16x8_t h0 = vld1q_f16((const float16_t *)infp);
-    float32x4_t x[2], res[2];
-
-    x[0] = vcvt_f32_f16(vget_low_f16(h0));
-    x[1] = vcvt_f32_f16(vget_high_f16(h0));
-
-    const float32x4_t safe_val = vdupq_n_f32(0.0f);
-    uint32_t libm_mask[8];
-    uint32x4_t any_libm = vdupq_n_u32(0);
-    for (int k = 0; k < 2; k++) {
-      uint32x4_t is_nan = vmvnq_u32(vceqq_f32(x[k], x[k]));
-      /* mask NaN lanes out of the inequality compares (see the FLOAT
-       * kernel) */
-      float32x4_t x_nn = vbslq_f32(is_nan, vdupq_n_f32(0.0f), x[k]);
-      uint32x4_t is_overflow = vcgeq_f32(x_nn, exp_max_v);
-      uint32x4_t is_underflow = vcltq_f32(x_nn, exp_min_v);
-      uint32x4_t need_libm =
-          vorrq_u32(vorrq_u32(is_overflow, is_underflow),
-                    vorrq_u32(is_nan,
-                              vorrq_u32(vceqq_f32(x[k], pos_inf_v),
-                                        vceqq_f32(x[k], neg_inf_v))));
-      any_libm = vorrq_u32(any_libm, need_libm);
-      /* sanitized polynomial evaluation (see the 16-wide loop above) */
-      float32x4_t xs = vbslq_f32(need_libm, safe_val, x[k]);
-      res[k] = neon_exp2f_inline_core(xs, shift_v, bias_v, c0_v, c1_v, c2_v, c3_v, c4_v, d0_v, d1_v);
-      vst1q_u32(&libm_mask[k * 4], need_libm);
-    }
-
-    /* save the raw inputs before the store below (see the 16-wide loop) */
-    float xin[8];
-    for (int k = 0; k < 2; k++)
-      vst1q_f32(&xin[k * 4], x[k]);
-
-    float16x4_t rh[2];
-    for (int k = 0; k < 2; k++)
-      rh[k] = vcvt_f16_f32(res[k]);
-    vst1q_f16((float16_t *)outp, vcombine_f16(rh[0], rh[1]));
-    /* libm-routed lanes: software evaluation + conversion (see above) */
-    if (__builtin_expect(neon_has_any_lane_u32(any_libm), 0)) {
-      for (int j = 0; j < 8; j++)
-        if (libm_mask[j])
-          outp[j] = npy_float_to_half(npy_exp2f(xin[j]));
-    }
-
-    infp += 8;
-    outp += 8;
-    remaining -= 8;
-  }
-
-  for (npy_intp i = 0; i < remaining; i++) {
-    outp[i] = npy_float_to_half(npy_exp2f(npy_half_to_float(infp[i])));
-  }
-}
-
 static void __attribute__((optimize("O3")))
 simd_exp2_neon_HALF(const npy_half *src, npy_intp ssrc,
                      npy_half *dst, npy_intp sdst, npy_intp len)
 {
-  if (ssrc == 1 && sdst == 1) {
-    simd_exp2_neon_HALF_stride1(src, dst, len);
-    return;
-  }
-  if ((ssrc == 2 || ssrc == 4) && (sdst == 2 || sdst == 4)) {
-    simd_exp2_neon_HALF_stride2(src, ssrc, dst, sdst, len);
-    return;
-  }
   const npy_intp LARGE_BLOCK = 8192;
   const npy_intp SMALL_BLOCK = 256;
   const npy_intp VEC_SIZE = 8;
@@ -754,7 +415,7 @@ simd_exp2_neon_HALF(const npy_half *src, npy_intp ssrc,
       src_buf[i] = npy_half_to_float(block_src[i * ssrc]);
     }
     
-    simd_exp2_neon_FLOAT(src_buf, 1, dst_buf, 1, block_len);
+    simd_exp2_hwy_FLOAT(src_buf, 1, dst_buf, 1, block_len);
     
     i = 0;
     /* The vectorized f32->f16 narrowing conversion raises OFC/UFC for
@@ -922,7 +583,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_exp2)
         const npy_intp ssrc = steps[0] / sizeof(npy_float);
         const npy_intp sdst = steps[1] / sizeof(npy_float);
         if (ssrc <= 2) {
-            simd_exp2_neon_FLOAT(src, ssrc, dst, sdst, len);
+            simd_exp2_hwy_FLOAT(src, ssrc, dst, sdst, len);
         } else {
             const npy_float * __restrict ip = src;
             npy_float * __restrict op = dst;
@@ -935,7 +596,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_exp2)
     }
     else {
         UNARY_LOOP {
-            simd_exp2_neon_FLOAT((npy_float *)ip1, 1, (npy_float *)op1, 1, 1);
+            simd_exp2_hwy_FLOAT((npy_float *)ip1, 1, (npy_float *)op1, 1, 1);
         }
     }
     return;

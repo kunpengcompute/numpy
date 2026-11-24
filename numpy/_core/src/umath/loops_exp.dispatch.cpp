@@ -456,8 +456,160 @@ AVX512F_exp_DOUBLE(npy_double * op,
 
 
 #if SIMD_ARM
+#include "simd/simd.hpp"
+#include <hwy/highway.h>
+namespace hn = hwy::HWY_NAMESPACE;
 
-static void
+/* ---- Highway (Google Highway) AOR advsimd exp kernels --------------------
+ * Algorithm ported from ARM optimized-routines math/aarch64/advsimd/expf.c
+ * and exp.c (MIT OR Apache-2.0 WITH LLVM-exception), expressed with Highway
+ * scalable vectors following the official numpy SIMD mode (ScalableTag +
+ * HWY_ATTR, LoadN/StoreN/GatherIndexN tails, GatherIndex table lookup).
+ *
+ * Copyright (c) 2019-2026, Arm Limited.
+ * SPDX-License-Identifier: MIT OR Apache-2.0 WITH LLVM-exception
+ *
+ * numpy contract adaptations (see PR #200 / commit c73289f):
+ *  - NaN sign+payload passthrough; +-inf mapped to constants. NaN/inf lanes
+ *    are sanitized to 0 before the reduction so inf - inf never raises a
+ *    spurious invalid, and the s1*s1 overflow term is sanitized so lanes
+ *    where it is not selected never flag.
+ *  - the s1*s2 bias-split special path keeps OF/UF raised naturally by the
+ *    split arithmetic (no libm, no manual flag writes).
+ *  - f32 tiny-remainder product flooring (|r|>=2^-21 even powers); f64 tiny
+ *    nonzero |x|<2^-30 routed to the special path (1 + x*ln2 / 1 + x).
+ */
+const hn::ScalableTag<float> exp_f32;
+const hn::ScalableTag<int32_t> exp_s32;
+const hn::ScalableTag<uint32_t> exp_u32;
+using vec_x_f32 = hn::Vec<decltype(exp_f32)>;
+using vec_x_s32 = hn::Vec<decltype(exp_s32)>;
+using vec_x_u32 = hn::Vec<decltype(exp_u32)>;
+
+const hn::ScalableTag<double> exp_f64;
+const hn::ScalableTag<int64_t> exp_s64;
+const hn::ScalableTag<uint64_t> exp_u64;
+using vec_x_f64 = hn::Vec<decltype(exp_f64)>;
+using vec_x_s64 = hn::Vec<decltype(exp_s64)>;
+using vec_x_u64 = hn::Vec<decltype(exp_u64)>;
+
+template <typename vtype, typename type_t>
+HWY_ATTR NPY_FINLINE vtype
+exp_load_vector(type_t *src, npy_intp ssrc, npy_intp len)
+{
+    auto D = hn::DFromV<vtype>();
+    using DI = hn::RebindToSigned<decltype(D)>;
+    DI di;
+    auto indices = hn::Mul(hn::Iota(di, 0), hn::Set(di, ssrc));
+    if (len < hn::Lanes(D)) {
+        if (ssrc == 1) return hn::LoadN(D, src, len);
+        return hn::GatherIndexN(D, src, indices, len);
+    }
+    if (ssrc == 1) return hn::LoadU(D, src);
+    return hn::GatherIndex(D, src, indices);
+}
+
+template <typename vtype, typename type_t>
+HWY_ATTR NPY_FINLINE void
+exp_store_vector(vtype vec, type_t *dst, npy_intp sdst, npy_intp len)
+{
+    auto D = hn::DFromV<vtype>();
+    using DI = hn::RebindToSigned<decltype(D)>;
+    DI di;
+    auto indices = hn::Mul(hn::Iota(di, 0), hn::Set(di, sdst));
+    if (len < hn::Lanes(D)) {
+        if (sdst == 1) { hn::StoreN(vec, D, dst, len); return; }
+        hn::ScatterIndexN(vec, D, dst, indices, len);
+        return;
+    }
+    if (sdst == 1) { hn::StoreU(vec, D, dst); return; }
+    hn::ScatterIndex(vec, D, dst, indices);
+}
+
+HWY_ATTR static void
+simd_exp_hwy_FLOAT(const npy_float *src, npy_intp ssrc,
+                   npy_float *dst, npy_intp sdst, npy_intp len)
+{
+    const auto D = exp_f32;
+    const int nlanes = hn::Lanes(D);
+    const vec_x_f32 zero = hn::Zero(D);
+    const vec_x_f32 one = hn::Set(D, 1.0f);
+    const vec_x_f32 shift = hn::Set(D, 0x1.8p+23f);
+    const vec_x_u32 bias = hn::Set(exp_u32, 0x3f800000u);
+    const vec_x_f32 inv_ln2 = hn::Set(D, 0x1.715476p+0f);
+    const vec_x_f32 ln2_hi = hn::Set(D, -0x1.62e4p-1f);
+    const vec_x_f32 ln2_lo = hn::Set(D, -0x1.7f7d1cp-20f);
+    const vec_x_f32 c0 = hn::Set(D, 0x1.0e4020p-7f);
+    const vec_x_f32 c1 = hn::Set(D, 0x1.573e2ep-5f);
+    const vec_x_f32 c2 = hn::Set(D, 0x1.555e66p-3f);
+    const vec_x_f32 c3 = hn::Set(D, 0x1.fffdb6p-2f);
+    const vec_x_f32 c4 = hn::Set(D, 0x1.ffffecp-1f);
+    const vec_x_f32 r_floor_even = hn::Set(D, 0x1p-21f);
+    const vec_x_u32 sp_offset = hn::Set(exp_u32, 0x82000000u);
+    const vec_x_u32 sp_bias = hn::Set(exp_u32, 0x7f000000u);
+    const vec_x_f32 scale_bound = hn::Set(D, 0x1.8p+7f);
+    const vec_x_u32 abs_mask = hn::Set(exp_u32, 0x7fffffffu);
+    const vec_x_u32 inf_bits = hn::Set(exp_u32, 0x7f800000u);
+    const vec_x_u32 bound_bits = hn::Set(exp_u32, 0x42af5dc2u); /* ~87.683 */
+
+    for (; len > 0; len -= nlanes, src += ssrc * nlanes, dst += sdst * nlanes) {
+        vec_x_f32 x = exp_load_vector<vec_x_f32>(src, ssrc, len);
+        vec_x_u32 abs_bits = hn::And(hn::BitCast(exp_u32, x), abs_mask);
+        auto special_m = hn::Ge(abs_bits, bound_bits);
+        vec_x_f32 result;
+        if (__builtin_expect(!hn::AllFalse(exp_u32, special_m), 0)) {
+            auto nan_m = hn::Gt(abs_bits, inf_bits);
+            auto inf_m = hn::Eq(abs_bits, inf_bits);
+            auto cmp = hn::And(special_m, hn::Lt(abs_bits, inf_bits));
+            vec_x_f32 xs = hn::IfThenElse(
+                hn::RebindMask(D, hn::Or(nan_m, inf_m)), zero, x);
+            vec_x_f32 z = hn::MulAdd(xs, inv_ln2, shift);
+            vec_x_f32 n = hn::Sub(z, shift);
+            vec_x_f32 r = hn::MulAdd(n, ln2_hi, xs);
+            r = hn::MulAdd(n, ln2_lo, r);
+            vec_x_u32 e = hn::ShiftLeft<23>(hn::BitCast(exp_u32, hn::NearestInt(n)));
+            vec_x_f32 scale = hn::BitCast(D, hn::Add(e, bias));
+            vec_x_f32 r_even = hn::Max(hn::Abs(r), r_floor_even);
+            vec_x_f32 r2 = hn::Mul(r_even, r_even);
+            vec_x_f32 p = hn::MulAdd(r, c0, c1);
+            vec_x_f32 q = hn::MulAdd(r, c2, c3);
+            q = hn::MulAdd(p, r2, q);
+            vec_x_f32 poly = hn::MulAdd(r, c4, hn::Mul(q, r2));
+            vec_x_f32 scale_r = hn::IfThenElse(hn::RebindMask(D, cmp), one, scale);
+            result = hn::MulAdd(poly, scale_r, scale_r);
+            if (__builtin_expect(!hn::AllFalse(exp_u32, cmp), 0)) {
+                vec_x_u32 b = hn::IfThenElse(
+                    hn::RebindMask(exp_u32, hn::Le(n, zero)),
+                    sp_offset, hn::Zero(exp_u32));
+                vec_x_f32 s1 = hn::BitCast(D, hn::Add(b, sp_bias));
+                vec_x_f32 s2 = hn::BitCast(D, hn::Sub(e, b));
+                auto cmp2 = hn::Gt(hn::Abs(n), scale_bound);
+                vec_x_f32 s1_ov = hn::IfThenElse(cmp2, s1, one);
+                vec_x_f32 r_ov = hn::Mul(s1_ov, s1_ov);
+                vec_x_f32 r_sp = hn::Mul(hn::MulAdd(poly, s2, s2), s1);
+                vec_x_f32 sp_val = hn::IfThenElse(cmp2, r_ov, r_sp);
+                result = hn::IfThenElse(hn::RebindMask(D, cmp), sp_val, result);
+            }
+            result = hn::IfThenElse(hn::RebindMask(D, nan_m), x, result);
+            result = hn::IfThenElse(hn::RebindMask(D, inf_m), hn::Max(x, zero), result);
+        } else {
+            vec_x_f32 z = hn::MulAdd(x, inv_ln2, shift);
+            vec_x_f32 n = hn::Sub(z, shift);
+            vec_x_f32 r = hn::MulAdd(n, ln2_hi, x);
+            r = hn::MulAdd(n, ln2_lo, r);
+            vec_x_u32 e = hn::ShiftLeft<23>(hn::BitCast(exp_u32, hn::NearestInt(n)));
+            vec_x_f32 scale = hn::BitCast(D, hn::Add(e, bias));
+            vec_x_f32 r_even = hn::Max(hn::Abs(r), r_floor_even);
+            vec_x_f32 r2 = hn::Mul(r_even, r_even);
+            vec_x_f32 p = hn::MulAdd(r, c0, c1);
+            vec_x_f32 q = hn::MulAdd(r, c2, c3);
+            q = hn::MulAdd(p, r2, q);
+            vec_x_f32 poly = hn::MulAdd(r, c4, hn::Mul(q, r2));
+            result = hn::MulAdd(poly, scale, scale);
+        }
+        exp_store_vector<vec_x_f32>(result, dst, sdst, len);
+    }
+}static void
 simd_exp_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
                        npy_double *dst, npy_intp sdst, npy_intp len)
 {
@@ -651,203 +803,6 @@ simd_exp_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
 }
 
 static void
-simd_exp_neon_FLOAT(const npy_float *src, npy_intp ssrc,
-                     npy_float *dst, npy_intp sdst, npy_intp len)
-{
-  const float32x4_t ln2_hi = vdupq_n_f32(0x1.62e4p-1f);
-  const float32x4_t ln2_lo = vdupq_n_f32(0x1.7f7d1cp-20f);
-  const float32x4_t c0 = vdupq_n_f32(0x1.111112p-7f);
-  const float32x4_t c1 = vdupq_n_f32(0x1.555556p-5f);
-  const float32x4_t c2 = vdupq_n_f32(0x1.555556p-3f);
-  const float32x4_t c3 = vdupq_n_f32(0x1.0p-1f);
-  const float32x4_t c4 = vdupq_n_f32(0x1.0p+0f);
-  const float32x4_t c5 = vdupq_n_f32(0x1.6c16c16cp-10f);
-  const uint32x4_t exponent_bias = vdupq_n_u32(0x3f800000);
-  /*
-   * exp(x) = 2^n * e^r with x = n*ln2 + r and r in +-ln2/2; the scale is
-   * assembled from the exponent bit-trick, which only produces a
-   * normal scale while -126 <= n < 128 (i.e. -87.3 <= x < 88.4); past
-   * the top scale becomes the inf bit pattern and the reconstruction
-   * degrades to NaN (inf - inf).  Lanes outside the window (incl.
-   * +-inf and NaN) are evaluated via libm, which yields the exact
-   * scalar-path value (subnormals included) and raises the
-   * overflow/underflow FP flags like the scalar path does.
-   */
-  const float32x4_t shift = vdupq_n_f32(0x1.8p+23f);
-  const float32x4_t inv_ln2 = vdupq_n_f32(0x1.715476p+0f);
-  const float32x4_t poly_min = vdupq_n_f32(-87.0f);
-  /* 88.0 keeps the n >= 128 (scale = 2^128 = inf, NaN via inf-inf) zone
-   * routed to libm; glibc returns finite FLT_MAX-adjacent values there */
-  const float32x4_t poly_max = vdupq_n_f32(88.0f);
-  /* The even-power products r2/r4/r6 are floored at |r| >= 2^-21 (see
-   * the polynomial evaluation below): a tiny in-band r -- a tiny x, or
-   * an x near a multiple of ln2 after range reduction -- would
-   * otherwise square into the subnormal range and raise a spurious
-   * underflow flag, while the floored terms stay < 2^-42 and cannot
-   * change the rounded result.  The linear term is c4 * r with
-   * c4 == 1.0, exact even for subnormal r, so no libm routing is
-   * needed for the tiny zone. */
-  const float32x4_t r_floor = vdupq_n_f32(0x1p-21f);
-
-  const npy_float *infp = src;
-  npy_float *outp = dst;
-  npy_intp remaining = len;
-
-  const npy_intp UNROLL = 8;
-  const npy_intp VEC_SIZE = 4;
-
-  while (remaining >= UNROLL * VEC_SIZE) {
-    float32x4_t x[UNROLL], result[UNROLL];
-
-    if (ssrc == 1) {
-      __builtin_prefetch(infp + 128, 0, 3);
-      for (int i = 0; i < UNROLL; i++)
-        x[i] = vld1q_f32(infp + i * VEC_SIZE);
-    } else {
-      for (int i = 0; i < UNROLL; i++) {
-        float vals[4];
-        for (int j = 0; j < 4; j++) vals[j] = infp[(i*4+j) * ssrc];
-        x[i] = vld1q_f32(vals);
-      }
-    }
-
-    uint32x4_t any_libm = vdupq_n_u32(0);
-    uint32x4_t need_libm[UNROLL];
-    for (int i = 0; i < UNROLL; i++) {
-      uint32x4_t is_nan = vmvnq_u32(vceqq_f32(x[i], x[i]));
-      /* mask NaN lanes out of the window compares (FCMGT/FCMLT raise
-       * IOC on QNaN lanes, unlike vceqq) */
-      float32x4_t x_nn = vbslq_f32(is_nan, vdupq_n_f32(0.0f), x[i]);
-      need_libm[i] =
-          vorrq_u32(vorrq_u32(vcgtq_f32(x_nn, poly_max),
-                              vcltq_f32(x_nn, poly_min)),
-                    is_nan);
-      any_libm = vorrq_u32(any_libm, need_libm[i]);
-    }
-
-    const float32x4_t safe_val = vdupq_n_f32(0.0f);
-    for (int i = 0; i < UNROLL; i++) {
-      /* sanitized polynomial evaluation (speculation-safe) */
-      float32x4_t xs = vbslq_f32(need_libm[i], safe_val, x[i]);
-      float32x4_t z = vfmaq_f32(shift, xs, inv_ln2);
-      float32x4_t n = vsubq_f32(z, shift);
-      float32x4_t r = vfmsq_f32(vfmsq_f32(xs, n, ln2_hi), n, ln2_lo);
-      int32x4_t ni = vcvtq_s32_f32(n);
-      uint32x4_t e = vshlq_n_u32(vreinterpretq_u32_s32(ni), 23);
-      float32x4_t scale = vreinterpretq_f32_u32(vaddq_u32(e, exponent_bias));
-      float32x4_t r_even = vmaxq_f32(vabsq_f32(r), r_floor);
-      float32x4_t r2 = vmulq_f32(r_even, r_even);
-      float32x4_t r4 = vmulq_f32(r2, r2);
-      float32x4_t p = vfmaq_f32(c1, r, c0);
-      float32x4_t q = vfmaq_f32(c3, r, c2);
-      q = vfmaq_f32(q, p, r2);
-      float32x4_t poly = vfmaq_f32(vmulq_f32(c4, r), q, r2);
-      float32x4_t r6 = vmulq_f32(r4, r2);
-      poly = vfmaq_f32(poly, c5, r6);
-      result[i] = vfmaq_f32(scale, poly, scale);
-    }
-    /* out-of-window lanes (incl. NaN/inf) come from libm; decided once
-     * per block so the common case stays branch-free */
-    if (__builtin_expect(neon_has_any_lane_u32(any_libm), 0)) {
-      for (int i = 0; i < UNROLL; i++) {
-        if (__builtin_expect(neon_has_any_lane_u32(need_libm[i]), 0)) {
-          float vals[4], outs[4];
-          uint32_t m[4];
-          vst1q_f32(vals, x[i]);
-          vst1q_f32(outs, result[i]);
-          vst1q_u32(m, need_libm[i]);
-          for (int j = 0; j < 4; j++)
-            if (m[j]) outs[j] = npy_expf(vals[j]);
-          result[i] = vld1q_f32(outs);
-        }
-      }
-    }
-
-    if (sdst == 1) {
-      __builtin_prefetch(outp + 128, 1, 3);
-      for (int i = 0; i < UNROLL; i++)
-        vst1q_f32(outp + i * VEC_SIZE, result[i]);
-    } else {
-      for (int i = 0; i < UNROLL; i++) {
-        for (int j = 0; j < 4; j++)
-          outp[(i*4+j) * sdst] = vgetq_lane_f32(result[i], j);
-      }
-    }
-
-    infp += ssrc * UNROLL * VEC_SIZE;
-    outp += sdst * UNROLL * VEC_SIZE;
-    remaining -= UNROLL * VEC_SIZE;
-  }
-
-  while (remaining > 0) {
-    int current_len = (remaining < VEC_SIZE) ? remaining : VEC_SIZE;
-    float32x4_t x;
-    if (ssrc == 1 && current_len == VEC_SIZE) {
-      x = vld1q_f32(infp);
-    } else {
-      /* pad with 0.0 (exp(0) == 1, no FP flags): loading the full
-       * vector when current_len < VEC_SIZE would read past the buffer */
-      float vals[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-      for (int i = 0; i < current_len; i++) vals[i] = infp[i * ssrc];
-      x = vld1q_f32(vals);
-    }
-
-    uint32x4_t is_nan = vmvnq_u32(vceqq_f32(x, x));
-    float32x4_t x_nn = vbslq_f32(is_nan, vdupq_n_f32(0.0f), x);
-    uint32x4_t need_libm =
-        vorrq_u32(vorrq_u32(vcgtq_f32(x_nn, poly_max),
-                           vcltq_f32(x_nn, poly_min)),
-                  is_nan);
-
-    const float32x4_t safe_val = vdupq_n_f32(0.0f);
-    float32x4_t xs = vbslq_f32(need_libm, safe_val, x);
-    float32x4_t z = vfmaq_f32(shift, xs, inv_ln2);
-    float32x4_t n = vsubq_f32(z, shift);
-    float32x4_t r = vfmsq_f32(vfmsq_f32(xs, n, ln2_hi), n, ln2_lo);
-    int32x4_t ni = vcvtq_s32_f32(n);
-    uint32x4_t e = vshlq_n_u32(vreinterpretq_u32_s32(ni), 23);
-    float32x4_t scale = vreinterpretq_f32_u32(vaddq_u32(e, exponent_bias));
-
-    float32x4_t r_even = vmaxq_f32(vabsq_f32(r), r_floor);
-    float32x4_t r2 = vmulq_f32(r_even, r_even);
-    float32x4_t r4 = vmulq_f32(r2, r2);
-    float32x4_t p = vfmaq_f32(c1, r, c0);
-    float32x4_t q = vfmaq_f32(c3, r, c2);
-    q = vfmaq_f32(q, p, r2);
-    float32x4_t poly = vfmaq_f32(vmulq_f32(c4, r), q, r2);
-    float32x4_t r6 = vmulq_f32(r4, r2);
-    poly = vfmaq_f32(poly, c5, r6);
-    float32x4_t result = vfmaq_f32(scale, poly, scale);
-
-    if (__builtin_expect(neon_has_any_lane_u32(need_libm), 0)) {
-      float vals[4], outs[4];
-      uint32_t m[4];
-      vst1q_f32(vals, x);
-      vst1q_f32(outs, result);
-      vst1q_u32(m, need_libm);
-      for (int j = 0; j < current_len; j++)
-        if (m[j]) outs[j] = npy_expf(vals[j]);
-      result = vld1q_f32(outs);
-    }
-
-    if (sdst == 1) {
-      for (int k = 0; k < current_len; k++)
-        vst1q_lane_f32(outp + k, result, k);
-    } else {
-      float rbuf[4];
-      vst1q_f32(rbuf, result);
-      for (int k = 0; k < current_len; k++)
-        outp[k * sdst] = rbuf[k];
-    }
-
-    infp += ssrc * current_len;
-    outp += sdst * current_len;
-    remaining -= current_len;
-  }
-}
-
-
-static void
 simd_exp_neon_HALF(const npy_half *src, npy_intp ssrc,
                     npy_half *dst, npy_intp sdst, npy_intp len)
 {
@@ -893,7 +848,7 @@ simd_exp_neon_HALF(const npy_half *src, npy_intp ssrc,
       tmp_src[i] = npy_half_to_float(block_src[i * ssrc]);
     }
     
-    simd_exp_neon_FLOAT(tmp_src, 1, tmp_dst, 1, block_len);
+    simd_exp_hwy_FLOAT(tmp_src, 1, tmp_dst, 1, block_len);
     
     i = 0;
     if (sdst == 1) {
@@ -944,11 +899,11 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_exp)
         npy_float *dst = (npy_float*)args[1];
         const npy_intp ssrc = steps[0] / sizeof(npy_float);
         const npy_intp sdst = steps[1] / sizeof(npy_float);
-        simd_exp_neon_FLOAT(src, ssrc, dst, sdst, len);
+        simd_exp_hwy_FLOAT(src, ssrc, dst, sdst, len);
     }
     else {
         UNARY_LOOP {
-            simd_exp_neon_FLOAT((npy_float *)ip1, 1, (npy_float *)op1, 1, 1);
+            simd_exp_hwy_FLOAT((npy_float *)ip1, 1, (npy_float *)op1, 1, 1);
         }
     }
     return;
