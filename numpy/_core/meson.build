@@ -1047,7 +1047,7 @@ foreach gen_mtargets : [
     'loops_exp.dispatch.h',
     'src/umath/loops_exp.dispatch.cpp',
     [
-      ASIMD, NEON,
+      SVE, ASIMD, NEON,
       X86_V4, X86_V3,
     ]
   ],
@@ -1055,7 +1055,7 @@ foreach gen_mtargets : [
     'loops_log.dispatch.h',
     'src/umath/loops_log.dispatch.cpp',
     [
-      ASIMD, NEON,
+      SVE, ASIMD, NEON,
       X86_V4, X86_V3,
     ]
   ],
@@ -1063,7 +1063,7 @@ foreach gen_mtargets : [
     'loops_exp2.dispatch.h',
     'src/umath/loops_exp2.dispatch.cpp',
     [
-      ASIMD, NEON,
+      SVE, ASIMD, NEON,
       X86_V4, X86_V3,
     ]
   ],
@@ -1071,7 +1071,7 @@ foreach gen_mtargets : [
     'loops_log2.dispatch.h',
     'src/umath/loops_log2.dispatch.cpp',
     [
-      ASIMD, NEON,
+      SVE, ASIMD, NEON,
       X86_V4, X86_V3,
     ]
   ],
