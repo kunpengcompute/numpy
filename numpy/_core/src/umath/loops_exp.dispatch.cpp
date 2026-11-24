@@ -498,15 +498,29 @@ HWY_ATTR NPY_FINLINE vtype
 exp_load_vector(type_t *src, npy_intp ssrc, npy_intp len)
 {
     auto D = hn::DFromV<vtype>();
-    using DI = hn::RebindToSigned<decltype(D)>;
-    DI di;
-    auto indices = hn::Mul(hn::Iota(di, 0), hn::Set(di, ssrc));
-    if (len < hn::Lanes(D)) {
-        if (ssrc == 1) return hn::LoadN(D, src, len);
-        return hn::GatherIndexN(D, src, indices, len);
+    if constexpr (sizeof(type_t) == 2) {
+        /* 16-bit lanes: SVE gather is 32/64-bit only, so build the vector
+         * with scalar inserts (portable across NEON and SVE). */
+        const int nlanes = hn::Lanes(D);
+        if (ssrc == 1) {
+            if (len < nlanes) return hn::LoadN(D, src, len);
+            return hn::LoadU(D, src);
+        }
+        vtype v = hn::Zero(D);
+        const int n = (len < nlanes) ? static_cast<int>(len) : nlanes;
+        for (int i = 0; i < n; i++) v = hn::InsertLane(v, i, src[i * ssrc]);
+        return v;
+    } else {
+        using DI = hn::RebindToSigned<decltype(D)>;
+        DI di;
+        auto indices = hn::Mul(hn::Iota(di, 0), hn::Set(di, ssrc));
+        if (len < hn::Lanes(D)) {
+            if (ssrc == 1) return hn::LoadN(D, src, len);
+            return hn::GatherIndexN(D, src, indices, len);
+        }
+        if (ssrc == 1) return hn::LoadU(D, src);
+        return hn::GatherIndex(D, src, indices);
     }
-    if (ssrc == 1) return hn::LoadU(D, src);
-    return hn::GatherIndex(D, src, indices);
 }
 
 template <typename vtype, typename type_t>
@@ -514,24 +528,33 @@ HWY_ATTR NPY_FINLINE void
 exp_store_vector(vtype vec, type_t *dst, npy_intp sdst, npy_intp len)
 {
     auto D = hn::DFromV<vtype>();
-    using DI = hn::RebindToSigned<decltype(D)>;
-    DI di;
-    auto indices = hn::Mul(hn::Iota(di, 0), hn::Set(di, sdst));
-    if (len < hn::Lanes(D)) {
-        if (sdst == 1) { hn::StoreN(vec, D, dst, len); return; }
-        hn::ScatterIndexN(vec, D, dst, indices, len);
-        return;
+    if constexpr (sizeof(type_t) == 2) {
+        const int nlanes = hn::Lanes(D);
+        if (sdst == 1) {
+            if (len < nlanes) { hn::StoreN(vec, D, dst, len); return; }
+            hn::StoreU(vec, D, dst);
+            return;
+        }
+        const int n = (len < nlanes) ? static_cast<int>(len) : nlanes;
+        for (int i = 0; i < n; i++) dst[i * sdst] = hn::ExtractLane(vec, i);
+    } else {
+        using DI = hn::RebindToSigned<decltype(D)>;
+        DI di;
+        auto indices = hn::Mul(hn::Iota(di, 0), hn::Set(di, sdst));
+        if (len < hn::Lanes(D)) {
+            if (sdst == 1) { hn::StoreN(vec, D, dst, len); return; }
+            hn::ScatterIndexN(vec, D, dst, indices, len);
+            return;
+        }
+        if (sdst == 1) { hn::StoreU(vec, D, dst); return; }
+        hn::ScatterIndex(vec, D, dst, indices);
     }
-    if (sdst == 1) { hn::StoreU(vec, D, dst); return; }
-    hn::ScatterIndex(vec, D, dst, indices);
 }
 
-HWY_ATTR static void
-simd_exp_hwy_FLOAT(const npy_float *src, npy_intp ssrc,
-                   npy_float *dst, npy_intp sdst, npy_intp len)
+HWY_ATTR NPY_FINLINE vec_x_f32
+exp_f32_kernel(vec_x_f32 x)
 {
     const auto D = exp_f32;
-    const int nlanes = hn::Lanes(D);
     const vec_x_f32 zero = hn::Zero(D);
     const vec_x_f32 one = hn::Set(D, 1.0f);
     const vec_x_f32 shift = hn::Set(D, 0x1.8p+23f);
@@ -551,65 +574,75 @@ simd_exp_hwy_FLOAT(const npy_float *src, npy_intp ssrc,
     const vec_x_u32 abs_mask = hn::Set(exp_u32, 0x7fffffffu);
     const vec_x_u32 inf_bits = hn::Set(exp_u32, 0x7f800000u);
     const vec_x_u32 bound_bits = hn::Set(exp_u32, 0x42af5dc2u); /* ~87.683 */
+    vec_x_u32 abs_bits = hn::And(hn::BitCast(exp_u32, x), abs_mask);
+    auto special_m = hn::Ge(abs_bits, bound_bits);
+    vec_x_f32 result;
+    if (__builtin_expect(!hn::AllFalse(exp_u32, special_m), 0)) {
+        auto nan_m = hn::Gt(abs_bits, inf_bits);
+        auto inf_m = hn::Eq(abs_bits, inf_bits);
+        auto cmp = hn::And(special_m, hn::Lt(abs_bits, inf_bits));
+        vec_x_f32 xs = hn::IfThenElse(
+            hn::RebindMask(D, hn::Or(nan_m, inf_m)), zero, x);
+        vec_x_f32 z = hn::MulAdd(xs, inv_ln2, shift);
+        vec_x_f32 n = hn::Sub(z, shift);
+        vec_x_f32 r = hn::MulAdd(n, ln2_hi, xs);
+        r = hn::MulAdd(n, ln2_lo, r);
+        vec_x_u32 e = hn::ShiftLeft<23>(hn::BitCast(exp_u32, hn::NearestInt(n)));
+        vec_x_f32 scale = hn::BitCast(D, hn::Add(e, bias));
+        vec_x_f32 r_even = hn::Max(hn::Abs(r), r_floor_even);
+        vec_x_f32 r2 = hn::Mul(r_even, r_even);
+        vec_x_f32 p = hn::MulAdd(r, c0, c1);
+        vec_x_f32 q = hn::MulAdd(r, c2, c3);
+        q = hn::MulAdd(p, r2, q);
+        vec_x_f32 poly = hn::MulAdd(r, c4, hn::Mul(q, r2));
+        vec_x_f32 scale_r = hn::IfThenElse(hn::RebindMask(D, cmp), one, scale);
+        result = hn::MulAdd(poly, scale_r, scale_r);
+        if (__builtin_expect(!hn::AllFalse(exp_u32, cmp), 0)) {
+            vec_x_u32 b = hn::IfThenElse(
+                hn::RebindMask(exp_u32, hn::Le(n, zero)),
+                sp_offset, hn::Zero(exp_u32));
+            vec_x_f32 s1 = hn::BitCast(D, hn::Add(b, sp_bias));
+            vec_x_f32 s2 = hn::BitCast(D, hn::Sub(e, b));
+            auto cmp2 = hn::Gt(hn::Abs(n), scale_bound);
+            vec_x_f32 s1_ov = hn::IfThenElse(cmp2, s1, one);
+            vec_x_f32 r_ov = hn::Mul(s1_ov, s1_ov);
+            vec_x_f32 r_sp = hn::Mul(hn::MulAdd(poly, s2, s2), s1);
+            vec_x_f32 sp_val = hn::IfThenElse(cmp2, r_ov, r_sp);
+            result = hn::IfThenElse(hn::RebindMask(D, cmp), sp_val, result);
+        }
+        result = hn::IfThenElse(hn::RebindMask(D, nan_m), x, result);
+        result = hn::IfThenElse(hn::RebindMask(D, inf_m), hn::Max(x, zero), result);
+    } else {
+        vec_x_f32 z = hn::MulAdd(x, inv_ln2, shift);
+        vec_x_f32 n = hn::Sub(z, shift);
+        vec_x_f32 r = hn::MulAdd(n, ln2_hi, x);
+        r = hn::MulAdd(n, ln2_lo, r);
+        vec_x_u32 e = hn::ShiftLeft<23>(hn::BitCast(exp_u32, hn::NearestInt(n)));
+        vec_x_f32 scale = hn::BitCast(D, hn::Add(e, bias));
+        vec_x_f32 r_even = hn::Max(hn::Abs(r), r_floor_even);
+        vec_x_f32 r2 = hn::Mul(r_even, r_even);
+        vec_x_f32 p = hn::MulAdd(r, c0, c1);
+        vec_x_f32 q = hn::MulAdd(r, c2, c3);
+        q = hn::MulAdd(p, r2, q);
+        vec_x_f32 poly = hn::MulAdd(r, c4, hn::Mul(q, r2));
+        result = hn::MulAdd(poly, scale, scale);
+    }
+    return result;
+}
 
+HWY_ATTR static void
+simd_exp_hwy_FLOAT(const npy_float *src, npy_intp ssrc,
+                   npy_float *dst, npy_intp sdst, npy_intp len)
+{
+    const int nlanes = hn::Lanes(exp_f32);
     for (; len > 0; len -= nlanes, src += ssrc * nlanes, dst += sdst * nlanes) {
         vec_x_f32 x = exp_load_vector<vec_x_f32>(src, ssrc, len);
-        vec_x_u32 abs_bits = hn::And(hn::BitCast(exp_u32, x), abs_mask);
-        auto special_m = hn::Ge(abs_bits, bound_bits);
-        vec_x_f32 result;
-        if (__builtin_expect(!hn::AllFalse(exp_u32, special_m), 0)) {
-            auto nan_m = hn::Gt(abs_bits, inf_bits);
-            auto inf_m = hn::Eq(abs_bits, inf_bits);
-            auto cmp = hn::And(special_m, hn::Lt(abs_bits, inf_bits));
-            vec_x_f32 xs = hn::IfThenElse(
-                hn::RebindMask(D, hn::Or(nan_m, inf_m)), zero, x);
-            vec_x_f32 z = hn::MulAdd(xs, inv_ln2, shift);
-            vec_x_f32 n = hn::Sub(z, shift);
-            vec_x_f32 r = hn::MulAdd(n, ln2_hi, xs);
-            r = hn::MulAdd(n, ln2_lo, r);
-            vec_x_u32 e = hn::ShiftLeft<23>(hn::BitCast(exp_u32, hn::NearestInt(n)));
-            vec_x_f32 scale = hn::BitCast(D, hn::Add(e, bias));
-            vec_x_f32 r_even = hn::Max(hn::Abs(r), r_floor_even);
-            vec_x_f32 r2 = hn::Mul(r_even, r_even);
-            vec_x_f32 p = hn::MulAdd(r, c0, c1);
-            vec_x_f32 q = hn::MulAdd(r, c2, c3);
-            q = hn::MulAdd(p, r2, q);
-            vec_x_f32 poly = hn::MulAdd(r, c4, hn::Mul(q, r2));
-            vec_x_f32 scale_r = hn::IfThenElse(hn::RebindMask(D, cmp), one, scale);
-            result = hn::MulAdd(poly, scale_r, scale_r);
-            if (__builtin_expect(!hn::AllFalse(exp_u32, cmp), 0)) {
-                vec_x_u32 b = hn::IfThenElse(
-                    hn::RebindMask(exp_u32, hn::Le(n, zero)),
-                    sp_offset, hn::Zero(exp_u32));
-                vec_x_f32 s1 = hn::BitCast(D, hn::Add(b, sp_bias));
-                vec_x_f32 s2 = hn::BitCast(D, hn::Sub(e, b));
-                auto cmp2 = hn::Gt(hn::Abs(n), scale_bound);
-                vec_x_f32 s1_ov = hn::IfThenElse(cmp2, s1, one);
-                vec_x_f32 r_ov = hn::Mul(s1_ov, s1_ov);
-                vec_x_f32 r_sp = hn::Mul(hn::MulAdd(poly, s2, s2), s1);
-                vec_x_f32 sp_val = hn::IfThenElse(cmp2, r_ov, r_sp);
-                result = hn::IfThenElse(hn::RebindMask(D, cmp), sp_val, result);
-            }
-            result = hn::IfThenElse(hn::RebindMask(D, nan_m), x, result);
-            result = hn::IfThenElse(hn::RebindMask(D, inf_m), hn::Max(x, zero), result);
-        } else {
-            vec_x_f32 z = hn::MulAdd(x, inv_ln2, shift);
-            vec_x_f32 n = hn::Sub(z, shift);
-            vec_x_f32 r = hn::MulAdd(n, ln2_hi, x);
-            r = hn::MulAdd(n, ln2_lo, r);
-            vec_x_u32 e = hn::ShiftLeft<23>(hn::BitCast(exp_u32, hn::NearestInt(n)));
-            vec_x_f32 scale = hn::BitCast(D, hn::Add(e, bias));
-            vec_x_f32 r_even = hn::Max(hn::Abs(r), r_floor_even);
-            vec_x_f32 r2 = hn::Mul(r_even, r_even);
-            vec_x_f32 p = hn::MulAdd(r, c0, c1);
-            vec_x_f32 q = hn::MulAdd(r, c2, c3);
-            q = hn::MulAdd(p, r2, q);
-            vec_x_f32 poly = hn::MulAdd(r, c4, hn::Mul(q, r2));
-            result = hn::MulAdd(poly, scale, scale);
-        }
-        exp_store_vector<vec_x_f32>(result, dst, sdst, len);
+        vec_x_f32 out = exp_f32_kernel(x);
+        exp_store_vector<vec_x_f32>(out, dst, sdst, len);
     }
-}HWY_ATTR NPY_FINLINE vec_x_f64
+}
+
+HWY_ATTR NPY_FINLINE vec_x_f64
 exp_lookup_sbits(vec_x_u64 idx)
 {
     if constexpr (hn::MaxLanes(exp_f64) == 2) {
@@ -626,12 +659,10 @@ exp_lookup_sbits(vec_x_u64 idx)
     }
 }
 
-HWY_ATTR static void
-simd_exp_hwy_DOUBLE(const npy_double *src, npy_intp ssrc,
-                    npy_double *dst, npy_intp sdst, npy_intp len)
+HWY_ATTR NPY_FINLINE vec_x_f64
+exp_f64_kernel(vec_x_f64 x)
 {
     const auto D = exp_f64;
-    const int nlanes = hn::Lanes(D);
     const vec_x_f64 zero = hn::Zero(D);
     const vec_x_f64 one = hn::Set(D, 1.0);
     const vec_x_f64 shift = hn::Set(D, 0x1.8p+52);
@@ -646,151 +677,113 @@ simd_exp_hwy_DOUBLE(const npy_double *src, npy_intp ssrc,
     const vec_x_u64 bound_bits = hn::Set(exp_u64, 0x4086232bdd76683cull); /*708.396*/
     const vec_x_u64 tiny_bits = hn::Set(exp_u64, 0x3e10000000000000ull); /*2^-30*/
     const vec_x_u64 idx_mask = hn::Set(exp_u64, V_EXP_INDEX_MASK);
+    vec_x_u64 abs_bits = hn::And(hn::BitCast(exp_u64, x), abs_mask);
+    auto special_m = hn::Gt(abs_bits, bound_bits);
+    auto tiny_m = hn::And(hn::Lt(abs_bits, tiny_bits),
+                          hn::Gt(abs_bits, hn::Zero(exp_u64)));  /* nonzero |x|<2^-30 */
+    vec_x_f64 result;
+    if (__builtin_expect(!hn::AllFalse(exp_u64, hn::Or(special_m, tiny_m)), 0)) {
+        auto nan_m = hn::Gt(abs_bits, inf_bits);
+        auto inf_m = hn::Eq(abs_bits, inf_bits);
+        auto cmp_f = hn::And(special_m, hn::Lt(abs_bits, inf_bits));
+        auto care_m = hn::Or(hn::Or(nan_m, inf_m), tiny_m);
+        vec_x_f64 xs = hn::IfThenElse(hn::RebindMask(D, care_m), zero, x);
+        vec_x_f64 z = hn::MulAdd(xs, inv_ln2, shift);
+        vec_x_u64 u = hn::BitCast(exp_u64, z);
+        vec_x_f64 n = hn::Sub(z, shift);
+        vec_x_f64 r = hn::MulAdd(n, ln2_hi, xs);
+        r = hn::MulAdd(n, ln2_lo, r);
+        vec_x_u64 e = hn::ShiftLeft<52 - V_EXP_TABLE_BITS>(u);
+        vec_x_f64 tab = exp_lookup_sbits(hn::And(u, idx_mask));
+        vec_x_f64 scale = hn::BitCast(D, hn::Add(hn::BitCast(exp_u64, tab), e));
+        vec_x_f64 r2 = hn::Mul(r, r);
+        vec_x_f64 p = hn::MulAdd(r, c1, c0);
+        p = hn::MulAdd(r2, c2, p);
+        vec_x_f64 poly = hn::MulAdd(p, r2, r);
+        vec_x_f64 scale_r = hn::IfThenElse(hn::RebindMask(D, cmp_f), one, scale);
+        result = hn::MulAdd(poly, scale_r, scale_r);
+        if (__builtin_expect(!hn::AllFalse(exp_u64, cmp_f), 0)) {
+            const vec_x_u64 sp_offset = hn::Set(exp_u64, 0x6000000000000000ull);
+            const vec_x_u64 sp_bias1 = hn::Set(exp_u64, 0x7000000000000000ull);
+            const vec_x_u64 sp_bias2 = hn::Set(exp_u64, 0x3010000000000000ull);
+            const vec_x_f64 scale_bound = hn::Set(D, 163840.0);
+            vec_x_u64 b = hn::IfThenElse(
+                hn::RebindMask(exp_u64, hn::Le(n, zero)),
+                sp_offset, hn::Zero(exp_u64));
+            vec_x_f64 s1 = hn::BitCast(D, hn::Sub(sp_bias1, b));
+            vec_x_f64 s2 = hn::BitCast(D, hn::Add(
+                hn::Sub(hn::BitCast(exp_u64, scale), sp_bias2), b));
+            auto cmp2 = hn::Gt(hn::Abs(n), scale_bound);
+            auto cmp_neg = hn::And(hn::RebindMask(D, cmp_f), hn::Le(n, zero));
+            auto ov_mask = hn::Or(cmp2, cmp_neg);
+            vec_x_f64 s1_ov = hn::IfThenElse(ov_mask, s1, one);
+            vec_x_f64 r_ov = hn::Mul(s1_ov, s1_ov);
+            vec_x_f64 r_sp = hn::Mul(hn::MulAdd(poly, s2, s2), s1);
+            vec_x_f64 sp_val = hn::IfThenElse(cmp2, r_ov, r_sp);
+            result = hn::IfThenElse(hn::RebindMask(D, cmp_f), sp_val, result);
+        }
+        /* exp(x) = fl(1 + x) for |x|<2^-30 (x^2/2 < 2^-61 below half
+         * ULP); adding subnormal x to 1 rounds normal, no UF. */
+        vec_x_f64 tiny_res = hn::Add(x, one);
+        result = hn::IfThenElse(hn::RebindMask(D, tiny_m), tiny_res, result);
+        result = hn::IfThenElse(hn::RebindMask(D, nan_m), x, result);
+        result = hn::IfThenElse(hn::RebindMask(D, inf_m), hn::Max(x, zero), result);
+    } else {
+        vec_x_f64 z = hn::MulAdd(x, inv_ln2, shift);
+        vec_x_u64 u = hn::BitCast(exp_u64, z);
+        vec_x_f64 n = hn::Sub(z, shift);
+        vec_x_f64 r = hn::MulAdd(n, ln2_hi, x);
+        r = hn::MulAdd(n, ln2_lo, r);
+        vec_x_u64 e = hn::ShiftLeft<52 - V_EXP_TABLE_BITS>(u);
+        vec_x_f64 tab = exp_lookup_sbits(hn::And(u, idx_mask));
+        vec_x_f64 scale = hn::BitCast(D, hn::Add(hn::BitCast(exp_u64, tab), e));
+        vec_x_f64 r2 = hn::Mul(r, r);
+        vec_x_f64 p = hn::MulAdd(r, c1, c0);
+        p = hn::MulAdd(r2, c2, p);
+        vec_x_f64 poly = hn::MulAdd(p, r2, r);
+        result = hn::MulAdd(poly, scale, scale);
+    }
+    return result;
+}
 
+HWY_ATTR static void
+simd_exp_hwy_DOUBLE(const npy_double *src, npy_intp ssrc,
+                    npy_double *dst, npy_intp sdst, npy_intp len)
+{
+    const int nlanes = hn::Lanes(exp_f64);
     for (; len > 0; len -= nlanes, src += ssrc * nlanes, dst += sdst * nlanes) {
         vec_x_f64 x = exp_load_vector<vec_x_f64>(src, ssrc, len);
-        vec_x_u64 abs_bits = hn::And(hn::BitCast(exp_u64, x), abs_mask);
-        auto special_m = hn::Gt(abs_bits, bound_bits);
-        auto tiny_m = hn::And(hn::Lt(abs_bits, tiny_bits),
-                              hn::Gt(abs_bits, hn::Zero(exp_u64)));  /* nonzero |x|<2^-30 */
-        vec_x_f64 result;
-        if (__builtin_expect(!hn::AllFalse(exp_u64, hn::Or(special_m, tiny_m)), 0)) {
-            auto nan_m = hn::Gt(abs_bits, inf_bits);
-            auto inf_m = hn::Eq(abs_bits, inf_bits);
-            auto cmp_f = hn::And(special_m, hn::Lt(abs_bits, inf_bits));
-            auto care_m = hn::Or(hn::Or(nan_m, inf_m), tiny_m);
-            vec_x_f64 xs = hn::IfThenElse(hn::RebindMask(D, care_m), zero, x);
-            vec_x_f64 z = hn::MulAdd(xs, inv_ln2, shift);
-            vec_x_u64 u = hn::BitCast(exp_u64, z);
-            vec_x_f64 n = hn::Sub(z, shift);
-            vec_x_f64 r = hn::MulAdd(n, ln2_hi, xs);
-            r = hn::MulAdd(n, ln2_lo, r);
-            vec_x_u64 e = hn::ShiftLeft<52 - V_EXP_TABLE_BITS>(u);
-            vec_x_f64 tab = exp_lookup_sbits(hn::And(u, idx_mask));
-            vec_x_f64 scale = hn::BitCast(D, hn::Add(hn::BitCast(exp_u64, tab), e));
-            vec_x_f64 r2 = hn::Mul(r, r);
-            vec_x_f64 p = hn::MulAdd(r, c1, c0);
-            p = hn::MulAdd(r2, c2, p);
-            vec_x_f64 poly = hn::MulAdd(p, r2, r);
-            vec_x_f64 scale_r = hn::IfThenElse(hn::RebindMask(D, cmp_f), one, scale);
-            result = hn::MulAdd(poly, scale_r, scale_r);
-            if (__builtin_expect(!hn::AllFalse(exp_u64, cmp_f), 0)) {
-                const vec_x_u64 sp_offset = hn::Set(exp_u64, 0x6000000000000000ull);
-                const vec_x_u64 sp_bias1 = hn::Set(exp_u64, 0x7000000000000000ull);
-                const vec_x_u64 sp_bias2 = hn::Set(exp_u64, 0x3010000000000000ull);
-                const vec_x_f64 scale_bound = hn::Set(D, 163840.0);
-                vec_x_u64 b = hn::IfThenElse(
-                    hn::RebindMask(exp_u64, hn::Le(n, zero)),
-                    sp_offset, hn::Zero(exp_u64));
-                vec_x_f64 s1 = hn::BitCast(D, hn::Sub(sp_bias1, b));
-                vec_x_f64 s2 = hn::BitCast(D, hn::Add(
-                    hn::Sub(hn::BitCast(exp_u64, scale), sp_bias2), b));
-                auto cmp2 = hn::Gt(hn::Abs(n), scale_bound);
-                auto cmp_neg = hn::And(hn::RebindMask(D, cmp_f), hn::Le(n, zero));
-                auto ov_mask = hn::Or(cmp2, cmp_neg);
-                vec_x_f64 s1_ov = hn::IfThenElse(ov_mask, s1, one);
-                vec_x_f64 r_ov = hn::Mul(s1_ov, s1_ov);
-                vec_x_f64 r_sp = hn::Mul(hn::MulAdd(poly, s2, s2), s1);
-                vec_x_f64 sp_val = hn::IfThenElse(cmp2, r_ov, r_sp);
-                result = hn::IfThenElse(hn::RebindMask(D, cmp_f), sp_val, result);
-            }
-            /* exp(x) = fl(1 + x) for |x|<2^-30 (x^2/2 < 2^-61 below half
-             * ULP); adding subnormal x to 1 rounds normal, no UF. */
-            vec_x_f64 tiny_res = hn::Add(x, one);
-            result = hn::IfThenElse(hn::RebindMask(D, tiny_m), tiny_res, result);
-            result = hn::IfThenElse(hn::RebindMask(D, nan_m), x, result);
-            result = hn::IfThenElse(hn::RebindMask(D, inf_m), hn::Max(x, zero), result);
-        } else {
-            vec_x_f64 z = hn::MulAdd(x, inv_ln2, shift);
-            vec_x_u64 u = hn::BitCast(exp_u64, z);
-            vec_x_f64 n = hn::Sub(z, shift);
-            vec_x_f64 r = hn::MulAdd(n, ln2_hi, x);
-            r = hn::MulAdd(n, ln2_lo, r);
-            vec_x_u64 e = hn::ShiftLeft<52 - V_EXP_TABLE_BITS>(u);
-            vec_x_f64 tab = exp_lookup_sbits(hn::And(u, idx_mask));
-            vec_x_f64 scale = hn::BitCast(D, hn::Add(hn::BitCast(exp_u64, tab), e));
-            vec_x_f64 r2 = hn::Mul(r, r);
-            vec_x_f64 p = hn::MulAdd(r, c1, c0);
-            p = hn::MulAdd(r2, c2, p);
-            vec_x_f64 poly = hn::MulAdd(p, r2, r);
-            result = hn::MulAdd(poly, scale, scale);
-        }
-        exp_store_vector<vec_x_f64>(result, dst, sdst, len);
+        vec_x_f64 out = exp_f64_kernel(x);
+        exp_store_vector<vec_x_f64>(out, dst, sdst, len);
     }
-}static void
-simd_exp_neon_HALF(const npy_half *src, npy_intp ssrc,
-                    npy_half *dst, npy_intp sdst, npy_intp len)
-{
-  const npy_intp BLOCK_SIZE = 2048;
-  const npy_intp VEC_SIZE = 8;
-  
-  npy_float *tmp_src = (npy_float *)malloc(BLOCK_SIZE * sizeof(npy_float));
-  npy_float *tmp_dst = (npy_float *)malloc(BLOCK_SIZE * sizeof(npy_float));
-  
-  if (!tmp_src || !tmp_dst) {
-    if (tmp_src) free(tmp_src);
-    if (tmp_dst) free(tmp_dst);
-    for (npy_intp i = 0; i < len; i++) {
-      npy_float in1 = npy_half_to_float(src[i * ssrc]);
-      dst[i * sdst] = npy_float_to_half(npy_expf(in1));
-    }
-    return;
-  }
-
-  for (npy_intp offset = 0; offset < len; offset += BLOCK_SIZE) {
-    npy_intp block_len = (len - offset > BLOCK_SIZE) ? BLOCK_SIZE : (len - offset);
-    const npy_half *block_src = src + offset * ssrc;
-    npy_half *block_dst = dst + offset * sdst;
-    
-    npy_intp i = 0;
-    if (ssrc == 1) {
-      for (; i + VEC_SIZE <= block_len; i += VEC_SIZE) {
-        __builtin_prefetch(block_src + i + 64, 0, 3);
-        float16x8_t h0 = vld1q_f16((const float16_t *)(block_src + i));
-        float32x4_t f0 = vcvt_f32_f16(vget_low_f16(h0));
-        float32x4_t f1 = vcvt_f32_f16(vget_high_f16(h0));
-        vst1q_f32(tmp_src + i, f0);
-        vst1q_f32(tmp_src + i + 4, f1);
-      }
-    } else {
-      for (; i + 8 <= block_len; i += 8) {
-        for (int j = 0; j < 8; j++) {
-          tmp_src[i + j] = npy_half_to_float(block_src[(i + j) * ssrc]);
-        }
-      }
-    }
-    for (; i < block_len; i++) {
-      tmp_src[i] = npy_half_to_float(block_src[i * ssrc]);
-    }
-    
-    simd_exp_hwy_FLOAT(tmp_src, 1, tmp_dst, 1, block_len);
-    
-    i = 0;
-    if (sdst == 1) {
-      for (; i + VEC_SIZE <= block_len; i += VEC_SIZE) {
-        __builtin_prefetch(block_dst + i + 64, 1, 3);
-        float32x4_t f0 = vld1q_f32(tmp_dst + i);
-        float32x4_t f1 = vld1q_f32(tmp_dst + i + 4);
-        float16x4_t h0 = vcvt_f16_f32(f0);
-        float16x4_t h1 = vcvt_f16_f32(f1);
-        float16x8_t h_combined = vcombine_f16(h0, h1);
-        vst1q_f16((float16_t *)(block_dst + i), h_combined);
-      }
-    } else {
-      for (; i + 8 <= block_len; i += 8) {
-        for (int j = 0; j < 8; j++) {
-          block_dst[(i + j) * sdst] = npy_float_to_half(tmp_dst[i + j]);
-        }
-      }
-    }
-    for (; i < block_len; i++) {
-      block_dst[i * sdst] = npy_float_to_half(tmp_dst[i]);
-    }
-  }
-  
-  free(tmp_src);
-  free(tmp_dst);
 }
+
+#if NPY_HWY_F16
+HWY_ATTR static void
+simd_exp_hwy_HALF(const npy_half *src, npy_intp ssrc,
+                  npy_half *dst, npy_intp sdst, npy_intp len)
+{
+    /* Vectorized f16 path: load f16, promote lower/upper halves to f32, run
+     * the f32 kernel on each, demote back to f16 (round-to-nearest-even, the
+     * same hardware fcvt as scalar npy_float_to_half) and combine. The
+     * f32->f16 narrowing raises OFC/UFC for out-of-half-range results exactly
+     * as the scalar conversion does, so flags flow to the caller for parity.
+     * No temporary buffer or raw NEON intrinsics. */
+    const auto D16 = hn::ScalableTag<hwy::float16_t>();
+    using vec_x_f16 = hn::Vec<decltype(D16)>;
+    const int nlanes = hn::Lanes(D16);
+    const auto dh = hn::Half<decltype(D16)>();
+    for (; len > 0; len -= nlanes, src += ssrc * nlanes, dst += sdst * nlanes) {
+        vec_x_f16 h = exp_load_vector<vec_x_f16>(
+            reinterpret_cast<const hwy::float16_t *>(src), ssrc, len);
+        vec_x_f32 lo = exp_f32_kernel(hn::PromoteLowerTo(exp_f32, h));
+        vec_x_f32 hi = exp_f32_kernel(hn::PromoteUpperTo(exp_f32, h));
+        vec_x_f16 out = hn::Combine(D16, hn::DemoteTo(dh, hi), hn::DemoteTo(dh, lo));
+        exp_store_vector<vec_x_f16>(
+            out, reinterpret_cast<hwy::float16_t *>(dst), sdst, len);
+    }
+}
+#endif
 
 #endif // SIMD_ARM
 
@@ -930,12 +923,12 @@ static void avx512_exponent_f16(const npy_half *src, npy_half *dst, npy_intp len
     const int num_lanes = npyv_nlanes_f32;
     npyvh_f16 x, out;
     npyv_f32 x_ps, out_ps;
-    
+
     for (; len > 0; len -= num_lanes, src += num_lanes, dst += num_lanes) {
         if (len >= num_lanes) {
             x       = npyvh_load_f16(src);
             x_ps    = npyv_cvt_f16_f32(x);
-            out_ps  = math_func(x_ps); 
+            out_ps  = math_func(x_ps);
             out     = npyv_cvt_f32_f16(out_ps, 0);
             npyvh_store_f16(dst, out);
         }
@@ -960,7 +953,7 @@ static void avx512_exp_f16(const npy_half *src, npy_half *dst, npy_intp len)
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_exp)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
 {
-#if SIMD_ARM
+#if NPY_HWY_F16
     const npy_intp len = dimensions[0];
     if (len == 1) {
         UNARY_LOOP {
@@ -973,7 +966,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_exp)
         npy_half *dst = (npy_half*)args[1];
         const npy_intp ssrc = steps[0] / sizeof(npy_half);
         const npy_intp sdst = steps[1] / sizeof(npy_half);
-        simd_exp_neon_HALF(src, ssrc, dst, sdst, len);
+        simd_exp_hwy_HALF(src, ssrc, dst, sdst, len);
     }
     else {
         UNARY_LOOP {
