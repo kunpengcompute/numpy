@@ -131,15 +131,26 @@ simd_exp2_hwy_FLOAT(const npy_float *src, npy_intp ssrc,
          * even-power floor) keeps the result normal for tiny r. */
         vec_e_f32 poly = hn::MulAdd(r, c4, hn::Mul(q, r2));
 
+        auto cmp = hn::And(special_any, hn::Lt(abs_bits, inf_bits));
         vec_e_f32 result;
+        /* Scalable (SVE) compilers hoist the clean-path fma(poly,scale,scale)
+         * above the branch and run it unpredicated; with scale==inf (e.g.
+         * exp2(127.5)) and poly<0 that forms inf-inf and raises a spurious
+         * invalid. Form the default result with scale_r==1 on overflow lanes
+         * BEFORE the branch so the hoisted fma is flag-safe; the special path
+         * overrides those lanes. Fixed-width (NEON) keeps the lean branch
+         * structure (no hoist, no extra select on the clean path). */
+        if constexpr (HWY_HAVE_SCALABLE) {
+            vec_e_f32 scale_r = hn::IfThenElse(hn::RebindMask(D, cmp), one, scale);
+            result = hn::MulAdd(poly, scale_r, scale_r);
+        }
         if (__builtin_expect(!hn::AllFalse(exp2_u32, special_any), 0)) {
             auto nan_m = hn::Gt(abs_bits, inf_bits);
             auto inf_m = hn::Eq(abs_bits, inf_bits);
-            auto cmp = hn::And(special_any, hn::Lt(abs_bits, inf_bits));
-            /* Sanitize the reconstruction scale on overflow lanes so the
-             * main path never forms inf - inf (spurious invalid). */
-            vec_e_f32 scale_r = hn::IfThenElse(hn::RebindMask(D, cmp), one, scale);
-            result = hn::MulAdd(poly, scale_r, scale_r);
+            if constexpr (!HWY_HAVE_SCALABLE) {
+                vec_e_f32 scale_r = hn::IfThenElse(hn::RebindMask(D, cmp), one, scale);
+                result = hn::MulAdd(poly, scale_r, scale_r);
+            }
             if (__builtin_expect(!hn::AllFalse(exp2_u32, cmp), 0)) {
                 /* s1*s2 bias split (AOR expf_special); OF/UF arise naturally.
                  * NaN/inf were sanitized (cmp false) so never reach s1*s1. */
@@ -162,7 +173,9 @@ simd_exp2_hwy_FLOAT(const npy_float *src, npy_intp ssrc,
             result = hn::IfThenElse(hn::RebindMask(D, nan_m), x, result);
             result = hn::IfThenElse(hn::RebindMask(D, inf_m), hn::Max(x, zero), result);
         } else {
-            result = hn::MulAdd(poly, scale, scale);
+            if constexpr (!HWY_HAVE_SCALABLE) {
+                result = hn::MulAdd(poly, scale, scale);
+            }
         }
         exp2_store_vector<vec_e_f32>(result, dst, sdst, len);
     }
@@ -249,12 +262,21 @@ simd_exp2_hwy_DOUBLE(const npy_double *src, npy_intp ssrc,
                     hn::Sub(hn::BitCast(exp2_u64, scale), sp_bias2), b));
                 auto cmp2 = hn::Gt(hn::Abs(n), scale_bound);
                 auto cmp_neg = hn::And(hn::RebindMask(D, cmp_f), hn::Le(n, zero));
-                auto ov_mask = hn::Or(cmp2, cmp_neg);
-                vec_e_f64 s1_ov = hn::IfThenElse(ov_mask, s1, one);
+                vec_e_f64 s1_ov = hn::IfThenElse(cmp2, s1, one);
                 vec_e_f64 r_ov = hn::Mul(s1_ov, s1_ov);
                 vec_e_f64 r_sp = hn::Mul(hn::MulAdd(poly, s2, s2), s1);
                 vec_e_f64 sp_val = hn::IfThenElse(cmp2, r_ov, r_sp);
                 result = hn::IfThenElse(hn::RebindMask(D, cmp_f), sp_val, result);
+                /* SVE predicates the s1_ov*s1_ov product by cmp2 (its
+                 * downstream select), so subnormal-result lanes (cmp_neg,
+                 * cmp2 false) never execute it and would miss the UF flag
+                 * scalar libm raises for exact power-of-2 subnormals such as
+                 * exp2(-1030). Force an underflowing product on exactly those
+                 * lanes (predicated by cmp_neg); its rounded value is 0, so
+                 * adding it leaves the result unchanged. */
+                vec_e_f64 s1_uf = hn::IfThenElse(cmp_neg, s1, one);
+                vec_e_f64 uf = hn::Mul(s1_uf, s1_uf);
+                result = hn::Add(result, hn::IfThenElse(cmp_neg, uf, zero));
             }
             /* exp2(x) = fl(1 + x*ln2) for |x|<2^-30; the FMA rounds once
              * so a subnormal x*ln2 intermediate never flags UF (result 1.0). */
