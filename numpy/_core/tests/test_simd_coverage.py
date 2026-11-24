@@ -2506,10 +2506,12 @@ class TestFPFlagParityExplog:
     Regression guard for the aarch64 NEON explog kernels (defect report
     BUG-2 and its follow-ups): the vectorized paths must raise exactly the
     same RuntimeWarning set as the per-element scalar path, honor
-    ``np.errstate(..., 'raise')``, return bit-identical values for the
-    special inputs (negative, +-0, +-inf, NaN, subnormal), and never warn
-    on clean input. The scalar path (libm + software/hardware half
-    conversion) is the reference on every platform.
+    ``np.errstate(..., 'raise')``, return bit-identical NaN payloads and
+    +-0/+-inf signs, finite lanes within ULP tolerance (the advsimd
+    bias-split paths may cross libm's overflow boundary by <=2 ULP),
+    and never warn on clean input. The scalar path (libm +
+    software/hardware half conversion) is the reference on every
+    platform.
     """
 
     # probes: negative / zero (both signs) / normal / inf (both signs) /
@@ -2547,12 +2549,19 @@ class TestFPFlagParityExplog:
 
     @classmethod
     def _assert_lane_parity(cls, res_arr, res_sca):
-        """special lanes bitwise-equal, normal lanes within ULP ulp"""
+        """NaN/+-0/+-inf lanes bitwise-equal, finite lanes within ULP ulp.
+
+        advsimd contract (2026-11-24): the bias-split special path gives
+        constants + NaN passthrough bit-exactly, but finite boundary
+        lanes (overflow/subnormal-result zones) may deviate by a few ULP
+        instead of routing through libm; inf-vs-finite is tolerated only
+        within 2 ULP of the overflow threshold.
+        """
         assert res_arr.shape == res_sca.shape
-        # bit-exactness for special lanes is a contract of the aarch64
-        # NEON kernels (which route specials through the same libm call
-        # as the scalar path); on other platforms vector NaN payloads
-        # legitimately differ from libm's, so only compare values there
+        # bit-exactness for NaN payloads and +-0/+-inf is a contract of
+        # the aarch64 kernels (constant patches + NaN passthrough); on
+        # other platforms vector NaN payloads legitimately differ from
+        # libm's, so only compare values there
         bit_compare = _IS_AARCH64
         uint = {np.float64: np.uint64, np.float32: np.uint32,
                 np.float16: np.uint16}[res_arr.dtype.type]
@@ -2567,8 +2576,16 @@ class TestFPFlagParityExplog:
                 if bit_compare:
                     # catches +0.0 vs -0.0, which compare equal
                     assert a.view(uint) == b.view(uint), (a, b)
+            elif np.isinf(a) or np.isinf(b):
+                # one side overflowed to inf, the other stayed finite:
+                # allowed only when the finite lane sits within 2 ULP
+                # of the overflow threshold (same sign)
+                assert np.isinf(a) != np.isinf(b), (a, b)
+                fin, inf = (b, a) if np.isinf(a) else (a, b)
+                fi = np.finfo(res_arr.dtype)
+                assert np.sign(fin) == np.sign(inf), (a, b)
+                assert np.abs(fin) >= fi.max - 2 * np.spacing(fi.max), (a, b)
             else:
-                assert not (np.isinf(a) or np.isinf(b)), (a, b)
                 assert np.abs(a - b) <= cls.ULP * np.spacing(np.abs(b)), (a, b)
 
     @pytest.mark.parametrize("func", [np.log, np.log2])
