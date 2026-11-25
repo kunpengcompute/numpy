@@ -201,9 +201,13 @@ exp2_f32_kernel(vec_e_f32 x)
             vec_e_f32 sp_val = hn::IfThenElse(cmp2, r_ov, r_sp);
             result = hn::IfThenElse(hn::RebindMask(D, cmp), sp_val, result);
         }
-        /* NaN payload passthrough; +-inf -> constants (exp2(+inf)=+inf,
-         * exp2(-inf)=+0) without the split's spurious OF/UF. */
-        result = hn::IfThenElse(hn::RebindMask(D, nan_m), x, result);
+        /* NaN payload passthrough via x + 0: raises INVALID on sNaN and
+         * hardware-quietizes it (sign + payload preserved), matching libm;
+         * qNaN unchanged. The reduction is sanitized, so this add is the
+         * only FP op that sees the raw sNaN (flag source). +-inf ->
+         * constants (exp2(+inf)=+inf, exp2(-inf)=+0) without the split's
+         * spurious OF/UF. */
+        result = hn::IfThenElse(hn::RebindMask(D, nan_m), hn::Add(x, zero), result);
         result = hn::IfThenElse(hn::RebindMask(D, inf_m), hn::Max(x, zero), result);
     } else {
         if constexpr (!HWY_HAVE_SCALABLE) {
@@ -488,7 +492,11 @@ exp2_f64_kernel(vec_e_f64 x)
          * so a subnormal x*ln2 intermediate never flags UF (result 1.0). */
         vec_e_f64 tiny_res = hn::MulAdd(x, ln2, one);
         result = hn::IfThenElse(hn::RebindMask(D, tiny_m), tiny_res, result);
-        result = hn::IfThenElse(hn::RebindMask(D, nan_m), x, result);
+        /* NaN passthrough via x + 0: hardware-quietizes sNaN (sign +
+         * payload preserved) matching libm, as the SVE FEXPA path and
+         * PR #203 log do; qNaN unchanged. INVALID is already raised by
+         * the tiny_res FMA above, which sees the raw sNaN. */
+        result = hn::IfThenElse(hn::RebindMask(D, nan_m), hn::Add(x, zero), result);
         result = hn::IfThenElse(hn::RebindMask(D, inf_m), hn::Max(x, zero), result);
     } else {
         /* ---- clean fast path: pure AOR (tiny lanes routed away) ---- */

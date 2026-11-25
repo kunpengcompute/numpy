@@ -624,7 +624,11 @@ exp_f32_kernel(vec_x_f32 x)
             vec_x_f32 sp_val = hn::IfThenElse(cmp2, r_ov, r_sp);
             result = hn::IfThenElse(hn::RebindMask(D, cmp), sp_val, result);
         }
-        result = hn::IfThenElse(hn::RebindMask(D, nan_m), x, result);
+        /* NaN passthrough via x + 0: raises INVALID on sNaN and hardware-
+         * quietizes it (sign + payload preserved), matching libm; qNaN is
+         * unchanged. No other FP op in this kernel sees the raw sNaN (the
+         * reduction is sanitized), so the add is the flag source too. */
+        result = hn::IfThenElse(hn::RebindMask(D, nan_m), hn::Add(x, zero), result);
         result = hn::IfThenElse(hn::RebindMask(D, inf_m), hn::Max(x, zero), result);
     } else {
         vec_x_f32 z = hn::MulAdd(x, inv_ln2, shift);
@@ -926,7 +930,11 @@ exp_f64_kernel(vec_x_f64 x)
          * ULP); adding subnormal x to 1 rounds normal, no UF. */
         vec_x_f64 tiny_res = hn::Add(x, one);
         result = hn::IfThenElse(hn::RebindMask(D, tiny_m), tiny_res, result);
-        result = hn::IfThenElse(hn::RebindMask(D, nan_m), x, result);
+        /* NaN passthrough via x + 0: hardware-quietizes sNaN (sign +
+         * payload preserved) matching libm, as the SVE FEXPA path and
+         * PR #203 log do; qNaN unchanged. INVALID is already raised by
+         * the tiny_res add above, which sees the raw sNaN. */
+        result = hn::IfThenElse(hn::RebindMask(D, nan_m), hn::Add(x, zero), result);
         result = hn::IfThenElse(hn::RebindMask(D, inf_m), hn::Max(x, zero), result);
     } else {
         vec_x_f64 z = hn::MulAdd(x, inv_ln2, shift);

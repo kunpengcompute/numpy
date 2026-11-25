@@ -2528,6 +2528,25 @@ class TestFPFlagParityExplog:
                      np.float16(6e-8), -np.float16(6e-8), np.float16(15.5)],
     }
     LENGTHS = [2, 3, 4, 7, 8, 16, 17, 32, 33, 64]
+    # Signaling-NaN probes guard the quietize-on-passthrough contract
+    # (patterns synced with PR #203, plus negative signs): the vector path
+    # must return a quiet NaN with sign + payload preserved and raise
+    # INVALID, exactly as libm does. Scoped to exp/exp2 on this branch;
+    # log/log2 get the same probes with their PR #203 quietize fix.
+    SNAN_PROBES = {
+        np.float64: [np.array([0x7ff0000000000001],
+                              dtype=np.uint64).view(np.float64)[0],
+                     np.array([0xfff0000000000001],
+                              dtype=np.uint64).view(np.float64)[0]],
+        np.float32: [np.array([0x7f800001],
+                              dtype=np.uint32).view(np.float32)[0],
+                     np.array([0xff800001],
+                              dtype=np.uint32).view(np.float32)[0]],
+        np.float16: [np.array([0x7c01],
+                              dtype=np.uint16).view(np.float16)[0],
+                     np.array([0xfc01],
+                              dtype=np.uint16).view(np.float16)[0]],
+    }
     # max deviation of the vector path from the scalar path for normal
     # lanes (polynomial vs libm rounding); special lanes must match bitwise
     ULP = 4
@@ -2618,7 +2637,7 @@ class TestFPFlagParityExplog:
             np.float32: [127.5, 127.6, 128.0, -126.0, -126.5, -130.0, -149.0],
             np.float16: [16.0, 15.5, 15.9921875, -14.0, -14.5, -24.0, -30.0],
         }[dtype]
-        probes = self.PROBES[dtype] + extra
+        probes = self.PROBES[dtype] + extra + self.SNAN_PROBES[dtype]
         for n in self.LENGTHS:
             arr = np.tile(np.array(probes, dtype=dtype), 8)[:n].copy()
             ws_arr, res_arr = self._warn_set(np.exp2, arr)
@@ -2682,7 +2701,7 @@ class TestFPFlagParityExplog:
             np.float32: [88.0, 88.5, 88.72, 89.0, -87.5, -90.0, -110.0],
             np.float16: [10.0, 11.0, 11.1, -20.0, -30.0],
         }[dtype]
-        probes = self.PROBES[dtype] + extra
+        probes = self.PROBES[dtype] + extra + self.SNAN_PROBES[dtype]
         for n in self.LENGTHS:
             arr = np.tile(np.array(probes, dtype=dtype), 8)[:n].copy()
             ws_arr, res_arr = self._warn_set(np.exp, arr)
@@ -2706,7 +2725,8 @@ class TestFPFlagParityExplog:
     @pytest.mark.parametrize("func", [np.log, np.log2, np.exp2, np.exp])
     @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.float16])
     def test_out_overlap_and_strided(self, func, dtype):
-        probes = self.PROBES[dtype]
+        probes = self.PROBES[dtype] + (
+            self.SNAN_PROBES[dtype] if func in (np.exp, np.exp2) else [])
         # long enough that the strided views engage the NEON main loop
         # (>= 32 lanes) with a strided tail left over; [::3] also
         # exercises the f16 general path
