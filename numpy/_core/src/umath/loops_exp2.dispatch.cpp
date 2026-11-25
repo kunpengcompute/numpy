@@ -23,12 +23,9 @@ namespace hn = hwy::HWY_NAMESPACE;
 
 /* ---- Highway (Google Highway) AOR advsimd exp2 kernels -------------------
  * Algorithm ported from ARM optimized-routines math/aarch64/advsimd/exp2f.c
- * and exp2.c (MIT OR Apache-2.0 WITH LLVM-exception), expressed with Highway
+ * and exp2.c, expressed with Highway
  * scalable vectors following the official numpy SIMD mode (ScalableTag +
  * HWY_ATTR, LoadN/StoreN/GatherIndexN tails, GatherIndex table lookup).
- *
- * Copyright (c) 2019-2026, Arm Limited.
- * SPDX-License-Identifier: MIT OR Apache-2.0 WITH LLVM-exception
  *
  * numpy contract adaptations (see PR #200 / commit c73289f):
  *  - NaN sign+payload passthrough; +-inf mapped to constants. NaN/inf lanes
@@ -258,9 +255,6 @@ exp2_lookup_sbits(vec_e_u64 idx)
  * above; the negative clamp bound is -1075.0 (not AOR's -1076.0078125) so
  * clamped lanes keep scale >= 2^-1022 and FSCALE raises UF naturally
  * (exp2(x) rounds to 0 for every x <= -1075, tie-to-even).
- *
- * Copyright (c) 2023-2026, Arm Limited.
- * SPDX-License-Identifier: MIT OR Apache-2.0 WITH LLVM-exception
  */
 
 static inline svfloat64_t

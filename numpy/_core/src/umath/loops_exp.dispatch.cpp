@@ -470,12 +470,9 @@ namespace hn = hwy::HWY_NAMESPACE;
 
 /* ---- Highway (Google Highway) AOR advsimd exp kernels --------------------
  * Algorithm ported from ARM optimized-routines math/aarch64/advsimd/expf.c
- * and exp.c (MIT OR Apache-2.0 WITH LLVM-exception), expressed with Highway
+ * and exp.c, expressed with Highway
  * scalable vectors following the official numpy SIMD mode (ScalableTag +
  * HWY_ATTR, LoadN/StoreN/GatherIndexN tails, GatherIndex table lookup).
- *
- * Copyright (c) 2019-2026, Arm Limited.
- * SPDX-License-Identifier: MIT OR Apache-2.0 WITH LLVM-exception
  *
  * numpy contract adaptations (see PR #200 / commit c73289f):
  *  - NaN sign+payload passthrough; +-inf mapped to constants. NaN/inf lanes
@@ -687,9 +684,6 @@ exp_lookup_sbits(vec_x_u64 idx)
  * two-level branch guarding the clamp+offset+FSCALE path. Raw ACLE is
  * confined to this kernel; the Highway loop, load/store helpers, HALF and
  * wrappers are unchanged (hn::Vec<ScalableTag<double>> is svfloat64_t).
- *
- * Copyright (c) 2023-2026, Arm Limited.
- * SPDX-License-Identifier: MIT OR Apache-2.0 WITH LLVM-exception
  */
 
  /* AOR SVE ACLE short-name helpers (sv_math.h subset). */
