@@ -9,6 +9,15 @@
 #include "simd/simd.hpp"
 #include <hwy/highway.h>
 namespace hn = hwy::HWY_NAMESPACE;
+
+/* Compile-time SVE FEXPA specialization guard (see loops_exp.dispatch.cpp):
+ * SVE dispatch target uses the raw-ACLE FEXPA f64 kernel; NEON/ASIMD fall back
+ * to the portable Highway advsimd kernel. */
+#if defined(__ARM_FEATURE_SVE) && (HWY_TARGET & HWY_ALL_SVE)
+#define NPY_EXPLOG_SVE_FEXPA 1
+#else
+#define NPY_EXPLOG_SVE_FEXPA 0
+#endif
 #endif
 
 #if SIMD_ARM
@@ -234,6 +243,189 @@ exp2_lookup_sbits(vec_e_u64 idx)
     }
 }
 
+#if NPY_EXPLOG_SVE_FEXPA
+/* ---- SVE-native FEXPA specialization (compile-time, SVE dispatch only) ----
+ * Core algorithm: ARM optimized-routines math/aarch64/sve/exp2.c (FEXPA based,
+ * hardware 64-entry 2^(i/64) table via svexpa, no gather). numpy-contract
+ * adapted "adapt3" hybrid-branch form, verified in the AOR SVE evaluation
+ * (912 bit-level+flag parity checks, 2.4M near-lattice scan, clean maxULP 1.0).
+ *
+ * Copyright (c) 2023-2026, Arm Limited.
+ * SPDX-License-Identifier: MIT OR Apache-2.0 WITH LLVM-exception
+ *
+ * Contract adaptations (verified, do not re-derive): see exp_f64 SVE kernel.
+ * Additionally the negative clamp bound is raised -1076.0078125 -> -1075.0:
+ * exp2(x) rounds to 0 for every x <= -1075 (tie-to-even); the raw bound makes
+ * FEXPA produce scale=+0 for clamped lanes, losing the UF flag scalar libm
+ * raises. With -1075.0 scale stays >= 2^-1022 and FSCALE raises UF naturally.
+ * Only this short-vector kernel uses raw ACLE; Highway loop/load/store/HALF/
+ * wrapper unchanged. Under SVE hn::Vec<ScalableTag<double>> is svfloat64_t. */
+#include <arm_sve.h>
+static inline svfloat64_t sv_f64 (double x) { return svdup_f64 (x); }
+static inline svuint64_t sv_u64 (uint64_t x) { return svdup_u64 (x); }
+static inline svint64_t sv_s64 (int64_t x) { return svdup_s64 (x); }
+#ifndef unlikely
+#define unlikely(x) __builtin_expect (!!(x), 0)
+#endif
+#ifndef ptr_barrier
+#define ptr_barrier(ptr) ({ __typeof (ptr) __p = (ptr); __asm__ ("" : "+r"(__p)); __p; })
+#endif
+/*
+ * Double-precision SVE 2^x, numpy-contract adapted.
+ *
+ * Core algorithm: ARM optimized-routines math/aarch64/sve/exp2.c (FEXPA).
+ * Copyright (c) 2023-2026, Arm Limited.
+ * SPDX-License-Identifier: MIT OR Apache-2.0 WITH LLVM-exception
+ *
+ * Contract adaptations: see exp_sve_adapted.c.  Additionally the negative
+ * clamp bound is raised from -1076.0078125 to -1075.0: exp2(x) rounds to 0
+ * for every x <= -1075 (2^-1075 is a tie-to-even), and with the raw bound
+ * FEXPA produces scale = +0 for clamped lanes, losing the UF flag that
+ * scalar libm raises.  With -1075.0 the scale stays >= 2^-1022 and FSCALE
+ * raises UF naturally.
+ */
+
+
+#define SpecialBound 0x1.ffp+9
+#define InfBound 0x1p10
+#define ZeroBound -0x1.0ccp+10 /* -1075.0 */
+
+static const struct exp2_sve_data
+{
+  double c2, c4;
+  double c0, c1, c3;
+  double shift, special_bound;
+  double inf_bound, zero_bound;
+  double ln2;
+} exp2_sve_data = {
+  .c2 = 0x1.c6b08d706c8a5p-5,
+  .c4 = 0x1.5d8761184beb3p-10,
+  .c0 = 0x1.62e42fefa39efp-1,
+  .c1 = 0x1.ebfbdff82a31bp-3,
+  .c3 = 0x1.3b2ad2ff7d2f3p-7,
+  .shift = 0x1.800000000ffc0p+46,
+  .special_bound = SpecialBound,
+  .inf_bound = InfBound,
+  .zero_bound = ZeroBound,
+  .ln2 = 0x1.62e42fefa39efp-1,
+
+};
+
+static inline svfloat64_t
+exp2_inline (svfloat64_t x, svbool_t pg, const struct exp2_sve_data *d)
+{
+  svfloat64_t z = svadd_x (svptrue_b64 (), x, d->shift);
+  svfloat64_t n = svsub_x (pg, z, d->shift);
+  svfloat64_t r = svsub_x (pg, x, n);
+
+  svfloat64_t scale = svexpa (svreinterpret_u64 (z));
+
+  svfloat64_t r2 = svmul_x (svptrue_b64 (), r, r);
+  svfloat64_t c24 = svld1rq (svptrue_b64 (), &d->c2);
+
+  svfloat64_t p12 = svmla_lane (sv_f64 (d->c1), r, c24, 0);
+  svfloat64_t p34 = svmla_lane (sv_f64 (d->c3), r, c24, 1);
+  svfloat64_t p = svmla_x (pg, p12, p34, r2);
+  p = svmad_x (pg, p, r, d->c0);
+  svfloat64_t poly = svmul_x (svptrue_b64 (), r, p);
+
+  return svmla_x (pg, scale, scale, poly);
+}
+
+static svfloat64_t __attribute__((always_inline)) inline
+special_case (svfloat64_t x, svbool_t pg, const struct exp2_sve_data *d)
+{
+  svbool_t is_negative = svcmplt (pg, x, 0.0);
+  svfloat64_t offset = svneg_m (sv_f64 (53.0), is_negative, sv_f64 (53.0));
+  svint64_t scale_adjust = svneg_m (sv_s64 (53), is_negative, sv_s64 (53));
+
+  x = svmin_x (pg, svmax_x (pg, x, d->zero_bound), d->inf_bound);
+
+  svfloat64_t z = svadd_x (svptrue_b64 (), x, d->shift);
+  svfloat64_t n = svsub_x (pg, z, d->shift);
+  svfloat64_t r = svsub_x (pg, x, n);
+
+  z = svsub_x (pg, z, offset);
+  svfloat64_t scale = svexpa (svreinterpret_u64 (z));
+
+  svfloat64_t r2 = svmul_x (svptrue_b64 (), r, r);
+  svfloat64_t c24 = svld1rq (svptrue_b64 (), &d->c2);
+
+  svfloat64_t p12 = svmla_lane (sv_f64 (d->c1), r, c24, 0);
+  svfloat64_t p34 = svmla_lane (sv_f64 (d->c3), r, c24, 1);
+  svfloat64_t p = svmla_x (pg, p12, p34, r2);
+  p = svmad_x (pg, p, r, d->c0);
+  svfloat64_t poly = svmul_x (svptrue_b64 (), r, p);
+
+  svfloat64_t y = svmla_x (pg, scale, scale, poly);
+
+  y = svscale_x (pg, y, scale_adjust);
+  /* glibc raises UF for every tiny result, even exact ones (exp2(-1074));
+     FSCALE/FMUL only flag inexact tininess on HIP12.  Supply UF via an
+     inexact underflowing product on lanes whose result is subnormal/zero.
+     y + 0 is exact, so the value is unchanged.  */
+  svuint64_t yexp
+      = svand_x (pg, svreinterpret_u64 (y), sv_u64 (0x7ff0000000000000ULL));
+  svbool_t tiny_out = svcmpeq_u64 (pg, yexp, sv_u64 (0));
+  svfloat64_t uf = svmul_m (tiny_out, sv_f64 (0x1p-600), sv_f64 (0x1p-600));
+  return svadd_m (tiny_out, y, uf);
+}
+
+static inline svfloat64_t
+exp2_f64_sve_fexpa (svfloat64_t x, svbool_t pg)
+{
+  const struct exp2_sve_data *d = ptr_barrier (&exp2_sve_data);
+  svuint64_t abs_bits
+      = svand_x (pg, svreinterpret_u64 (x), sv_u64 (0x7fffffffffffffffULL));
+  svbool_t special
+      = svcmpge_u64 (pg, abs_bits, sv_u64 (0x408ff00000000000ULL)); /*1022*/
+  svbool_t tiny = svand_b_z (
+      pg, svcmplt_u64 (pg, abs_bits, sv_u64 (0x3e10000000000000ULL)),
+      svcmpne_u64 (pg, abs_bits, sv_u64 (0)));
+  if (unlikely (svptest_any (pg, svorr_z (pg, special, tiny))))
+    {
+      svbool_t nan_m
+	  = svcmpgt_u64 (pg, abs_bits, sv_u64 (0x7ff0000000000000ULL));
+      svbool_t inf_m
+	  = svcmpeq_u64 (pg, abs_bits, sv_u64 (0x7ff0000000000000ULL));
+      svbool_t sp_finite = svand_b_z (pg, special,
+				      svnot_b_z (pg, svorr_z (pg, nan_m, inf_m)));
+      svbool_t care = svorr_z (pg, svorr_z (pg, nan_m, inf_m), tiny);
+      svfloat64_t xs = svsel_f64 (care, sv_f64 (0.0), x);
+      svfloat64_t y;
+      if (svptest_any (pg, sp_finite))
+	{
+	  /* finite OF/UF lanes present: one heavy compute for all lanes
+	     (clamp + offset + FEXPA + FSCALE), correct on clean lanes too */
+	  y = special_case (xs, pg, d);
+	}
+      else
+	{
+	  /* NaN/inf/tiny/zero only: light clean-form compute on sanitized
+	     input (finite-special lanes sanitized to 0 as well) */
+	  svfloat64_t xc
+	      = svsel_f64 (svorr_z (pg, special, tiny), sv_f64 (0.0), x);
+	  y = exp2_inline (xc, pg, d);
+	}
+      y = svsel_f64 (tiny, svmla_x (pg, sv_f64 (1.0), x, d->ln2), y);
+      /* NaN passthrough preserving sign+payload; set the quiet bit so an
+	 sNaN is quieted exactly as scalar libm does (qNaN unchanged).  */
+      svfloat64_t qn = svreinterpret_f64 (
+	  svorr_x (pg, svreinterpret_u64 (x), sv_u64 (0x0008000000000000ULL)));
+      y = svsel_f64 (nan_m, qn, y);
+      y = svsel_f64 (inf_m, svmax_x (pg, x, sv_f64 (0.0)), y);
+      return y;
+    }
+  return exp2_inline (x, pg, d);
+}
+
+HWY_ATTR NPY_FINLINE vec_e_f64
+exp2_f64_kernel(vec_e_f64 x)
+{
+    return exp2_f64_sve_fexpa(x, svptrue_b64());
+}
+
+#else
 HWY_ATTR NPY_FINLINE vec_e_f64
 exp2_f64_kernel(vec_e_f64 x)
 {
@@ -327,6 +519,8 @@ exp2_f64_kernel(vec_e_f64 x)
     }
     return result;
 }
+
+#endif /* NPY_EXPLOG_SVE_FEXPA */
 
 HWY_ATTR static void
 simd_exp2_hwy_DOUBLE(const npy_double *src, npy_intp ssrc,
