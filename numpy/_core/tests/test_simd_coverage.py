@@ -2584,7 +2584,11 @@ class TestFPFlagParityExplog:
                 fin, inf = (b, a) if np.isinf(a) else (a, b)
                 fi = np.finfo(res_arr.dtype)
                 assert np.sign(fin) == np.sign(inf), (a, b)
-                assert np.abs(fin) >= fi.max - 2 * np.spacing(fi.max), (a, b)
+                # np.spacing(fi.max) is inf (nextafter(max, inf) overflows),
+                # which would make the bound -inf and the assert vacuous;
+                # step one ULP toward zero first to get a finite spacing.
+                assert np.abs(fin) >= fi.max - 2 * np.spacing(
+                    np.nextafter(fi.max, 0)), (a, b)
             else:
                 assert np.abs(a - b) <= cls.ULP * np.spacing(np.abs(b)), (a, b)
 

@@ -12,7 +12,11 @@
 #include "npy_simd_data.h"
 #include "npy_svml.h"
 
-#if defined(__aarch64__) && NPY_SIMD_FMA3
+/* The explog ARM dispatch path requires Highway: exp/exp2 use the Highway
+ * advsimd/SVE kernels, and meson gates the SVE/ASIMD/NEON dispatch targets
+ * of all four explog loops on use_highway (review #4). With
+ * -Ddisable-highway=true the wrappers below fall back to the scalar loops. */
+#if defined(__aarch64__) && NPY_SIMD_FMA3 && NPY_HAVE_HIGHWAY
 #define SIMD_ARM 1
 #endif
 
