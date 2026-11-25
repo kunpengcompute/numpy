@@ -651,7 +651,10 @@ simd_exp_hwy_FLOAT(const npy_float *src, npy_intp ssrc,
     const int nlanes = hn::Lanes(exp_f32);
     /* f32 gather/scatter lane offsets are int32: fall back to scalar libm
      * for strides whose per-vector offsets would overflow (requires
-     * multi-GB arrays; practical strides keep the vector path). */
+     * multi-GB arrays; practical strides keep the vector path). The
+     * wrapper's npyv_loadable_stride_f32 does not bound strides on
+     * aarch64 (NPY_SIMD_MAXLOAD_STRIDE32 unset), so this guard is the
+     * actual overflow protection, not a redundancy. */
     if (ssrc > INT32_MAX / nlanes || ssrc < INT32_MIN / nlanes ||
         sdst > INT32_MAX / nlanes || sdst < INT32_MIN / nlanes) {
         for (npy_intp i = 0; i < len; i++) {
@@ -1007,26 +1010,19 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_exp)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
 {
 #if SIMD_ARM
-    const npy_intp len = dimensions[0];
-    if (len == 1) {
-        UNARY_LOOP {
-            const npy_float in1 = *(npy_float *)ip1;
-            *(npy_float *)op1 = npy_expf(in1);
-        }
-    }
-    else if (!is_mem_overlap(args[0], steps[0], args[1], steps[1], len)) {
-        const npy_float *src = (npy_float*)args[0];
-        npy_float *dst = (npy_float*)args[1];
-        const npy_intp ssrc = steps[0] / sizeof(npy_float);
-        const npy_intp sdst = steps[1] / sizeof(npy_float);
-        simd_exp_hwy_FLOAT(src, ssrc, dst, sdst, len);
-    }
-    else {
+    npy_intp len = dimensions[0];
+    if (is_mem_overlap(args[0], steps[0], args[1], steps[1], len) ||
+        !npyv_loadable_stride_f32(steps[0]) ||
+        !npyv_storable_stride_f32(steps[1])) {
         UNARY_LOOP {
             simd_exp_hwy_FLOAT((npy_float *)ip1, 1, (npy_float *)op1, 1, 1);
         }
+    } else {
+        npy_intp ssrc = steps[0] / sizeof(npy_float);
+        npy_intp sdst = steps[1] / sizeof(npy_float);
+        simd_exp_hwy_FLOAT((npy_float *)args[0], ssrc, (npy_float *)args[1], sdst, len);
     }
-    return;
+    npyv_cleanup();
 #elif defined(SIMD_AVX2_FMA3) || defined(SIMD_AVX512F)
     if (IS_OUTPUT_BLOCKABLE_UNARY(sizeof(npy_float), sizeof(npy_float), 64)) {
         simd_exp_FLOAT((npy_float*)args[1], (npy_float*)args[0], dimensions[0], steps[0]);
@@ -1047,7 +1043,22 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_exp)
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_exp)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
 {
-#if NPY_SIMD && defined(NPY_HAVE_AVX512_SKX) && defined(NPY_CAN_LINK_SVML)
+#if SIMD_ARM
+    npy_intp len = dimensions[0];
+    if (is_mem_overlap(args[0], steps[0], args[1], steps[1], len) ||
+        !npyv_loadable_stride_f64(steps[0]) ||
+        !npyv_storable_stride_f64(steps[1])) {
+        UNARY_LOOP {
+            simd_exp_hwy_DOUBLE((npy_double *)ip1, 1, (npy_double *)op1, 1, 1);
+        }
+    } else {
+        npy_intp ssrc = steps[0] / sizeof(npy_double);
+        npy_intp sdst = steps[1] / sizeof(npy_double);
+        simd_exp_hwy_DOUBLE((npy_double *)args[0], ssrc, (npy_double *)args[1], sdst, len);
+    }
+    npyv_cleanup();
+    return;
+#elif NPY_SIMD && defined(NPY_HAVE_AVX512_SKX) && defined(NPY_CAN_LINK_SVML)
     const npy_intp len = dimensions[0];
 
     if (!is_mem_overlap(args[0], steps[0], args[1], steps[1], len) &&
@@ -1061,28 +1072,6 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_exp)
         simd_exp_f64(src, ssrc, dst, sdst, len);
         return;
     }
-#elif SIMD_ARM
-    const npy_intp len = dimensions[0];
-    if (len == 1) {
-        UNARY_LOOP {
-            const npy_double in1 = *(npy_double *)ip1;
-            *(npy_double *)op1 = npy_exp(in1);
-        }
-    }
-    else if (!is_mem_overlap(args[0], steps[0], args[1], steps[1], len)) {
-        const npy_double *src = (npy_double*)args[0];
-        npy_double *dst = (npy_double*)args[1];
-        const npy_intp ssrc = steps[0] / sizeof(npy_double);
-        const npy_intp sdst = steps[1] / sizeof(npy_double);
-        simd_exp_hwy_DOUBLE(src, ssrc, dst, sdst, len);
-    }
-    else {
-        UNARY_LOOP {
-            const npy_double in1 = *(npy_double *)ip1;
-            *(npy_double *)op1 = npy_exp(in1);
-        }
-    }
-    return;
 #else
   #ifdef SIMD_AVX512F_NOCLANG_BUG
       if (IS_OUTPUT_BLOCKABLE_UNARY(sizeof(npy_double), sizeof(npy_double), 64)) {
@@ -1166,26 +1155,22 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_exp)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
 {
 #if SIMD_ARM && NPY_HWY_F16
-    const npy_intp len = dimensions[0];
-    if (len == 1) {
+    npy_intp len = dimensions[0];
+    /* npyv has no f16 stride predicate; the highway f16 load/store uses
+     * 64-bit scalar lane inserts (safe for any stride), so the f32
+     * predicate serves as a conservative proxy. */
+    if (is_mem_overlap(args[0], steps[0], args[1], steps[1], len) ||
+        !npyv_loadable_stride_f32(steps[0]) ||
+        !npyv_storable_stride_f32(steps[1])) {
         UNARY_LOOP {
-            const npy_float in1 = npy_half_to_float(*(npy_half *)ip1);
-            *((npy_half *)op1) = npy_float_to_half(npy_expf(in1));
+            simd_exp_hwy_HALF((npy_half *)ip1, 1, (npy_half *)op1, 1, 1);
         }
+    } else {
+        npy_intp ssrc = steps[0] / sizeof(npy_half);
+        npy_intp sdst = steps[1] / sizeof(npy_half);
+        simd_exp_hwy_HALF((npy_half *)args[0], ssrc, (npy_half *)args[1], sdst, len);
     }
-    else if (!is_mem_overlap(args[0], steps[0], args[1], steps[1], len)) {
-        const npy_half *src = (npy_half*)args[0];
-        npy_half *dst = (npy_half*)args[1];
-        const npy_intp ssrc = steps[0] / sizeof(npy_half);
-        const npy_intp sdst = steps[1] / sizeof(npy_half);
-        simd_exp_hwy_HALF(src, ssrc, dst, sdst, len);
-    }
-    else {
-        UNARY_LOOP {
-            const npy_float in1 = npy_half_to_float(*(npy_half *)ip1);
-            *((npy_half *)op1) = npy_float_to_half(npy_expf(in1));
-        }
-    }
+    npyv_cleanup();
     return;
 #elif NPY__SVML_IS_ENABLED
     const npy_half *src = (npy_half*)args[0];
