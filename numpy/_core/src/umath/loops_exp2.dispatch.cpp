@@ -290,7 +290,6 @@ sv_s64(int64_t x)
 #ifndef ptr_barrier
 #define ptr_barrier(ptr) ({ __typeof(ptr) __p = (ptr); __asm__("" : "+r"(__p)); __p; })
 #endif
-#define SpecialBound 0x1.ffp+9
 #define InfBound 0x1p10
 #define ZeroBound -0x1.0ccp+10 /* -1075.0 */
 
@@ -298,7 +297,7 @@ static const struct exp2_sve_data
 {
     double c2, c4;
     double c0, c1, c3;
-    double shift, special_bound;
+    double shift;
     double inf_bound, zero_bound;
     double ln2;
 } exp2_sve_data = {
@@ -308,7 +307,6 @@ static const struct exp2_sve_data
     .c1 = 0x1.ebfbdff82a31bp-3,
     .c3 = 0x1.3b2ad2ff7d2f3p-7,
     .shift = 0x1.800000000ffc0p+46,
-    .special_bound = SpecialBound,
     .inf_bound = InfBound,
     .zero_bound = ZeroBound,
     .ln2 = 0x1.62e42fefa39efp-1,
@@ -786,7 +784,7 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_exp2)
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_exp2)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
 {
-#if NPY_HWY_F16
+#if SIMD_ARM && NPY_HWY_F16
     const npy_intp len = dimensions[0];
     if (len == 1) {
         UNARY_LOOP {

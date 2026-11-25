@@ -2518,11 +2518,12 @@ class TestFPFlagParityExplog:
     # NaN / subnormal, tiled to the requested length
     PROBES = {
         np.float64: [-1.0, 0.0, -0.0, 2.0, np.inf, -np.inf, np.nan,
-                     1e-320, -1e-320, 1e300],
+                     1e-320, -1e-320, 1e300, -1e300],
         np.float32: [-1.0, 0.0, -0.0, 2.0, np.inf, -np.inf, np.nan,
                      np.float32(1e-40), -np.float32(1e-40),
                      np.float32(1e10), -np.float32(1e10),
-                     np.float32(1e30), -np.float32(1e30)],
+                     np.float32(1e30), -np.float32(1e30),
+                     np.float32(-87.68312), np.float32(-87.68311)],
         np.float16: [-1.0, 0.0, -0.0, 2.0, np.inf, -np.inf, np.nan,
                      np.float16(6e-8), -np.float16(6e-8), np.float16(15.5)],
     }

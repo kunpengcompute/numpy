@@ -720,7 +720,6 @@ sv_s64(int64_t x)
 #ifndef ptr_barrier
 #define ptr_barrier(ptr) ({ __typeof(ptr) __p = (ptr); __asm__("" : "+r"(__p)); __p; })
 #endif
-#define SpecialBound 0x1.6232bdd7abcd2p+9
 #define InfBound 0x1.63p+9
 #define ZeroBound -0x1.74910d52d3053p+9
 
@@ -729,7 +728,7 @@ static const struct exp_sve_data
     double c0, c2;
     double c1, c3;
     double ln2_hi, ln2_lo;
-    double inv_ln2, shift, special_bound, inf_bound, zero_bound;
+    double inv_ln2, shift, inf_bound, zero_bound;
 } exp_sve_data = {
     .c0 = 0x1.fffffffffdbcdp-2,
     .c2 = 0x1.555573c6a9f7dp-5,
@@ -739,7 +738,6 @@ static const struct exp_sve_data
     .ln2_lo = 0x1.ef35793c76730p-45,
     .inv_ln2 = 0x1.71547652b82fep+0,
     .shift = 0x1.800000000ffc0p+46,
-    .special_bound = SpecialBound,
     .inf_bound = InfBound,
     .zero_bound = ZeroBound,
 
@@ -891,6 +889,15 @@ exp_f64_kernel(vec_x_f64 x)
         auto cmp_f = hn::And(special_m, hn::Lt(abs_bits, inf_bits));
         auto care_m = hn::Or(hn::Or(nan_m, inf_m), tiny_m);
         vec_x_f64 xs = hn::IfThenElse(hn::RebindMask(D, care_m), zero, x);
+        /* Clamp finite special lanes to [-746, 710]: beyond these bounds
+         * exp(x) is already saturated (0 / inf), so the clamp preserves
+         * every result and flag, while the reduction remainder r (and
+         * r*r) can no longer overflow for huge |x| (spurious OF on lanes
+         * whose result is the saturated constant). Mirrors the SVE
+         * special_case svmin/svmax clamp. */
+        const vec_x_f64 sp_lo = hn::Set(D, -746.0);
+        const vec_x_f64 sp_hi = hn::Set(D, 710.0);
+        xs = hn::Min(hn::Max(xs, sp_lo), sp_hi);
         vec_x_f64 z = hn::MulAdd(xs, inv_ln2, shift);
         vec_x_u64 u = hn::BitCast(exp_u64, z);
         vec_x_f64 n = hn::Sub(z, shift);
@@ -1158,7 +1165,7 @@ static void avx512_exp_f16(const npy_half *src, npy_half *dst, npy_intp len)
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_exp)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
 {
-#if NPY_HWY_F16
+#if SIMD_ARM && NPY_HWY_F16
     const npy_intp len = dimensions[0];
     if (len == 1) {
         UNARY_LOOP {
