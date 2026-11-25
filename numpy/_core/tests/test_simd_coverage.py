@@ -2520,7 +2520,9 @@ class TestFPFlagParityExplog:
         np.float64: [-1.0, 0.0, -0.0, 2.0, np.inf, -np.inf, np.nan,
                      1e-320, -1e-320, 1e300],
         np.float32: [-1.0, 0.0, -0.0, 2.0, np.inf, -np.inf, np.nan,
-                     np.float32(1e-40), -np.float32(1e-40)],
+                     np.float32(1e-40), -np.float32(1e-40),
+                     np.float32(1e10), -np.float32(1e10),
+                     np.float32(1e30), -np.float32(1e30)],
         np.float16: [-1.0, 0.0, -0.0, 2.0, np.inf, -np.inf, np.nan,
                      np.float16(6e-8), -np.float16(6e-8), np.float16(15.5)],
     }
@@ -2555,7 +2557,7 @@ class TestFPFlagParityExplog:
         constants + NaN passthrough bit-exactly, but finite boundary
         lanes (overflow/subnormal-result zones) may deviate by a few ULP
         instead of routing through libm; inf-vs-finite is tolerated only
-        within 2 ULP of the overflow threshold.
+        on aarch64 and only within 2 ULP of the overflow threshold.
         """
         assert res_arr.shape == res_sca.shape
         # bit-exactness for NaN payloads and +-0/+-inf is a contract of
@@ -2565,6 +2567,7 @@ class TestFPFlagParityExplog:
         bit_compare = _IS_AARCH64
         uint = {np.float64: np.uint64, np.float32: np.uint32,
                 np.float16: np.uint16}[res_arr.dtype.type]
+        fi = np.finfo(res_arr.dtype)
         for a, b in zip(res_arr.ravel(), res_sca.ravel()):
             if np.isnan(a) or np.isnan(b):
                 assert np.isnan(a) == np.isnan(b), (a, b)
@@ -2577,12 +2580,15 @@ class TestFPFlagParityExplog:
                     # catches +0.0 vs -0.0, which compare equal
                     assert a.view(uint) == b.view(uint), (a, b)
             elif np.isinf(a) or np.isinf(b):
+                # inf-vs-finite tolerance is an aarch64 AOR-kernel contract
+                # (bias-split boundary lanes); other platforms keep the
+                # strict inf/finite agreement of the original assert
+                assert bit_compare, (a, b)
                 # one side overflowed to inf, the other stayed finite:
                 # allowed only when the finite lane sits within 2 ULP
                 # of the overflow threshold (same sign)
                 assert np.isinf(a) != np.isinf(b), (a, b)
                 fin, inf = (b, a) if np.isinf(a) else (a, b)
-                fi = np.finfo(res_arr.dtype)
                 assert np.sign(fin) == np.sign(inf), (a, b)
                 # np.spacing(fi.max) is inf (nextafter(max, inf) overflows),
                 # which would make the bound -inf and the assert vacuous;
