@@ -667,10 +667,8 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_exp2)
 #if SIMD_ARM
     npy_intp len = dimensions[0];
     if (__builtin_expect(is_mem_overlap(args[0], steps[0], args[1], steps[1], len) ||
-        !npyv_loadable_stride_f32(steps[0]) ||
         !hwy_loadable_stride_f32(steps[0]) ||
-        !npyv_storable_stride_f32(steps[1]) ||
-        !hwy_storable_stride_f32(steps[1]), 0)) {
+        !hwy_loadable_stride_f32(steps[1]), 0)) {
         UNARY_LOOP {
             simd_exp2_hwy_FLOAT((npy_float *)ip1, 1, (npy_float *)op1, 1, 1);
         }
@@ -708,10 +706,8 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_exp2)
 #if SIMD_ARM
     npy_intp len = dimensions[0];
     if (__builtin_expect(is_mem_overlap(args[0], steps[0], args[1], steps[1], len) ||
-        !npyv_loadable_stride_f64(steps[0]) ||
         !hwy_loadable_stride_f64(steps[0]) ||
-        !npyv_storable_stride_f64(steps[1]) ||
-        !hwy_storable_stride_f64(steps[1]), 0)) {
+        !hwy_loadable_stride_f64(steps[1]), 0)) {
         UNARY_LOOP {
             simd_exp2_hwy_DOUBLE((npy_double *)ip1, 1, (npy_double *)op1, 1, 1);
         }
@@ -752,10 +748,8 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_exp2)
      * 64-bit scalar lane inserts (safe for any stride), so the f32
      * predicate serves as a conservative proxy. */
     if (__builtin_expect(is_mem_overlap(args[0], steps[0], args[1], steps[1], len) ||
-        !npyv_loadable_stride_f32(steps[0]) ||
         !hwy_loadable_stride_f16(steps[0]) ||
-        !npyv_storable_stride_f32(steps[1]) ||
-        !hwy_storable_stride_f16(steps[1]), 0)) {
+        !hwy_loadable_stride_f16(steps[1]), 0)) {
         UNARY_LOOP {
             simd_exp2_hwy_HALF((npy_half *)ip1, 1, (npy_half *)op1, 1, 1);
         }

@@ -369,12 +369,13 @@ simd_range_reduction(__m512 x, __m512 y, __m512 c1, __m512 c2, __m512 c3)
  * worst case for scalable SVE targets (64 f32 / 32 f64 lanes at the
  * architectural 2048-bit maximum; NEON 4 / 2). npyv_loadable_stride_*
  * leaves strides unbounded on aarch64 (NPY_SIMD_MAXLOAD_STRIDE32/64
- * unset), so the exp/log wrappers stack these highway-specific
- * predicates on top and fall back to per-element loops when a stride
- * does not fit. Shared by the explog family -- keep in sync on the log
- * branch. C++ only: this header is also included from C translation
- * units (umathmodule.c via __umath_generated.c), which must not pull
- * Highway. */
+ * unset), so hwy_loadable_stride_* combines the npyv_loadable check
+ * with this index-width bound; gather and scatter share the constraint,
+ * so one loadable predicate covers both directions and the exp/log
+ * wrappers fall back to per-element loops when a stride does not fit.
+ * Shared by the explog family -- keep in sync on the log branch.
+ * C++ only: this header is also included from C translation units
+ * (umathmodule.c via __umath_generated.c), which must not pull Highway. */
 NPY_FINLINE int
 hwy_loadable_stride_f32(npy_intp stride)
 {
@@ -384,13 +385,8 @@ hwy_loadable_stride_f32(npy_intp stride)
     const npy_intp bound = INT32_MAX /
         ((npy_intp)hwy::HWY_NAMESPACE::MaxLanes(
              hwy::HWY_NAMESPACE::ScalableTag<float>()) - 1);
-    stride /= (npy_intp)sizeof(float);
-    return stride >= -bound && stride <= bound;
-}
-NPY_FINLINE int
-hwy_storable_stride_f32(npy_intp stride)
-{
-    return hwy_loadable_stride_f32(stride);
+    const npy_intp es = stride / (npy_intp)sizeof(float);
+    return npyv_loadable_stride_f32(stride) && es >= -bound && es <= bound;
 }
 NPY_FINLINE int
 hwy_loadable_stride_f64(npy_intp stride)
@@ -398,27 +394,16 @@ hwy_loadable_stride_f64(npy_intp stride)
     const npy_intp bound = INT64_MAX /
         ((npy_intp)hwy::HWY_NAMESPACE::MaxLanes(
              hwy::HWY_NAMESPACE::ScalableTag<double>()) - 1);
-    stride /= (npy_intp)sizeof(double);
-    return stride >= -bound && stride <= bound;
-}
-NPY_FINLINE int
-hwy_storable_stride_f64(npy_intp stride)
-{
-    return hwy_loadable_stride_f64(stride);
+    const npy_intp es = stride / (npy_intp)sizeof(double);
+    return npyv_loadable_stride_f64(stride) && es >= -bound && es <= bound;
 }
 /* f16 highway load/store use 64-bit scalar lane inserts (no gather
- * index), so any stride is safe. */
+ * index), so any stride is safe; npyv has no f16 predicate, so the f32
+ * one serves as a conservative proxy. */
 NPY_FINLINE int
 hwy_loadable_stride_f16(npy_intp stride)
 {
-    (void)stride;
-    return 1;
-}
-NPY_FINLINE int
-hwy_storable_stride_f16(npy_intp stride)
-{
-    (void)stride;
-    return 1;
+    return npyv_loadable_stride_f32(stride);
 }
 #endif /* __cplusplus */
 
