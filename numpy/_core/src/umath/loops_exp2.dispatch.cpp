@@ -668,16 +668,17 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_exp2)
 {
 #if SIMD_ARM
     npy_intp len = dimensions[0];
-    if (__builtin_expect(is_mem_overlap(args[0], steps[0], args[1], steps[1], len) ||
-        !hwy_loadable_stride_f32(steps[0]) ||
-        !hwy_loadable_stride_f32(steps[1]), 0)) {
-        UNARY_LOOP {
-            simd_exp2_hwy_FLOAT((npy_float *)ip1, 1, (npy_float *)op1, 1, 1);
-        }
+    /* Vectorize only contiguous non-overlapping runs; strided/overlap
+     * falls back to scalar libm (policy note in loops_explog.h). */
+    if (steps[0] == (npy_intp)sizeof(npy_float) &&
+        steps[1] == (npy_intp)sizeof(npy_float) &&
+        !is_mem_overlap(args[0], steps[0], args[1], steps[1], len)) {
+        simd_exp2_hwy_FLOAT((npy_float *)args[0], 1, (npy_float *)args[1], 1, len);
     } else {
-        npy_intp ssrc = steps[0] / sizeof(npy_float);
-        npy_intp sdst = steps[1] / sizeof(npy_float);
-        simd_exp2_hwy_FLOAT((npy_float *)args[0], ssrc, (npy_float *)args[1], sdst, len);
+        UNARY_LOOP {
+            const npy_float in1 = *(npy_float *)ip1;
+            *(npy_float *)op1 = npy_exp2f(in1);
+        }
     }
     npyv_cleanup();
     return;
@@ -707,16 +708,17 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_exp2)
 {
 #if SIMD_ARM
     npy_intp len = dimensions[0];
-    if (__builtin_expect(is_mem_overlap(args[0], steps[0], args[1], steps[1], len) ||
-        !hwy_loadable_stride_f64(steps[0]) ||
-        !hwy_loadable_stride_f64(steps[1]), 0)) {
-        UNARY_LOOP {
-            simd_exp2_hwy_DOUBLE((npy_double *)ip1, 1, (npy_double *)op1, 1, 1);
-        }
+    /* Vectorize only contiguous non-overlapping runs; strided/overlap
+     * falls back to scalar libm (policy note in loops_explog.h). */
+    if (steps[0] == (npy_intp)sizeof(npy_double) &&
+        steps[1] == (npy_intp)sizeof(npy_double) &&
+        !is_mem_overlap(args[0], steps[0], args[1], steps[1], len)) {
+        simd_exp2_hwy_DOUBLE((npy_double *)args[0], 1, (npy_double *)args[1], 1, len);
     } else {
-        npy_intp ssrc = steps[0] / sizeof(npy_double);
-        npy_intp sdst = steps[1] / sizeof(npy_double);
-        simd_exp2_hwy_DOUBLE((npy_double *)args[0], ssrc, (npy_double *)args[1], sdst, len);
+        UNARY_LOOP {
+            const npy_double in1 = *(npy_double *)ip1;
+            *(npy_double *)op1 = npy_exp2(in1);
+        }
     }
     npyv_cleanup();
     return;
@@ -746,19 +748,17 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_exp2)
 {
 #if SIMD_ARM && NPY_HWY_F16
     npy_intp len = dimensions[0];
-    /* npyv has no f16 stride predicate; the highway f16 load/store uses
-     * 64-bit scalar lane inserts (safe for any stride), so the f32
-     * predicate serves as a conservative proxy. */
-    if (__builtin_expect(is_mem_overlap(args[0], steps[0], args[1], steps[1], len) ||
-        !hwy_loadable_stride_f16(steps[0]) ||
-        !hwy_loadable_stride_f16(steps[1]), 0)) {
-        UNARY_LOOP {
-            simd_exp2_hwy_HALF((npy_half *)ip1, 1, (npy_half *)op1, 1, 1);
-        }
+    /* Vectorize only contiguous non-overlapping runs; strided/overlap
+     * falls back to scalar libm (policy note in loops_explog.h). */
+    if (steps[0] == (npy_intp)sizeof(npy_half) &&
+        steps[1] == (npy_intp)sizeof(npy_half) &&
+        !is_mem_overlap(args[0], steps[0], args[1], steps[1], len)) {
+        simd_exp2_hwy_HALF((npy_half *)args[0], 1, (npy_half *)args[1], 1, len);
     } else {
-        npy_intp ssrc = steps[0] / sizeof(npy_half);
-        npy_intp sdst = steps[1] / sizeof(npy_half);
-        simd_exp2_hwy_HALF((npy_half *)args[0], ssrc, (npy_half *)args[1], sdst, len);
+        UNARY_LOOP {
+            const npy_float in1 = npy_half_to_float(*(npy_half *)ip1);
+            *((npy_half *)op1) = npy_float_to_half(npy_exp2f(in1));
+        }
     }
     npyv_cleanup();
     return;

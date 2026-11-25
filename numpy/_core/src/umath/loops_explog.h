@@ -361,51 +361,18 @@ simd_range_reduction(__m512 x, __m512 y, __m512 c1, __m512 c2, __m512 c3)
 
 #if SIMD_ARM
 #include <arm_neon.h>
-#ifdef __cplusplus
-#include <hwy/highway.h>
-/* Highway gather/scatter lane indices are signed integers of the lane
- * width (int32 for f32, int64 for f64), so the largest per-vector offset
- * (MaxLanes - 1) * |element stride| must fit that type. MaxLanes is the
- * worst case for scalable SVE targets (64 f32 / 32 f64 lanes at the
- * architectural 2048-bit maximum; NEON 4 / 2). npyv_loadable_stride_*
- * leaves strides unbounded on aarch64 (NPY_SIMD_MAXLOAD_STRIDE32/64
- * unset), so hwy_loadable_stride_* combines the npyv_loadable check
- * with this index-width bound; gather and scatter share the constraint,
- * so one loadable predicate covers both directions and the exp/log
- * wrappers fall back to per-element loops when a stride does not fit.
- * Shared by the explog family -- keep in sync on the log branch.
- * C++ only: this header is also included from C translation units
- * (umathmodule.c via __umath_generated.c), which must not pull Highway. */
-NPY_FINLINE int
-hwy_loadable_stride_f32(npy_intp stride)
-{
-    /* element-stride bound; compare after the division so the bound
-     * never overflows npy_intp (MaxLanes == 2 on NEON f64 would make
-     * a byte-stride bound INT64_MAX * 8 overflow) */
-    const npy_intp bound = INT32_MAX /
-        ((npy_intp)hwy::HWY_NAMESPACE::MaxLanes(
-             hwy::HWY_NAMESPACE::ScalableTag<float>()) - 1);
-    const npy_intp es = stride / (npy_intp)sizeof(float);
-    return npyv_loadable_stride_f32(stride) && es >= -bound && es <= bound;
-}
-NPY_FINLINE int
-hwy_loadable_stride_f64(npy_intp stride)
-{
-    const npy_intp bound = INT64_MAX /
-        ((npy_intp)hwy::HWY_NAMESPACE::MaxLanes(
-             hwy::HWY_NAMESPACE::ScalableTag<double>()) - 1);
-    const npy_intp es = stride / (npy_intp)sizeof(double);
-    return npyv_loadable_stride_f64(stride) && es >= -bound && es <= bound;
-}
-/* f16 highway load/store use 64-bit scalar lane inserts (no gather
- * index), so any stride is safe; npyv has no f16 predicate, so the f32
- * one serves as a conservative proxy. */
-NPY_FINLINE int
-hwy_loadable_stride_f16(npy_intp stride)
-{
-    return npyv_loadable_stride_f32(stride);
-}
-#endif /* __cplusplus */
+/* Contiguous-only vectorization policy (exp/exp2/log/log2, f16/f32/f64):
+ * the wrappers vectorize only when both strides equal the element size
+ * and the buffers do not overlap; every strided, broadcast, negative or
+ * overlapping run falls back to the scalar libm loop. Rationale: on some
+ * aarch64 cores (e.g. Kunpeng 920) scalar libm is very fast while
+ * gather/scatter is slow, so strided vectorization regressed 1.1-5.9x;
+ * scalar libm is also bit-exact and FP-flag correct by construction.
+ * With stride 1 the Highway load/store helpers are always safe, so the
+ * former hwy_loadable_stride_* gather index-width guards are no longer
+ * needed (the kernels still accept strides, but wrappers only pass 1).
+ * The exact byte-stride comparison (not steps/sizeof == 1) also keeps
+ * non-multiple byte strides from aliasing into the contiguous path. */
 
 #define V_EXP_TABLE_BITS 7
 #define V_EXP_N (1 << V_EXP_TABLE_BITS)
