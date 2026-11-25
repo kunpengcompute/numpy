@@ -361,8 +361,14 @@ simd_range_reduction(__m512 x, __m512 y, __m512 c1, __m512 c2, __m512 c3)
 
 #if SIMD_ARM
 #include <arm_neon.h>
-/* Contiguous-only vectorization policy (exp/exp2/log/log2, f16/f32/f64):
- * the wrappers vectorize only when both strides equal the element size
+/* Vectorization policy (exp/exp2/log/log2):
+ * - exp f32: fully scalar libm on ARM (every stride). The AOR f32 kernel
+ *   deviates 1-2 ULP from libm, breaking sub-ULP precision assertions
+ *   (linalg TestDet::test_generalized_sq_cases, decimal=6 tighter than
+ *   f32 ULP at magnitude >= 16). exp f64/f16 keep the contiguous vector
+ *   path (f64 ULP margin at decimal=6 is ~9 orders of magnitude).
+ * - exp f64/f16, exp2, log/log2: contiguous-only. The wrappers vectorize
+ *   only when both strides equal the element size
  * and the buffers do not overlap; every strided, broadcast, negative or
  * overlapping run falls back to the scalar libm loop. Rationale: on some
  * aarch64 cores (e.g. Kunpeng 920) scalar libm is very fast while

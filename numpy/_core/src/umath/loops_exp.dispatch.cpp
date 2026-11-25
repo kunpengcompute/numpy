@@ -645,17 +645,6 @@ exp_f32_kernel(vec_x_f32 x)
     return result;
 }
 
-HWY_ATTR static void
-simd_exp_hwy_FLOAT(const npy_float *src, npy_intp ssrc,
-                   npy_float *dst, npy_intp sdst, npy_intp len)
-{
-    const int nlanes = hn::Lanes(exp_f32);
-    for (; len > 0; len -= nlanes, src += ssrc * nlanes, dst += sdst * nlanes) {
-        vec_x_f32 x = exp_load_vector<vec_x_f32>(src, ssrc, len);
-        vec_x_f32 out = exp_f32_kernel(x);
-        exp_store_vector<vec_x_f32>(out, dst, sdst, len);
-    }
-}
 
 HWY_ATTR NPY_FINLINE vec_x_f64
 exp_lookup_sbits(vec_x_u64 idx)
@@ -998,22 +987,12 @@ simd_exp_hwy_HALF(const npy_half *src, npy_intp ssrc,
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_exp)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
 {
-#if SIMD_ARM
-    npy_intp len = dimensions[0];
-    /* Vectorize only contiguous non-overlapping runs; strided/overlap
-     * falls back to scalar libm (policy note in loops_explog.h). */
-    if (steps[0] == (npy_intp)sizeof(npy_float) &&
-        steps[1] == (npy_intp)sizeof(npy_float) &&
-        !is_mem_overlap(args[0], steps[0], args[1], steps[1], len)) {
-        simd_exp_hwy_FLOAT((npy_float *)args[0], 1, (npy_float *)args[1], 1, len);
-    } else {
-        UNARY_LOOP {
-            const npy_float in1 = *(npy_float *)ip1;
-            *(npy_float *)op1 = npy_expf(in1);
-        }
-    }
-    npyv_cleanup();
-#elif defined(SIMD_AVX2_FMA3) || defined(SIMD_AVX512F)
+/* exp f32 uses scalar libm for every stride on ARM: the AOR f32 kernel's
+ * 1-2 ULP deviation from libm breaks sub-ULP precision assertions
+ * (linalg TestDet::test_generalized_sq_cases, decimal=6 tighter than
+ * f32 ULP at magnitude >= 16). exp f64/f16 keep the contiguous vector
+ * path (f64 has ~9 orders of ULP margin at decimal=6). */
+#if defined(SIMD_AVX2_FMA3) || defined(SIMD_AVX512F)
     if (IS_OUTPUT_BLOCKABLE_UNARY(sizeof(npy_float), sizeof(npy_float), 64)) {
         simd_exp_FLOAT((npy_float*)args[1], (npy_float*)args[0], dimensions[0], steps[0]);
     }
