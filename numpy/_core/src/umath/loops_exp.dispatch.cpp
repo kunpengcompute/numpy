@@ -649,19 +649,6 @@ simd_exp_hwy_FLOAT(const npy_float *src, npy_intp ssrc,
                    npy_float *dst, npy_intp sdst, npy_intp len)
 {
     const int nlanes = hn::Lanes(exp_f32);
-    /* f32 gather/scatter lane offsets are int32: fall back to scalar libm
-     * for strides whose per-vector offsets would overflow (requires
-     * multi-GB arrays; practical strides keep the vector path). The
-     * wrapper's npyv_loadable_stride_f32 does not bound strides on
-     * aarch64 (NPY_SIMD_MAXLOAD_STRIDE32 unset), so this guard is the
-     * actual overflow protection, not a redundancy. */
-    if (ssrc > INT32_MAX / nlanes || ssrc < INT32_MIN / nlanes ||
-        sdst > INT32_MAX / nlanes || sdst < INT32_MIN / nlanes) {
-        for (npy_intp i = 0; i < len; i++) {
-            dst[i * sdst] = npy_expf(src[i * ssrc]);
-        }
-        return;
-    }
     for (; len > 0; len -= nlanes, src += ssrc * nlanes, dst += sdst * nlanes) {
         vec_x_f32 x = exp_load_vector<vec_x_f32>(src, ssrc, len);
         vec_x_f32 out = exp_f32_kernel(x);
@@ -1011,9 +998,11 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_exp)
 {
 #if SIMD_ARM
     npy_intp len = dimensions[0];
-    if (is_mem_overlap(args[0], steps[0], args[1], steps[1], len) ||
+    if (__builtin_expect(is_mem_overlap(args[0], steps[0], args[1], steps[1], len) ||
         !npyv_loadable_stride_f32(steps[0]) ||
-        !npyv_storable_stride_f32(steps[1])) {
+        !hwy_loadable_stride_f32(steps[0]) ||
+        !npyv_storable_stride_f32(steps[1]) ||
+        !hwy_storable_stride_f32(steps[1]), 0)) {
         UNARY_LOOP {
             simd_exp_hwy_FLOAT((npy_float *)ip1, 1, (npy_float *)op1, 1, 1);
         }
@@ -1045,9 +1034,11 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_exp)
 {
 #if SIMD_ARM
     npy_intp len = dimensions[0];
-    if (is_mem_overlap(args[0], steps[0], args[1], steps[1], len) ||
+    if (__builtin_expect(is_mem_overlap(args[0], steps[0], args[1], steps[1], len) ||
         !npyv_loadable_stride_f64(steps[0]) ||
-        !npyv_storable_stride_f64(steps[1])) {
+        !hwy_loadable_stride_f64(steps[0]) ||
+        !npyv_storable_stride_f64(steps[1]) ||
+        !hwy_storable_stride_f64(steps[1]), 0)) {
         UNARY_LOOP {
             simd_exp_hwy_DOUBLE((npy_double *)ip1, 1, (npy_double *)op1, 1, 1);
         }
@@ -1159,9 +1150,11 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_exp)
     /* npyv has no f16 stride predicate; the highway f16 load/store uses
      * 64-bit scalar lane inserts (safe for any stride), so the f32
      * predicate serves as a conservative proxy. */
-    if (is_mem_overlap(args[0], steps[0], args[1], steps[1], len) ||
+    if (__builtin_expect(is_mem_overlap(args[0], steps[0], args[1], steps[1], len) ||
         !npyv_loadable_stride_f32(steps[0]) ||
-        !npyv_storable_stride_f32(steps[1])) {
+        !hwy_loadable_stride_f16(steps[0]) ||
+        !npyv_storable_stride_f32(steps[1]) ||
+        !hwy_storable_stride_f16(steps[1]), 0)) {
         UNARY_LOOP {
             simd_exp_hwy_HALF((npy_half *)ip1, 1, (npy_half *)op1, 1, 1);
         }

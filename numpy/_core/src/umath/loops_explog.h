@@ -361,6 +361,66 @@ simd_range_reduction(__m512 x, __m512 y, __m512 c1, __m512 c2, __m512 c3)
 
 #if SIMD_ARM
 #include <arm_neon.h>
+#ifdef __cplusplus
+#include <hwy/highway.h>
+/* Highway gather/scatter lane indices are signed integers of the lane
+ * width (int32 for f32, int64 for f64), so the largest per-vector offset
+ * (MaxLanes - 1) * |element stride| must fit that type. MaxLanes is the
+ * worst case for scalable SVE targets (64 f32 / 32 f64 lanes at the
+ * architectural 2048-bit maximum; NEON 4 / 2). npyv_loadable_stride_*
+ * leaves strides unbounded on aarch64 (NPY_SIMD_MAXLOAD_STRIDE32/64
+ * unset), so the exp/log wrappers stack these highway-specific
+ * predicates on top and fall back to per-element loops when a stride
+ * does not fit. Shared by the explog family -- keep in sync on the log
+ * branch. C++ only: this header is also included from C translation
+ * units (umathmodule.c via __umath_generated.c), which must not pull
+ * Highway. */
+NPY_FINLINE int
+hwy_loadable_stride_f32(npy_intp stride)
+{
+    /* element-stride bound; compare after the division so the bound
+     * never overflows npy_intp (MaxLanes == 2 on NEON f64 would make
+     * a byte-stride bound INT64_MAX * 8 overflow) */
+    const npy_intp bound = INT32_MAX /
+        ((npy_intp)hwy::HWY_NAMESPACE::MaxLanes(
+             hwy::HWY_NAMESPACE::ScalableTag<float>()) - 1);
+    stride /= (npy_intp)sizeof(float);
+    return stride >= -bound && stride <= bound;
+}
+NPY_FINLINE int
+hwy_storable_stride_f32(npy_intp stride)
+{
+    return hwy_loadable_stride_f32(stride);
+}
+NPY_FINLINE int
+hwy_loadable_stride_f64(npy_intp stride)
+{
+    const npy_intp bound = INT64_MAX /
+        ((npy_intp)hwy::HWY_NAMESPACE::MaxLanes(
+             hwy::HWY_NAMESPACE::ScalableTag<double>()) - 1);
+    stride /= (npy_intp)sizeof(double);
+    return stride >= -bound && stride <= bound;
+}
+NPY_FINLINE int
+hwy_storable_stride_f64(npy_intp stride)
+{
+    return hwy_loadable_stride_f64(stride);
+}
+/* f16 highway load/store use 64-bit scalar lane inserts (no gather
+ * index), so any stride is safe. */
+NPY_FINLINE int
+hwy_loadable_stride_f16(npy_intp stride)
+{
+    (void)stride;
+    return 1;
+}
+NPY_FINLINE int
+hwy_storable_stride_f16(npy_intp stride)
+{
+    (void)stride;
+    return 1;
+}
+#endif /* __cplusplus */
 
 #define V_EXP_TABLE_BITS 7
 #define V_EXP_N (1 << V_EXP_TABLE_BITS)
