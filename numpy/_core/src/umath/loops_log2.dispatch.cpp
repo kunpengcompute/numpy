@@ -236,770 +236,500 @@ simd_log2_FLOAT(npy_float * op,
 #endif // SIMD_AVX512F
 #if SIMD_ARM
 
-static inline float64x2_t
-neon_log2_inline_core(uint64x2_t u, uint64x2_t u_off)
+/*
+ * Highway port of the Arm Optimized Routines (AOR) advsimd log/log2
+ * kernels, https://github.com/ARM-software/optimized-routines
+ * (math/aarch64/advsimd/log.c, log2.c, logf.c, log2f.c and the
+ * v_log_data.c / v_log2_data.c lookup tables).
+ *
+ * Structured in the SVML style: each lane-parallel AOR evaluation is a
+ * short-vector kernel API (log2_f64_kernel / log2_f32_kernel) and the
+ * strided loops only do vectorized load -> kernel -> vectorized store.
+ *
+ * numpy adaptations over the AOR skeleton:
+ *  - the AOR constant patches (log2(0) -> -inf, log2(neg) -> NaN) do not
+ *    raise FP flags, so each kernel accumulates the special-lane masks
+ *    into caller-owned invalid/divide accumulators and the loop writes
+ *    divide-by-zero/invalid back at its exit, matching scalar libm;
+ *  - NaN lanes pass through bit-exactly (sign + payload);
+ *  - subnormals keep AOR's in-band 2*log2(sqrt(x)) promotion;
+ *  - inactive tail lanes are padded with 1.0 so the native LoadN/StoreN
+ *    zero fill cannot raise spurious divide-by-zero.
+ */
+#include "simd/simd.hpp"  /* pulls <hwy/highway.h> + defines NPY_HWY_F16 */
+namespace hn = hwy::HWY_NAMESPACE;
+
+const hn::ScalableTag<double> f64;
+const hn::ScalableTag<int64_t> s64;
+const hn::ScalableTag<uint64_t> u64;
+using vec_f64 = hn::Vec<decltype(f64)>;
+using vec_s64 = hn::Vec<decltype(s64)>;
+using vec_u64 = hn::Vec<decltype(u64)>;
+const hn::ScalableTag<float> f32;
+const hn::ScalableTag<int32_t> s32;
+const hn::ScalableTag<uint32_t> u32;
+using vec_f32 = hn::Vec<decltype(f32)>;
+using vec_u32 = hn::Vec<decltype(u32)>;
+using mask_u64 = hn::Mask<hn::ScalableTag<uint64_t>>;
+using mask_u32 = hn::Mask<hn::ScalableTag<uint32_t>>;
+
+template <typename vtype, typename type_t>
+HWY_ATTR NPY_FINLINE vtype
+load_vector(type_t* src, npy_intp ssrc, npy_intp len)
 {
-  const float64x2_t c0 = vdupq_n_f64(-0x1.71547652b8300p-1);
-  const float64x2_t c1 = vdupq_n_f64(0x1.ec709dc340953p-2);
-  const float64x2_t c2 = vdupq_n_f64(-0x1.71547651c8f35p-2);
-  const float64x2_t c3 = vdupq_n_f64(0x1.2777ebe12dda5p-2);
-  const float64x2_t c4 = vdupq_n_f64(-0x1.ec738d616fe26p-3);
-  const float64x2_t invln2 = vdupq_n_f64(0x1.71547652b82fep0);
-  const uint64x2_t sign_exp_mask = vdupq_n_u64(0xfff0000000000000ULL);
+  auto D = hn::DFromV<vtype>();
+  using DI = hn::RebindToSigned<decltype(D)>;
+  DI di;
 
-  int64x2_t k = vshrq_n_s64(vreinterpretq_s64_u64(u_off), 52);
-  uint64x2_t iz = vsubq_u64(u, vandq_u64(u_off, sign_exp_mask));
-  float64x2_t z = vreinterpretq_f64_u64(iz);
+  auto indices = hn::Iota(di, 0);
+  auto stride = hn::Set(di, ssrc);
+  indices = hn::Mul(indices, stride);
 
-  uint64_t i0 = (vgetq_lane_u64(u_off, 0) >> (52 - V_LOG_TABLE_BITS)) & V_LOG_INDEX_MASK;
-  uint64_t i1 = (vgetq_lane_u64(u_off, 1) >> (52 - V_LOG_TABLE_BITS)) & V_LOG_INDEX_MASK;
-
-  float64x2_t invc0 = vld1q_dup_f64(&neon_log_table[i0].invc);
-  float64x2_t invc1 = vld1q_dup_f64(&neon_log_table[i1].invc);
-  float64x2_t invc = vcombine_f64(vget_low_f64(invc0), vget_low_f64(invc1));
-
-  float64x2_t logc0 = vld1q_dup_f64(&neon_log_table[i0].logc);
-  float64x2_t logc1 = vld1q_dup_f64(&neon_log_table[i1].logc);
-  float64x2_t logc = vcombine_f64(vget_low_f64(logc0), vget_low_f64(logc1));
-
-  float64x2_t log2c = vmulq_f64(logc, invln2);
-  float64x2_t r = vfmaq_f64(vdupq_n_f64(-1.0), z, invc);
-  float64x2_t kd = vcvtq_f64_s64(k);
-
-  float64x2_t hi = vfmaq_f64(vaddq_f64(log2c, kd), r, invln2);
-  float64x2_t r2 = vmulq_f64(r, r);
-  float64x2_t y = vfmaq_f64(c2, r, c3);
-  float64x2_t p = vfmaq_f64(c0, r, c1);
-  y = vfmaq_f64(y, r2, c4);
-  y = vfmaq_f64(p, r2, y);
-
-  return vfmaq_f64(hi, y, r2);
+  const int nlanes = hn::Lanes(D);
+  if (len < nlanes) {
+    if (ssrc == 1) {
+      return hn::LoadN(D, src, len);
+    } else {
+      return hn::GatherIndexN(D, src, indices, len);
+    }
+  } else {
+    if (ssrc == 1) {
+      return hn::LoadU(D, src);
+    } else {
+      return hn::GatherIndex(D, src, indices);
+    }
+  }
 }
 
-static void
-simd_log2_neon_DOUBLE(const npy_double *src, npy_intp ssrc,
-                       npy_double *dst, npy_intp sdst, npy_intp len)
+template <typename vtype, typename type_t>
+HWY_ATTR NPY_FINLINE void
+store_vector(vtype vec, type_t* dst, npy_intp sdst, npy_intp len)
 {
-  const float64x2_t c0 = vdupq_n_f64(-0x1.71547652b8300p-1);
-  const float64x2_t c1 = vdupq_n_f64(0x1.ec709dc340953p-2);
-  const float64x2_t c2 = vdupq_n_f64(-0x1.71547651c8f35p-2);
-  const float64x2_t c3 = vdupq_n_f64(0x1.2777ebe12dda5p-2);
-  const float64x2_t c4 = vdupq_n_f64(-0x1.ec738d616fe26p-3);
-  const float64x2_t invln2 = vdupq_n_f64(0x1.71547652b82fep0);
-  const uint64x2_t sign_exp_mask = vdupq_n_u64(0xfff0000000000000ULL);
-  const uint64x2_t off = vdupq_n_u64(0x3fe6900900000000ULL);
-  const float64x2_t zeros_f = vdupq_n_f64(0.0);
-  const float64x2_t ones_f = vdupq_n_f64(1.0);
-  const float64x2_t neg_one = vdupq_n_f64(-1.0);
-  const float64x2_t pos_inf = vdupq_n_f64(NPY_INFINITY);
-  const float64x2_t neg_inf_val = vdupq_n_f64(-NPY_INFINITY);
-  const float64x2_t nan_val = vdupq_n_f64(NPY_NAN);
-  const uint64x2_t all_ones = vdupq_n_u64(0xFFFFFFFFFFFFFFFFULL);
-  /* subnormal detection mask: biased exponent == 0 with a nonzero
-   * mantissa (positive subnormals; negative ones take the is_neg path) */
-  const uint64x2_t sub_exp_mask = vdupq_n_u64(0x7FF0000000000000ULL);
-  const uint64x2_t zero_u64 = vdupq_n_u64(0);
+  auto D = hn::DFromV<vtype>();
+  using DI = hn::RebindToSigned<decltype(D)>;
+  DI di;
 
-  const npy_double *infp = src;
-  npy_double *outp = dst;
-  npy_intp remaining = len;
+  auto indices = hn::Iota(di, 0);
+  auto stride = hn::Set(di, sdst);
+  indices = hn::Mul(indices, stride);
 
-  uint64x2_t invalid_any = vdupq_n_u64(0);
-  uint64x2_t divbyzero_any = vdupq_n_u64(0);
-
-  const npy_intp UNROLL = 4;
-  const npy_intp VEC_SIZE = 2;
-
-  while (remaining >= UNROLL * VEC_SIZE) {
-    float64x2_t x[UNROLL], safe[UNROLL], result[UNROLL];
-    uint64x2_t u[UNROLL], is_nan[UNROLL], is_pos_inf[UNROLL], is_neg_inf[UNROLL];
-    uint64x2_t is_zero[UNROLL], is_neg[UNROLL], is_sub[UNROLL], full_mask[UNROLL];
-    uint64x2_t any_sub = vdupq_n_u64(0);
-
-    if (ssrc == 1) {
-      __builtin_prefetch(infp + 128, 0, 3);
-      for (int i = 0; i < UNROLL; i++)
-        x[i] = vld1q_f64(infp + i * VEC_SIZE);
-    } else {
-      for (int i = 0; i < UNROLL; i++) {
-        double vals[2] = {infp[2 * i * ssrc], infp[(2 * i + 1) * ssrc]};
-        x[i] = vld1q_f64(vals);
-      }
-    }
-
-    for (int i = 0; i < UNROLL; i++) u[i] = vreinterpretq_u64_f64(x[i]);
-
-    for (int i = 0; i < UNROLL; i++) {
-      is_nan[i] = vceqq_f64(x[i], x[i]);
-      is_nan[i] = veorq_u64(is_nan[i], all_ones);
-      is_pos_inf[i] = vceqq_f64(x[i], pos_inf);
-      is_neg_inf[i] = vceqq_f64(x[i], neg_inf_val);
-      is_zero[i] = vceqq_f64(x[i], zeros_f);
-      /* inequality vector compares (FCMGT/FCMGE) raise IOC on QNaN lanes,
-       * unlike vceqq; mask NaN lanes out before comparing */
-      float64x2_t x_nn = vbslq_f64(is_nan[i], zeros_f, x[i]);
-      is_neg[i] = vcltq_f64(x_nn, zeros_f);
-      is_neg[i] = vbicq_u64(is_neg[i], vorrq_u64(is_neg_inf[i], is_zero[i]));
-      uint64x2_t special_mask = vorrq_u64(vorrq_u64(is_nan[i], is_pos_inf[i]),
-                                           vorrq_u64(is_neg_inf[i], is_zero[i]));
-      /* positive subnormals (biased exponent 0, nonzero mantissa): the
-       * table reduction assumes a normalized mantissa, so they are
-       * sanitized like the other specials and fixed up from libm below */
-      is_sub[i] = vbicq_u64(
-          vceqq_u64(vandq_u64(u[i], sub_exp_mask), zero_u64),
-          is_zero[i]);
-      any_sub = vorrq_u64(any_sub, is_sub[i]);
-      full_mask[i] = vorrq_u64(special_mask, vorrq_u64(is_neg[i], is_sub[i]));
-      invalid_any = vorrq_u64(invalid_any, vorrq_u64(is_neg[i], is_neg_inf[i]));
-      divbyzero_any = vorrq_u64(divbyzero_any, is_zero[i]);
-      safe[i] = vbslq_f64(full_mask[i], ones_f, x[i]);
-      u[i] = vreinterpretq_u64_f64(safe[i]);
-    }
-
-    uint64x2_t u_off[UNROLL];
-    int64x2_t k[UNROLL];
-    float64x2_t z[UNROLL], r[UNROLL], r2[UNROLL], invc[UNROLL], log2c[UNROLL];
-    float64x2_t kd[UNROLL], hi[UNROLL], y[UNROLL], p[UNROLL];
-
-    for (int i = 0; i < UNROLL; i++) {
-      u_off[i] = vsubq_u64(u[i], off);
-      k[i] = vshrq_n_s64(vreinterpretq_s64_u64(u_off[i]), 52);
-      uint64x2_t iz = vsubq_u64(u[i], vandq_u64(u_off[i], sign_exp_mask));
-      z[i] = vreinterpretq_f64_u64(iz);
-
-      uint64_t idx0 = (vgetq_lane_u64(u_off[i], 0) >> (52 - V_LOG_TABLE_BITS)) & V_LOG_INDEX_MASK;
-      uint64_t idx1 = (vgetq_lane_u64(u_off[i], 1) >> (52 - V_LOG_TABLE_BITS)) & V_LOG_INDEX_MASK;
-      invc[i] = vcombine_f64(vdup_n_f64(neon_log_table[idx0].invc), vdup_n_f64(neon_log_table[idx1].invc));
-      float64x2_t logc = vcombine_f64(vdup_n_f64(neon_log_table[idx0].logc), vdup_n_f64(neon_log_table[idx1].logc));
-      log2c[i] = vmulq_f64(logc, invln2);
-
-      r[i] = vfmaq_f64(neg_one, z[i], invc[i]);
-      kd[i] = vcvtq_f64_s64(k[i]);
-      hi[i] = vfmaq_f64(vaddq_f64(log2c[i], kd[i]), r[i], invln2);
-      r2[i] = vmulq_f64(r[i], r[i]);
-      y[i] = vfmaq_f64(c2, r[i], c3);
-      p[i] = vfmaq_f64(c0, r[i], c1);
-      y[i] = vfmaq_f64(y[i], r2[i], c4);
-      y[i] = vfmaq_f64(p[i], r2[i], y[i]);
-      result[i] = vfmaq_f64(hi[i], y[i], r2[i]);
-    }
-
-    for (int i = 0; i < UNROLL; i++) {
-      result[i] = vbslq_f64(is_nan[i], x[i], result[i]);
-      result[i] = vbslq_f64(is_pos_inf[i], pos_inf, result[i]);
-      result[i] = vbslq_f64(is_neg_inf[i], nan_val, result[i]);
-      result[i] = vbslq_f64(is_zero[i], neg_inf_val, result[i]);
-      result[i] = vbslq_f64(is_neg[i], nan_val, result[i]);
-    }
-    /* subnormal lanes: evaluate via libm (bit-identical to the scalar
-     * path); decided once per block, so the common case stays cheap */
-    if (__builtin_expect(neon_has_any_lane_u64(any_sub), 0)) {
-      for (int i = 0; i < UNROLL; i++) {
-        if (__builtin_expect(neon_has_any_lane_u64(is_sub[i]), 0)) {
-          double vals[2], outs[2];
-          uint64_t m[2];
-          vst1q_f64(vals, x[i]);
-          vst1q_f64(outs, result[i]);
-          vst1q_u64(m, is_sub[i]);
-          for (int j = 0; j < 2; j++)
-            if (m[j]) outs[j] = npy_log2(vals[j]);
-          result[i] = vld1q_f64(outs);
-        }
-      }
-    }
-
+  const int nlanes = hn::Lanes(D);
+  if (len < nlanes) {
     if (sdst == 1) {
-      for (int i = 0; i < UNROLL; i++)
-        vst1q_f64(outp + i * VEC_SIZE, result[i]);
+      hn::StoreN(vec, D, dst, len);
     } else {
-      for (int i = 0; i < VEC_SIZE; i++) {
-        for (int j = 0; j < UNROLL; j++)
-          outp[(i + j * VEC_SIZE) * sdst] = vgetq_lane_f64(result[j], i);
-      }
+      hn::ScatterIndexN(vec, D, dst, indices, len);
     }
-
-    infp += ssrc * UNROLL * VEC_SIZE;
-    outp += sdst * UNROLL * VEC_SIZE;
-    remaining -= UNROLL * VEC_SIZE;
-  }
-
-  while (remaining > 0) {
-    int current_len = (remaining < VEC_SIZE) ? remaining : VEC_SIZE;
-    float64x2_t x;
-    if (ssrc == 1) {
-      if (current_len == 1) x = vld1q_dup_f64(infp);
-      else x = vld1q_f64(infp);
-    } else {
-      double vals[2] = {infp[0], (remaining > 1) ? infp[ssrc] : infp[0]};
-      x = vld1q_f64(vals);
-    }
-
-    uint64x2_t u = vreinterpretq_u64_f64(x);
-    uint64x2_t is_nan = vceqq_f64(x, x);
-    is_nan = veorq_u64(is_nan, all_ones);
-    uint64x2_t is_pos_inf = vceqq_f64(x, pos_inf);
-    uint64x2_t is_neg_inf = vceqq_f64(x, neg_inf_val);
-    uint64x2_t is_zero = vceqq_f64(x, zeros_f);
-    /* mask NaN lanes out of the inequality compare (see the main loop) */
-    float64x2_t x_nn = vbslq_f64(is_nan, zeros_f, x);
-    uint64x2_t is_neg = vcltq_f64(x_nn, zeros_f);
-    is_neg = vbicq_u64(is_neg, vorrq_u64(is_neg_inf, is_zero));
-
-    invalid_any = vorrq_u64(invalid_any, vorrq_u64(is_neg, is_neg_inf));
-    divbyzero_any = vorrq_u64(divbyzero_any, is_zero);
-
-    /* positive subnormals: the table reduction assumes a normalized
-     * mantissa; route them to the per-lane fallback (its else branch
-     * evaluates them with libm), like the other special values */
-    uint64x2_t is_sub = vbicq_u64(
-        vceqq_u64(vandq_u64(u, sub_exp_mask), zero_u64), is_zero);
-
-    uint64x2_t need_scalar = vorrq_u64(is_sub,
-        vorrq_u64(is_neg, vorrq_u64(is_zero, vorrq_u64(is_nan, is_neg_inf))));
-
-    /* Sanitize special lanes before the polynomial: with the default
-     * -fno-trapping-math the compiler may speculate the vector path below
-     * onto the fallback iterations, and evaluating it on raw NaN/inf bit
-     * patterns can raise spurious FP flags. */
-    x = vbslq_f64(need_scalar, ones_f, x);
-    u = vreinterpretq_u64_f64(x);
-
-    if (__builtin_expect(!neon_has_any_lane_u64(need_scalar), 1)) {
-      uint64x2_t u_off = vsubq_u64(u, off);
-      float64x2_t result = neon_log2_inline_core(u, u_off);
-
-      result = vbslq_f64(is_pos_inf, pos_inf, result);
-
-      if (sdst == 1) {
-        if (current_len == 1) vst1q_lane_f64(outp, result, 0);
-        else vst1q_f64(outp, result);
-      } else {
-        outp[0] = vgetq_lane_f64(result, 0);
-        if (current_len > 1) outp[sdst] = vgetq_lane_f64(result, 1);
-      }
-    } else {
-      uint64_t arr_nan[2], arr_pinf[2], arr_ninf[2], arr_neg[2], arr_zero[2];
-      vst1q_u64(arr_nan, is_nan);
-      vst1q_u64(arr_pinf, is_pos_inf);
-      vst1q_u64(arr_ninf, is_neg_inf);
-      vst1q_u64(arr_neg, is_neg);
-      vst1q_u64(arr_zero, is_zero);
-      const npy_intp ds = (sdst == 1) ? 1 : sdst;
-      for (int i = 0; i < current_len; i++) {
-        double val = (ssrc == 1) ? infp[i] : infp[i * ssrc];
-        double r;
-        if      (arr_nan[i])  r = val;
-        else if (arr_pinf[i]) r = NPY_INFINITY;
-        else if (arr_ninf[i]) r = NPY_NAN;
-        else if (arr_zero[i]) r = -NPY_INFINITY;
-        else if (arr_neg[i])  r = NPY_NAN;
-        else                  r = npy_log2(val);
-        outp[i * ds] = r;
-      }
-    }
-
-    infp += ssrc * current_len;
-    outp += sdst * current_len;
-    remaining -= current_len;
-  }
-  /* The masked SIMD lanes above never execute a trapping instruction, so
-   * raise the FP flags that libm's log2 would have raised for the special
-   * inputs (invalid: x < 0 or -inf, divide-by-zero: +-0) explicitly. */
-  if (neon_has_any_lane_u64(invalid_any)) {
-    npy_set_floatstatus_invalid();
-  }
-  if (neon_has_any_lane_u64(divbyzero_any)) {
-    npy_set_floatstatus_divbyzero();
-  }
-}
-
-static inline float32x4_t
-neon_log2f_inline_core_preloaded(uint32x4_t u_off, float32x4_t n,
-                                  float32x4_t c0, float32x4_t c2, float32x4_t c4,
-                                  float32x4_t c6, float32x4_t c8, float32x4_t c1357)
-{
-  const uint32x4_t off = vdupq_n_u32(0x3f2aaaab);
-  const uint32x4_t mantissa_mask = vdupq_n_u32(0x007fffff);
-
-  uint32x4_t u = vaddq_u32(vandq_u32(u_off, mantissa_mask), off);
-  float32x4_t r = vsubq_f32(vreinterpretq_f32_u32(u), vdupq_n_f32(1.0f));
-
-  float32x4_t r2 = vmulq_f32(r, r);
-
-  float32x4_t c01 = vfmaq_laneq_f32(c0, r, c1357, 0);
-  float32x4_t c23 = vfmaq_laneq_f32(c2, r, c1357, 1);
-  float32x4_t c45 = vfmaq_laneq_f32(c4, r, c1357, 2);
-  float32x4_t c67 = vfmaq_laneq_f32(c6, r, c1357, 3);
-  float32x4_t p68 = vfmaq_f32(c67, r2, c8);
-  float32x4_t p48 = vfmaq_f32(c45, r2, p68);
-  float32x4_t p28 = vfmaq_f32(c23, r2, p48);
-  float32x4_t p = vfmaq_f32(c01, r2, p28);
-
-  return vfmaq_f32(n, p, r);
-}
-
-
-static void __attribute__((optimize("O3")))
-simd_log2_neon_FLOAT(const npy_float *src, npy_intp ssrc,
-                      npy_float *dst, npy_intp sdst, npy_intp len)
-{
-  const float32x4_t c0 = vdupq_n_f32(0x1.715476p0f);
-  const float32x4_t c2 = vdupq_n_f32(0x1.ec701cp-2f);
-  const float32x4_t c4 = vdupq_n_f32(0x1.27a0b8p-2f);
-  const float32x4_t c6 = vdupq_n_f32(0x1.9d8ecap-3f);
-  const float32x4_t c8 = vdupq_n_f32(0x1.9e495p-3f);
-  static const float c1357_arr[4] = {
-    -0x1.715458p-1f, -0x1.7171a4p-2f, -0x1.e5143ep-3f, -0x1.c675bp-3f
-  };
-  const uint32x4_t off = vdupq_n_u32(0x3f2aaaab);
-  const float32x4_t zeros_f = vdupq_n_f32(0.0f);
-  const float32x4_t ones_f = vdupq_n_f32(1.0f);
-  const float32x4_t pos_inf = vdupq_n_f32(NPY_INFINITYF);
-  const float32x4_t neg_inf_val = vdupq_n_f32(-NPY_INFINITYF);
-  const float32x4_t nan_val = vdupq_n_f32(NPY_NANF);
-  /* subnormal detection (see the DOUBLE kernel) */
-  const uint32x4_t sub_exp_mask = vdupq_n_u32(0x7F800000u);
-  const uint32x4_t zero_u32 = vdupq_n_u32(0);
-  const float32x4_t c1357 = vld1q_f32(c1357_arr);
-
-  const npy_float *infp = src;
-  npy_float *outp = dst;
-  npy_intp remaining = len;
-
-  uint32x4_t invalid_any = vdupq_n_u32(0);
-  uint32x4_t divbyzero_any = vdupq_n_u32(0);
-
-  const npy_intp UNROLL = 4;
-  const npy_intp VEC_SIZE = 4;
-
-  while (remaining >= UNROLL * VEC_SIZE) {
-    float32x4_t x[UNROLL], result[UNROLL];
-    uint32x4_t u[UNROLL], is_nan[UNROLL], is_pos_inf[UNROLL], is_neg_inf[UNROLL];
-    uint32x4_t is_zero[UNROLL], is_neg[UNROLL], is_sub[UNROLL], full_mask[UNROLL];
-    uint32x4_t any_sub = vdupq_n_u32(0);
-
-    if (ssrc == 1) {
-      __builtin_prefetch(infp + 128, 0, 3);
-      for (int i = 0; i < UNROLL; i++)
-        x[i] = vld1q_f32(infp + i * VEC_SIZE);
-    } else {
-      for (int i = 0; i < UNROLL; i++) {
-        float vals[VEC_SIZE];
-        for (int j = 0; j < VEC_SIZE; j++)
-          vals[j] = infp[(i * VEC_SIZE + j) * ssrc];
-        x[i] = vld1q_f32(vals);
-      }
-    }
-
-    for (int i = 0; i < UNROLL; i++) u[i] = vreinterpretq_u32_f32(x[i]);
-
-    for (int i = 0; i < UNROLL; i++) {
-      is_nan[i] = vmvnq_u32(vceqq_f32(x[i], x[i]));
-      is_pos_inf[i] = vceqq_f32(x[i], pos_inf);
-      is_neg_inf[i] = vceqq_f32(x[i], neg_inf_val);
-      is_zero[i] = vceqq_f32(x[i], zeros_f);
-      /* inequality vector compares raise IOC on QNaN lanes (see the
-       * DOUBLE kernel); mask NaN lanes out before comparing */
-      float32x4_t x_nn = vbslq_f32(is_nan[i], zeros_f, x[i]);
-      is_neg[i] = vcltq_f32(x_nn, zeros_f);
-      is_neg[i] = vbicq_u32(is_neg[i], vorrq_u32(is_neg_inf[i], is_zero[i]));
-      uint32x4_t special_mask = vorrq_u32(vorrq_u32(is_nan[i], is_pos_inf[i]),
-                                           vorrq_u32(is_neg_inf[i], is_zero[i]));
-      /* positive subnormals: sanitized like the other specials, fixed up
-       * from libm below (see the DOUBLE kernel) */
-      is_sub[i] = vbicq_u32(
-          vceqq_u32(vandq_u32(u[i], sub_exp_mask), zero_u32),
-          is_zero[i]);
-      any_sub = vorrq_u32(any_sub, is_sub[i]);
-      full_mask[i] = vorrq_u32(special_mask, vorrq_u32(is_neg[i], is_sub[i]));
-      invalid_any = vorrq_u32(invalid_any, vorrq_u32(is_neg[i], is_neg_inf[i]));
-      divbyzero_any = vorrq_u32(divbyzero_any, is_zero[i]);
-      float32x4_t safe = vbslq_f32(full_mask[i], ones_f, x[i]);
-      u[i] = vreinterpretq_u32_f32(safe);
-    }
-
-    for (int i = 0; i < UNROLL; i++) {
-      uint32x4_t u_off = vsubq_u32(u[i], off);
-      float32x4_t n = vcvtq_f32_s32(vshrq_n_s32(vreinterpretq_s32_u32(u_off), 23));
-      result[i] = neon_log2f_inline_core_preloaded(u_off, n, c0, c2, c4, c6, c8, c1357);
-    }
-
-    for (int i = 0; i < UNROLL; i++) {
-      result[i] = vbslq_f32(is_nan[i], x[i], result[i]);
-      result[i] = vbslq_f32(is_pos_inf[i], pos_inf, result[i]);
-      result[i] = vbslq_f32(is_neg_inf[i], nan_val, result[i]);
-      result[i] = vbslq_f32(is_zero[i], neg_inf_val, result[i]);
-      result[i] = vbslq_f32(is_neg[i], nan_val, result[i]);
-    }
-    /* subnormal lanes: evaluate via libm (bit-identical to the scalar
-     * path); decided once per block, so the common case stays cheap */
-    if (__builtin_expect(neon_has_any_lane_u32(any_sub), 0)) {
-      for (int i = 0; i < UNROLL; i++) {
-        if (__builtin_expect(neon_has_any_lane_u32(is_sub[i]), 0)) {
-          float vals[4], outs[4];
-          uint32_t m[4];
-          vst1q_f32(vals, x[i]);
-          vst1q_f32(outs, result[i]);
-          vst1q_u32(m, is_sub[i]);
-          for (int j = 0; j < 4; j++)
-            if (m[j]) outs[j] = npy_log2f(vals[j]);
-          result[i] = vld1q_f32(outs);
-        }
-      }
-    }
-
+  } else {
     if (sdst == 1) {
-      for (int i = 0; i < UNROLL; i++)
-        vst1q_f32(outp + i * VEC_SIZE, result[i]);
+      hn::StoreU(vec, D, dst);
     } else {
-      for (int i = 0; i < VEC_SIZE; i++) {
-        for (int j = 0; j < UNROLL; j++)
-          outp[(i + j * VEC_SIZE) * sdst] = vgetq_lane_f32(result[j], i);
-      }
+      hn::ScatterIndex(vec, D, dst, indices);
     }
-
-    infp += ssrc * UNROLL * VEC_SIZE;
-    outp += sdst * UNROLL * VEC_SIZE;
-    remaining -= UNROLL * VEC_SIZE;
   }
+}
 
-  while (remaining > 0) {
-    int current_len = (remaining < VEC_SIZE) ? remaining : VEC_SIZE;
-    float32x4_t x;
-    if (ssrc == 1 && current_len == VEC_SIZE) {
-      x = vld1q_f32(infp);
-    } else {
-      float vals[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-      for (int i = 0; i < current_len; i++) vals[i] = infp[i * ssrc];
-      x = vld1q_f32(vals);
-    }
+/* AOR v_log2_data.c table (TABLE_BITS=7, N=128), de-interleaved into
+ * per-field arrays for hn::GatherIndex. invc matches v_log_data.c;
+ * log2c was scaled by log2(e) in extended precision upstream, so no
+ * runtime invln2 rounding of the table is needed. */
 
-    uint32x4_t u = vreinterpretq_u32_f32(x);
-    uint32x4_t is_nan = vceqq_f32(x, x);
-    is_nan = vmvnq_u32(is_nan);
-    uint32x4_t is_pos_inf = vceqq_f32(x, pos_inf);
-    uint32x4_t is_neg_inf = vceqq_f32(x, neg_inf_val);
-    uint32x4_t is_zero = vceqq_f32(x, zeros_f);
-    /* mask NaN lanes out of the inequality compare (see the main loop) */
-    float32x4_t x_nn = vbslq_f32(is_nan, zeros_f, x);
-    uint32x4_t is_neg = vcltq_f32(x_nn, zeros_f);
-    is_neg = vbicq_u32(is_neg, vorrq_u32(is_neg_inf, is_zero));
+static const double hwy_log2_table_invc[128] = {
+  0x1.6a133d0dec120p+0, 0x1.6815f2f3e42edp+0, 0x1.661e39be1ac9ep+0, 0x1.642bfa30ac371p+0,
+  0x1.623f1d916f323p+0, 0x1.60578da220f65p+0, 0x1.5e75349dea571p+0, 0x1.5c97fd387a75ap+0,
+  0x1.5abfd2981f200p+0, 0x1.58eca051dc99cp+0, 0x1.571e526d9df12p+0, 0x1.5554d555b3fcbp+0,
+  0x1.539015e2a20cdp+0, 0x1.51d0014ee0164p+0, 0x1.50148538cd9eep+0, 0x1.4e5d8f9f698a1p+0,
+  0x1.4cab0edca66bep+0, 0x1.4afcf1a9db874p+0, 0x1.495327136e16fp+0, 0x1.47ad9e84af28fp+0,
+  0x1.460c47b39ae15p+0, 0x1.446f12b278001p+0, 0x1.42d5efdd720ecp+0, 0x1.4140cfe001a0fp+0,
+  0x1.3fafa3b421f69p+0, 0x1.3e225c9c8ece5p+0, 0x1.3c98ec29a211ap+0, 0x1.3b13442a413fep+0,
+  0x1.399156baa3c54p+0, 0x1.38131639b4cdbp+0, 0x1.36987540fbf53p+0, 0x1.352166b648f61p+0,
+  0x1.33adddb3eb575p+0, 0x1.323dcd99fc1d3p+0, 0x1.30d129fefc7d2p+0, 0x1.2f67e6b72fe7dp+0,
+  0x1.2e01f7cf8b187p+0, 0x1.2c9f518ddc86ep+0, 0x1.2b3fe86e5f413p+0, 0x1.29e3b1211b25cp+0,
+  0x1.288aa08b373cfp+0, 0x1.2734abcaa8467p+0, 0x1.25e1c82459b81p+0, 0x1.2491eb1ad59c5p+0,
+  0x1.23450a54048b5p+0, 0x1.21fb1bb09e578p+0, 0x1.20b415346d8f7p+0, 0x1.1f6fed179a1acp+0,
+  0x1.1e2e99b93c7b3p+0, 0x1.1cf011a7a882ap+0, 0x1.1bb44b97dba5ap+0, 0x1.1a7b3e66cdd4fp+0,
+  0x1.1944e11dc56cdp+0, 0x1.18112aebb1a6ep+0, 0x1.16e013231b7e9p+0, 0x1.15b1913f156cfp+0,
+  0x1.14859cdedde13p+0, 0x1.135c2dc68cfa4p+0, 0x1.12353bdb01684p+0, 0x1.1110bf25b85b4p+0,
+  0x1.0feeafd2f8577p+0, 0x1.0ecf062c51c3bp+0, 0x1.0db1baa076c8bp+0, 0x1.0c96c5bb3048ep+0,
+  0x1.0b7e20263e070p+0, 0x1.0a67c2acd0ce3p+0, 0x1.0953a6391e982p+0, 0x1.0841c3caea380p+0,
+  0x1.07321489b13eap+0, 0x1.062491aee9904p+0, 0x1.05193497a7cc5p+0, 0x1.040ff6b5f5e9fp+0,
+  0x1.0308d19aa6127p+0, 0x1.0203beedb0c67p+0, 0x1.010037d38bcc2p+0, 1.0,
+  0x1.fc06d493cca10p-1, 0x1.f81e6ac3b918fp-1, 0x1.f44546ef18996p-1, 0x1.f07b10382c84bp-1,
+  0x1.ecbf7070e59d4p-1, 0x1.e91213f715939p-1, 0x1.e572a9a75f7b7p-1, 0x1.e1e0e2c530207p-1,
+  0x1.de5c72d8a8be3p-1, 0x1.dae50fa5658ccp-1, 0x1.d77a71145a2dap-1, 0x1.d41c51166623ep-1,
+  0x1.d0ca6ba0bb29fp-1, 0x1.cd847e8e59681p-1, 0x1.ca4a499693e00p-1, 0x1.c71b8e399e821p-1,
+  0x1.c3f80faf19077p-1, 0x1.c0df92dc2b0ecp-1, 0x1.bdd1de3cbb542p-1, 0x1.baceb9e1007a3p-1,
+  0x1.b7d5ef543e55ep-1, 0x1.b4e749977d953p-1, 0x1.b20295155478ep-1, 0x1.af279f8e82be2p-1,
+  0x1.ac5638197fdf3p-1, 0x1.a98e2f102e087p-1, 0x1.a6cf5606d05c1p-1, 0x1.a4197fc04d746p-1,
+  0x1.a16c80293dc01p-1, 0x1.9ec82c4dc5bc9p-1, 0x1.9c2c5a491f534p-1, 0x1.9998e1480b618p-1,
+  0x1.970d9977c6c2dp-1, 0x1.948a5c023d212p-1, 0x1.920f0303d6809p-1, 0x1.8f9b698a98b45p-1,
+  0x1.8d2f6b81726f6p-1, 0x1.8acae5bb55badp-1, 0x1.886db5d9275b8p-1, 0x1.8617ba567c13cp-1,
+  0x1.83c8d27487800p-1, 0x1.8180de3c5dbe7p-1, 0x1.7f3fbe71cdb71p-1, 0x1.7d055498071c1p-1,
+  0x1.7ad182e54f65ap-1, 0x1.78a42c3c90125p-1, 0x1.767d342f76944p-1, 0x1.745c7ef26b00ap-1,
+  0x1.7241f15769d0fp-1, 0x1.702d70d396e41p-1, 0x1.6e1ee3700cd11p-1, 0x1.6c162fc9cbe02p-1,
+};
+static const double hwy_log2_table_log2c[128] = {
+  -0x1.00130d57f5fadp-1, -0x1.f802661bd725ep-2, -0x1.efea1c6f73a5bp-2, -0x1.e7dd1dcd06f05p-2,
+  -0x1.dfdb4ae024809p-2, -0x1.d7e484d101958p-2, -0x1.cff8ad452f6ep-2, -0x1.c817a666c997fp-2,
+  -0x1.c04152d640419p-2, -0x1.b87595a3f64b2p-2, -0x1.b0b4526c44d07p-2, -0x1.a8fd6d1a90f5ep-2,
+  -0x1.a150ca2559fc6p-2, -0x1.99ae4e62cca29p-2, -0x1.9215df1a1e842p-2, -0x1.8a8761fe1f0d9p-2,
+  -0x1.8302bd1cc9a54p-2, -0x1.7b87d6fb437f6p-2, -0x1.741696673a86dp-2, -0x1.6caee2b3c6fe4p-2,
+  -0x1.6550a3666c27ap-2, -0x1.5dfbc08de02a4p-2, -0x1.56b022766c84ap-2, -0x1.4f6db1c955536p-2,
+  -0x1.4834579063054p-2, -0x1.4103fd2249a76p-2, -0x1.39dc8c3fe6dabp-2, -0x1.32bdeed4b5c8fp-2,
+  -0x1.2ba80f41e20ddp-2, -0x1.249ad8332f4a7p-2, -0x1.1d96347e7f3ebp-2, -0x1.169a0f7d6604ap-2,
+  -0x1.0fa654a221909p-2, -0x1.08baefcf8251ap-2, -0x1.01d7cd14deecdp-2, -0x1.f5f9b1ad55495p-3,
+  -0x1.e853ff76a77afp-3, -0x1.dabe5d624cba1p-3, -0x1.cd38a5cef4822p-3, -0x1.bfc2b38d315f9p-3,
+  -0x1.b25c61f5edd0fp-3, -0x1.a5058d18e9cacp-3, -0x1.97be1113e47a3p-3, -0x1.8a85cafdf5e27p-3,
+  -0x1.7d5c97e8fc45bp-3, -0x1.704255d6486e4p-3, -0x1.6336e2cedd7bfp-3, -0x1.563a1d9b0cc6ap-3,
+  -0x1.494be541aaa6fp-3, -0x1.3c6c1964dd0f2p-3, -0x1.2f9a99f19a243p-3, -0x1.22d747344446p-3,
+  -0x1.1622020d4f7f5p-3, -0x1.097aabb3553f3p-3, -0x1.f9c24b48014c5p-4, -0x1.e0aaa3bdc858ap-4,
+  -0x1.c7ae257c952d6p-4, -0x1.aecc960a03e58p-4, -0x1.9605bb724d541p-4, -0x1.7d595ca7147cep-4,
+  -0x1.64c74165002d9p-4, -0x1.4c4f31c86d344p-4, -0x1.33f0f70388258p-4, -0x1.1bac5abb3037dp-4,
+  -0x1.0381272495f21p-4, -0x1.d6de4eba2de2ap-5, -0x1.a6ec4e8156898p-5, -0x1.772be542e3e1bp-5,
+  -0x1.479cadcde852dp-5, -0x1.183e4265faa5p-5, -0x1.d2207fdaa1b85p-6, -0x1.742486cb4a6a2p-6,
+  -0x1.1687d77cfc299p-6, -0x1.7293623a6b5dep-7, -0x1.70ec80ec8f25dp-8, 0.0,
+  0x1.704c1ca6b6bc9p-7, 0x1.6eac8ba664beap-6, 0x1.11e67d040772dp-5, 0x1.6bc665e2105dep-5,
+  0x1.c4f8a9772bf1dp-5, 0x1.0ebff10fbb951p-4, 0x1.3aaf4d7805d11p-4, 0x1.664ba81a4d717p-4,
+  0x1.9196387da6de4p-4, 0x1.bc902f2b7796p-4, 0x1.e73ab5f584f28p-4, 0x1.08cb78510d232p-3,
+  0x1.1dd2fe2f0dcb5p-3, 0x1.32b4784400df4p-3, 0x1.47706f3d49942p-3, 0x1.5c0768ee4a4dcp-3,
+  0x1.7079e86fc7c6dp-3, 0x1.84c86e1183467p-3, 0x1.98f377a34b499p-3, 0x1.acfb803bc924bp-3,
+  0x1.c0e10098b025fp-3, 0x1.d4a46efe103efp-3, 0x1.e8463f45b8d0bp-3, 0x1.fbc6e3228997fp-3,
+  0x1.079364f2e5aa8p-2, 0x1.1133306010a63p-2, 0x1.1ac309631bd17p-2, 0x1.24432485370c1p-2,
+  0x1.2db3b5449132fp-2, 0x1.3714ee1d7a32p-2, 0x1.406700ab52c94p-2, 0x1.49aa1d87522b2p-2,
+  0x1.52de746d7ecb2p-2, 0x1.5c0434336b343p-2, 0x1.651b8ad6c90d1p-2, 0x1.6e24a56ab5831p-2,
+  0x1.771fb04ec29b1p-2, 0x1.800cd6f19c25ep-2, 0x1.88ec441df11dfp-2, 0x1.91be21b7c93f5p-2,
+  0x1.9a8298f8c7454p-2, 0x1.a339d255c04ddp-2, 0x1.abe3f59f43db7p-2, 0x1.b48129deca9efp-2,
+  0x1.bd119575364c1p-2, 0x1.c5955e23ebcbcp-2, 0x1.ce0ca8f4e1557p-2, 0x1.d6779a5a75774p-2,
+  0x1.ded6563550d27p-2, 0x1.e728ffafd840ep-2, 0x1.ef6fb96c8d739p-2, 0x1.f7aaa57907219p-2,
+};
 
-    invalid_any = vorrq_u32(invalid_any, vorrq_u32(is_neg, is_neg_inf));
-    divbyzero_any = vorrq_u32(divbyzero_any, is_zero);
+/* AOR inline_log2: x = 2^k * z with z in [Off, 2*Off), split into N=128
+ * subintervals; log2(x) = log1p(z/c - 1)/ln2 + log2(c) + k. The reduction
+ * reconstructs z as a normal positive value for any input bit pattern,
+ * so this core raises no invalid/divide/overflow/underflow flags. */
+HWY_ATTR NPY_FINLINE vec_f64
+hwy_log2_core(vec_u64 u, vec_u64 u_off)
+{
+  const vec_f64 c0 = hn::Set(f64, -0x1.71547652b8300p-1);
+  const vec_f64 c1 = hn::Set(f64, 0x1.ec709dc340953p-2);
+  const vec_f64 c2 = hn::Set(f64, -0x1.71547651c8f35p-2);
+  const vec_f64 c3 = hn::Set(f64, 0x1.2777ebe12dda5p-2);
+  const vec_f64 c4 = hn::Set(f64, -0x1.ec738d616fe26p-3);
+  const vec_f64 invln2 = hn::Set(f64, 0x1.71547652b82fep0);
 
-    /* positive subnormals: the table reduction assumes a normalized
-     * mantissa; route them to the per-lane fallback (its else branch
-     * evaluates them with libm), like the other special values */
-    uint32x4_t is_sub = vbicq_u32(
-        vceqq_u32(vandq_u32(u, sub_exp_mask), zero_u32), is_zero);
+  vec_s64 k = hn::ShiftRight<52>(hn::BitCast(s64, u_off)); /* arithmetic */
+  vec_u64 iz = hn::Sub(u, hn::And(u_off, hn::Set(u64, 0xfff0000000000000ULL)));
+  vec_f64 z = hn::BitCast(f64, iz);
+  /* per-lane table index: (u_off >> (52 - TABLE_BITS)) & (N - 1) */
+  vec_u64 idx = hn::And(hn::ShiftRight<45>(u_off), hn::Set(u64, 127));
+  vec_f64 invc = hn::GatherIndex(f64, hwy_log2_table_invc, hn::BitCast(s64, idx));
+  vec_f64 log2c = hn::GatherIndex(f64, hwy_log2_table_log2c, hn::BitCast(s64, idx));
 
-    uint32x4_t need_scalar = vorrq_u32(is_sub,
-        vorrq_u32(is_neg, vorrq_u32(is_zero, vorrq_u32(is_nan, is_neg_inf))));
+  vec_f64 r = hn::MulAdd(z, invc, hn::Set(f64, -1.0));
+  vec_f64 kd = hn::ConvertTo(f64, k);
+  vec_f64 hi = hn::MulAdd(r, invln2, hn::Add(log2c, kd));
+  /* y = r2*(c0 + r*c1 + r2*(c2 + r*c3 + r2*c4)) + hi */
+  vec_f64 r2 = hn::Mul(r, r);
+  vec_f64 y = hn::MulAdd(r, c3, c2);
+  vec_f64 p = hn::MulAdd(r, c1, c0);
+  y = hn::MulAdd(r2, c4, y);
+  y = hn::MulAdd(r2, y, p);
+  return hn::MulAdd(r2, y, hi);
+}
 
-    /* Sanitize special lanes before the polynomial (see the DOUBLE kernel
-     * above: FP speculation of the vector path must not evaluate it on raw
-     * NaN/inf bit patterns). */
-    x = vbslq_f32(need_scalar, ones_f, x);
-    u = vreinterpretq_u32_f32(x);
+/* AOR special_case: subnormal/zero/negative/NaN lanes are promoted via
+ * 2*log2(sqrt(x)); inf/nan/negative/zero are then patched to constants.
+ * All detection uses integer bit compares (no FP flags). The NaN
+ * constant patch is overridden by a bit-exact NaN passthrough, and the
+ * invalid/divide masks are accumulated for the exit writeback. */
+HWY_ATTR NPY_FINLINE vec_f64
+hwy_log2_special(vec_u64 u_off, mask_u64 &invalid_any,
+                 mask_u64 &divbyzero_any)
+{
+  const vec_u64 off = hn::Set(u64, 0x3fe6900900000000ULL);
+  const vec_u64 inf_bits = hn::Set(u64, 0x7ff0000000000000ULL);
+  vec_u64 u = hn::Add(u_off, off); /* recover x */
+  vec_f64 x = hn::BitCast(f64, u);
+  auto promote = hn::Ge(
+      hn::Sub(u_off, hn::Set(u64, 0x0010000000000000ULL - 0x3fe6900900000000ULL)),
+      hn::Set(u64, 0x7ffe000000000000ULL));
+  vec_f64 xs = hn::IfThenElse(hn::RebindMask(f64, promote), hn::Sqrt(x), x);
+  vec_u64 us = hn::BitCast(u64, xs);
+  vec_f64 y = hwy_log2_core(us, hn::Sub(us, off));
+  y = hn::IfThenElse(hn::RebindMask(f64, promote), hn::Mul(y, hn::Set(f64, 2.0)), y);
 
-    if (__builtin_expect(!neon_has_any_lane_u32(need_scalar), 1)) {
-      uint32x4_t u_off = vsubq_u32(u, off);
-      float32x4_t n = vcvtq_f32_s32(vshrq_n_s32(vreinterpretq_s32_u32(u_off), 23));
-      float32x4_t result = neon_log2f_inline_core_preloaded(u_off, n, c0, c2, c4, c6, c8, c1357);
+  /* unsigned bits >= +inf covers +-inf, +-NaN and every negative */
+  vec_u64 abs_u = hn::And(u, hn::Set(u64, 0x7fffffffffffffffULL));
+  auto is_infnan = hn::Ge(u, inf_bits);
+  auto is_zero = hn::Eq(abs_u, hn::Zero(u64));
+  auto is_nan = hn::Gt(abs_u, inf_bits);
+  y = hn::IfThenElse(hn::RebindMask(f64, hn::Or(is_infnan, is_zero)),
+                     hn::Set(f64, NPY_NAN), y);
+  y = hn::IfThenElse(hn::RebindMask(f64, hn::Eq(u, inf_bits)),
+                     hn::Set(f64, NPY_INFINITY), y);
+  y = hn::IfThenElse(hn::RebindMask(f64, is_zero),
+                     hn::Set(f64, -NPY_INFINITY), y);
+  /* contract: NaN sign + payload pass through bit-exactly; quietize a
+   * signaling NaN (set bit 51) so the result is a quiet NaN, matching
+   * libm, which quietizes sNaN while preserving sign + payload */
+  y = hn::IfThenElse(hn::RebindMask(f64, is_nan),
+                     hn::BitCast(f64, hn::Or(u, hn::Set(u64, 0x0008000000000000ULL))), y);
 
-      result = vbslq_f32(is_pos_inf, pos_inf, result);
+  /* invalid: negative finite or -inf (not -0, not NaN); divide: +-0 */
+  auto sign_set = hn::Ne(hn::And(u, hn::Set(u64, 0x8000000000000000ULL)),
+                         hn::Zero(u64));
+  auto is_neg = hn::And(sign_set, hn::Not(hn::Or(is_nan, is_zero)));
+  invalid_any = hn::Or(invalid_any, is_neg);
+  divbyzero_any = hn::Or(divbyzero_any, is_zero);
+  return y;
+}
 
-      if (sdst == 1) {
-        if (current_len == 1) vst1q_lane_f32(outp, result, 0);
-        else if (current_len == 2) vst1_f32(outp, vget_low_f32(result));
-        else if (current_len == 3) {
-          vst1q_lane_f32(outp, result, 0);
-          vst1q_lane_f32(outp + 1, result, 1);
-          vst1q_lane_f32(outp + 2, result, 2);
-        } else vst1q_f32(outp, result);
-      } else {
-        for (int i = 0; i < current_len; i++) outp[i * sdst] = vgetq_lane_f32(result, i);
-      }
-    } else {
-      uint32_t arr_nan[4], arr_pinf[4], arr_ninf[4], arr_neg[4], arr_zero[4];
-      vst1q_u32(arr_nan, is_nan);
-      vst1q_u32(arr_pinf, is_pos_inf);
-      vst1q_u32(arr_ninf, is_neg_inf);
-      vst1q_u32(arr_neg, is_neg);
-      vst1q_u32(arr_zero, is_zero);
-      const npy_intp ds = (sdst == 1) ? 1 : sdst;
-      for (int k = 0; k < current_len; k++) {
-        float val = infp[k * ssrc];
-        float r;
-        if      (arr_nan[k])  r = val;
-        else if (arr_pinf[k]) r = NPY_INFINITYF;
-        else if (arr_ninf[k]) r = NPY_NANF;
-        else if (arr_zero[k]) r = -NPY_INFINITYF;
-        else if (arr_neg[k])  r = NPY_NANF;
-        else                  r = npy_log2f(val);
-        outp[k * ds] = r;
-      }
-    }
-
-    infp += ssrc * current_len;
-    outp += sdst * current_len;
-    remaining -= current_len;
+/* Short-vector API: one lane-parallel log2(x) evaluation. The clean /
+ * special branch lives here; special lanes accumulate invalid/divide
+ * into the caller-owned accumulators for the loop-exit writeback. */
+HWY_ATTR NPY_FINLINE vec_f64
+log2_f64_kernel(vec_f64 x, mask_u64& inv_acc, mask_u64& div_acc)
+{
+  const vec_u64 off = hn::Set(u64, 0x3fe6900900000000ULL);
+  /* lower bound - offset (wraps): subnormals are detected after the
+   * offset has been subtracted, as in AOR */
+  const vec_u64 off_lower =
+      hn::Set(u64, 0x0010000000000000ULL - 0x3fe6900900000000ULL);
+  /* asuint64(inf) - asuint64(0x1p-1022): the fast path covers exactly
+   * the positive normals below inf (AOR's narrowed u32 check) */
+  const vec_u64 outer_bound = hn::Set(u64, 0x7fe0000000000000ULL);
+  vec_u64 u = hn::BitCast(u64, x);
+  vec_u64 u_off = hn::Sub(u, off);
+  auto special_m = hn::Ge(hn::Sub(u_off, off_lower), outer_bound);
+  if (!hn::AllFalse(u64, special_m)) {
+    return hwy_log2_special(u_off, inv_acc, div_acc);
   }
-  /* The masked SIMD lanes above never execute a trapping instruction, so
-   * raise the FP flags that libm's log2 would have raised for the special
-   * inputs (invalid: x < 0 or -inf, divide-by-zero: +-0) explicitly. */
-  if (neon_has_any_lane_u32(invalid_any)) {
+  return hwy_log2_core(u, u_off);
+}
+
+HWY_ATTR static void
+simd_log2_hwy_DOUBLE(const npy_double* src, npy_intp ssrc,
+                     npy_double* dst, npy_intp sdst, npy_intp len)
+{
+  const int nlanes = hn::Lanes(f64);
+  auto inv_acc = hn::MaskFalse(u64);
+  auto div_acc = hn::MaskFalse(u64);
+
+  for (; len > 0; len -= nlanes, src += ssrc * nlanes, dst += sdst * nlanes) {
+    vec_f64 x = load_vector<vec_f64>(src, ssrc, len);
+    if (len < nlanes) {
+      /* pad inactive tail lanes with 1.0 (log2(1) = 0, no flags, not
+       * special): LoadN's zero fill would otherwise raise divide */
+      x = hn::IfThenElse(hn::FirstN(f64, len), x, hn::Set(f64, 1.0));
+    }
+    vec_f64 out = log2_f64_kernel(x, inv_acc, div_acc);
+    store_vector<vec_f64>(out, dst, sdst, len);
+  }
+  /* The constant patches never execute a trapping instruction, so raise
+   * the FP flags libm's log2 would have raised for the special inputs
+   * (invalid: x < 0 or -inf, divide-by-zero: +-0) explicitly. */
+  if (!hn::AllFalse(u64, inv_acc)) {
     npy_set_floatstatus_invalid();
   }
-  if (neon_has_any_lane_u32(divbyzero_any)) {
+  if (!hn::AllFalse(u64, div_acc)) {
     npy_set_floatstatus_divbyzero();
   }
 }
 
-static inline void
-simd_log2_neon_HALF_stride1(const npy_half *src, npy_half *dst, npy_intp len)
+/* AOR inline_log2f: same argument reduction as logf;
+ * log2(x) = log2(1+r) + n with a degree-8 polynomial (Remez on
+ * log2(1+r)/r, r in [-1/3, 1/3]). Flag-free for any input bit pattern. */
+HWY_ATTR NPY_FINLINE vec_f32
+hwy_log2f_core(vec_u32 u_off, vec_f32 n)
 {
-  const uint32x4_t off_v = vdupq_n_u32(0x3f2aaaab);
-  const float32x4_t zeros_v = vdupq_n_f32(0.0f);
-  const float32x4_t ones_v = vdupq_n_f32(1.0f);
-  const float32x4_t pos_inf_v = vdupq_n_f32(NPY_INFINITYF);
-  const float32x4_t neg_inf_v = vdupq_n_f32(-NPY_INFINITYF);
-  const float32x4_t nan_v = vdupq_n_f32(NPY_NANF);
+  const vec_f32 c0 = hn::Set(f32, 0x1.715476p0f);
+  const vec_f32 c1 = hn::Set(f32, -0x1.715458p-1f);
+  const vec_f32 c2 = hn::Set(f32, 0x1.ec701cp-2f);
+  const vec_f32 c3 = hn::Set(f32, -0x1.7171a4p-2f);
+  const vec_f32 c4 = hn::Set(f32, 0x1.27a0b8p-2f);
+  const vec_f32 c5 = hn::Set(f32, -0x1.e5143ep-3f);
+  const vec_f32 c6 = hn::Set(f32, 0x1.9d8ecap-3f);
+  const vec_f32 c7 = hn::Set(f32, -0x1.c675bp-3f);
+  const vec_f32 c8 = hn::Set(f32, 0x1.9e495p-3f);
 
-  const float32x4_t c0 = vdupq_n_f32(0x1.715476p0f);
-  const float32x4_t c2 = vdupq_n_f32(0x1.ec701cp-2f);
-  const float32x4_t c4 = vdupq_n_f32(0x1.27a0b8p-2f);
-  const float32x4_t c6 = vdupq_n_f32(0x1.9d8ecap-3f);
-  const float32x4_t c8 = vdupq_n_f32(0x1.9e495p-3f);
-  static const float c1357_arr[4] = {
-    -0x1.715458p-1f, -0x1.7171a4p-2f, -0x1.e5143ep-3f, -0x1.c675bp-3f
-  };
-  const float32x4_t c1357 = vld1q_f32(c1357_arr);
+  vec_u32 u = hn::Add(hn::And(u_off, hn::Set(u32, 0x007fffff)),
+                      hn::Set(u32, 0x3f2aaaab));
+  vec_f32 r = hn::Sub(hn::BitCast(f32, u), hn::Set(f32, 1.0f));
+  vec_f32 r2 = hn::Mul(r, r);
+  vec_f32 c01 = hn::MulAdd(r, c1, c0);
+  vec_f32 c23 = hn::MulAdd(r, c3, c2);
+  vec_f32 c45 = hn::MulAdd(r, c5, c4);
+  vec_f32 c67 = hn::MulAdd(r, c7, c6);
+  vec_f32 p68 = hn::MulAdd(r2, c8, c67);
+  vec_f32 p48 = hn::MulAdd(r2, p68, c45);
+  vec_f32 p28 = hn::MulAdd(r2, p48, c23);
+  vec_f32 p = hn::MulAdd(r2, p28, c01);
+  return hn::MulAdd(p, r, n);
+}
 
-  const npy_half *infp = src;
-  npy_half *outp = dst;
-  npy_intp remaining = len;
+/* AOR log2f special_case: per-lane 2*log2(sqrt(x)) promotion for
+ * subnormal/zero/negative/NaN; constant patches + NaN passthrough +
+ * invalid/divide accumulation (see the f64 kernel). */
+HWY_ATTR NPY_FINLINE vec_f32
+hwy_log2f_special(vec_u32 u_off, mask_u32 &invalid_any,
+                  mask_u32 &divbyzero_any)
+{
+  const vec_u32 off = hn::Set(u32, 0x3f2aaaab);
+  const vec_u32 inf_bits = hn::Set(u32, 0x7f800000);
+  vec_u32 u = hn::Add(u_off, off); /* recover x */
+  vec_f32 x = hn::BitCast(f32, u);
+  auto promote = hn::Ge(hn::Sub(u_off, hn::Set(u32, 0x00800000 - 0x3f2aaaab)),
+                        hn::Set(u32, 0x7f000000));
+  vec_f32 xs = hn::IfThenElse(hn::RebindMask(f32, promote), hn::Sqrt(x), x);
+  vec_u32 us_off = hn::Sub(hn::BitCast(u32, xs), off);
+  vec_f32 n = hn::ConvertTo(f32, hn::ShiftRight<23>(hn::BitCast(s32, us_off)));
+  vec_f32 y = hwy_log2f_core(us_off, n);
+  y = hn::IfThenElse(hn::RebindMask(f32, promote), hn::Mul(y, hn::Set(f32, 2.0f)), y);
 
-  uint32x4_t invalid_any = vdupq_n_u32(0);
-  uint32x4_t divbyzero_any = vdupq_n_u32(0);
+  vec_u32 abs_u = hn::And(u, hn::Set(u32, 0x7fffffff));
+  auto is_infnan = hn::Ge(u, inf_bits);
+  auto is_zero = hn::Eq(abs_u, hn::Zero(u32));
+  auto is_nan = hn::Gt(abs_u, inf_bits);
+  y = hn::IfThenElse(hn::RebindMask(f32, hn::Or(is_infnan, is_zero)),
+                     hn::Set(f32, NPY_NANF), y);
+  y = hn::IfThenElse(hn::RebindMask(f32, hn::Eq(u, inf_bits)),
+                     hn::Set(f32, NPY_INFINITYF), y);
+  y = hn::IfThenElse(hn::RebindMask(f32, is_zero),
+                     hn::Set(f32, -NPY_INFINITYF), y);
+  /* NaN passthrough; quietize sNaN (set bit 22) to match libm, as f64 */
+  y = hn::IfThenElse(hn::RebindMask(f32, is_nan),
+                     hn::BitCast(f32, hn::Or(u, hn::Set(u32, 0x00400000))), y);
 
-  while (remaining >= 16) {
-    __builtin_prefetch(infp + 64, 0, 3);
-    __builtin_prefetch(outp + 64, 1, 3);
+  auto sign_set = hn::Ne(hn::And(u, hn::Set(u32, 0x80000000)), hn::Zero(u32));
+  auto is_neg = hn::And(sign_set, hn::Not(hn::Or(is_nan, is_zero)));
+  invalid_any = hn::Or(invalid_any, is_neg);
+  divbyzero_any = hn::Or(divbyzero_any, is_zero);
+  return y;
+}
 
-    float16x8_t h0 = vld1q_f16((const float16_t *)infp);
-    float16x8_t h1 = vld1q_f16((const float16_t *)(infp + 8));
+/* Short-vector API: one lane-parallel log2(x) evaluation (f32). */
+HWY_ATTR NPY_FINLINE vec_f32
+log2_f32_kernel(vec_f32 x, mask_u32& inv_acc, mask_u32& div_acc)
+{
+  const vec_u32 off = hn::Set(u32, 0x3f2aaaab);
+  const vec_u32 off_lower = hn::Set(u32, 0x00800000 - 0x3f2aaaab);
+  const vec_u32 outer_bound = hn::Set(u32, 0x7f000000);
+  vec_u32 u = hn::BitCast(u32, x);
+  vec_u32 u_off = hn::Sub(u, off);
+  auto special_m = hn::Ge(hn::Sub(u_off, off_lower), outer_bound);
+  if (!hn::AllFalse(u32, special_m)) {
+    return hwy_log2f_special(u_off, inv_acc, div_acc);
+  }
+  vec_f32 n = hn::ConvertTo(f32, hn::ShiftRight<23>(hn::BitCast(s32, u_off)));
+  return hwy_log2f_core(u_off, n);
+}
 
-    float32x4_t x[4], sf[4], res[4];
-    uint32x4_t isn[4], isp[4], isni[4], isz[4], isneg[4], full[4], u_off[4];
-    float32x4_t n_val[4];
+HWY_ATTR static void
+simd_log2_hwy_FLOAT(const npy_float* src, npy_intp ssrc,
+                    npy_float* dst, npy_intp sdst, npy_intp len)
+{
+  const int nlanes = hn::Lanes(f32);
+  auto inv_acc = hn::MaskFalse(u32);
+  auto div_acc = hn::MaskFalse(u32);
 
-    x[0] = vcvt_f32_f16(vget_low_f16(h0));
-    x[1] = vcvt_f32_f16(vget_high_f16(h0));
-    x[2] = vcvt_f32_f16(vget_low_f16(h1));
-    x[3] = vcvt_f32_f16(vget_high_f16(h1));
-
-    for (int k = 0; k < 4; k++) {
-      isn[k] = vmvnq_u32(vceqq_f32(x[k], x[k]));
-      isp[k] = vceqq_f32(x[k], pos_inf_v);
-      isni[k] = vceqq_f32(x[k], neg_inf_v);
-      isz[k] = vceqq_f32(x[k], zeros_v);
-      /* mask NaN lanes out of the inequality compare (FCMGT raises IOC
-       * on QNaN lanes, unlike vceqq) */
-      float32x4_t x_nn = vbslq_f32(isn[k], zeros_v, x[k]);
-      isneg[k] = vbicq_u32(vcltq_f32(x_nn, zeros_v), vorrq_u32(isni[k], isz[k]));
-      full[k] = vorrq_u32(vorrq_u32(vorrq_u32(isn[k], isp[k]), vorrq_u32(isni[k], isz[k])), isneg[k]);
-      invalid_any = vorrq_u32(invalid_any, vorrq_u32(isneg[k], isni[k]));
-      divbyzero_any = vorrq_u32(divbyzero_any, isz[k]);
-      sf[k] = vbslq_f32(full[k], ones_v, x[k]);
-      u_off[k] = vsubq_u32(vreinterpretq_u32_f32(sf[k]), off_v);
-      n_val[k] = vcvtq_f32_s32(vshrq_n_s32(vreinterpretq_s32_u32(u_off[k]), 23));
-      res[k] = neon_log2f_inline_core_preloaded(u_off[k], n_val[k], c0, c2, c4, c6, c8, c1357);
-      res[k] = vbslq_f32(isn[k], x[k], res[k]);
-      res[k] = vbslq_f32(isp[k], pos_inf_v, res[k]);
-      res[k] = vbslq_f32(isni[k], nan_v, res[k]);
-      res[k] = vbslq_f32(isz[k], neg_inf_v, res[k]);
-      res[k] = vbslq_f32(isneg[k], nan_v, res[k]);
+  for (; len > 0; len -= nlanes, src += ssrc * nlanes, dst += sdst * nlanes) {
+    vec_f32 x = load_vector<vec_f32>(src, ssrc, len);
+    if (len < nlanes) {
+      x = hn::IfThenElse(hn::FirstN(f32, len), x, hn::Set(f32, 1.0f));
     }
-
-    float16x4_t rh[4];
-    for (int k = 0; k < 4; k++)
-      rh[k] = vcvt_f16_f32(res[k]);
-    for (int k = 0; k < 2; k++)
-      vst1q_f16((float16_t *)(outp + k * 8), vcombine_f16(rh[k*2], rh[k*2+1]));
-
-    infp += 16;
-    outp += 16;
-    remaining -= 16;
+    vec_f32 out = log2_f32_kernel(x, inv_acc, div_acc);
+    store_vector<vec_f32>(out, dst, sdst, len);
   }
-
-  while (remaining >= 8) {
-    float16x8_t h0 = vld1q_f16((const float16_t *)infp);
-    float32x4_t x[2], sf[2], res[2];
-    uint32x4_t isn[2], isp[2], isni[2], isz[2], isneg[2], full[2], u_off[2];
-    float32x4_t n_val[2];
-
-    x[0] = vcvt_f32_f16(vget_low_f16(h0));
-    x[1] = vcvt_f32_f16(vget_high_f16(h0));
-
-    for (int k = 0; k < 2; k++) {
-      isn[k] = vmvnq_u32(vceqq_f32(x[k], x[k]));
-      isp[k] = vceqq_f32(x[k], pos_inf_v);
-      isni[k] = vceqq_f32(x[k], neg_inf_v);
-      isz[k] = vceqq_f32(x[k], zeros_v);
-      /* mask NaN lanes out of the inequality compare (FCMGT raises IOC
-       * on QNaN lanes, unlike vceqq) */
-      float32x4_t x_nn = vbslq_f32(isn[k], zeros_v, x[k]);
-      isneg[k] = vbicq_u32(vcltq_f32(x_nn, zeros_v), vorrq_u32(isni[k], isz[k]));
-      full[k] = vorrq_u32(vorrq_u32(vorrq_u32(isn[k], isp[k]), vorrq_u32(isni[k], isz[k])), isneg[k]);
-      invalid_any = vorrq_u32(invalid_any, vorrq_u32(isneg[k], isni[k]));
-      divbyzero_any = vorrq_u32(divbyzero_any, isz[k]);
-      sf[k] = vbslq_f32(full[k], ones_v, x[k]);
-      u_off[k] = vsubq_u32(vreinterpretq_u32_f32(sf[k]), off_v);
-      n_val[k] = vcvtq_f32_s32(vshrq_n_s32(vreinterpretq_s32_u32(u_off[k]), 23));
-      res[k] = neon_log2f_inline_core_preloaded(u_off[k], n_val[k], c0, c2, c4, c6, c8, c1357);
-      res[k] = vbslq_f32(isn[k], x[k], res[k]);
-      res[k] = vbslq_f32(isp[k], pos_inf_v, res[k]);
-      res[k] = vbslq_f32(isni[k], nan_v, res[k]);
-      res[k] = vbslq_f32(isz[k], neg_inf_v, res[k]);
-      res[k] = vbslq_f32(isneg[k], nan_v, res[k]);
-    }
-
-    float16x4_t rh[2];
-    for (int k = 0; k < 2; k++)
-      rh[k] = vcvt_f16_f32(res[k]);
-    vst1q_f16((float16_t *)outp, vcombine_f16(rh[0], rh[1]));
-
-    infp += 8;
-    outp += 8;
-    remaining -= 8;
-  }
-
-  for (npy_intp i = 0; i < remaining; i++) {
-    outp[i] = npy_float_to_half(npy_log2f(npy_half_to_float(infp[i])));
-  }
-
-  /* The masked SIMD lanes above never execute a trapping instruction, so
-   * raise the FP flags that libm's log2 would have raised for the special
-   * inputs (invalid: x < 0 or -inf, divide-by-zero: +-0) explicitly. */
-  if (neon_has_any_lane_u32(invalid_any)) {
+  if (!hn::AllFalse(u32, inv_acc)) {
     npy_set_floatstatus_invalid();
   }
-  if (neon_has_any_lane_u32(divbyzero_any)) {
+  if (!hn::AllFalse(u32, div_acc)) {
     npy_set_floatstatus_divbyzero();
   }
 }
 
-static void
-simd_log2_neon_HALF(const npy_half *src, npy_intp ssrc,
-                    npy_half *dst, npy_intp sdst, npy_intp len)
+
+/* f16 path: highway-vectorized f16 load -> promote to two f32 halves ->
+ * log2_f32_kernel (shared accumulators) -> demote -> combine -> f16 store. No
+ * malloc temp buffers and no raw NEON. f16 has no SVE gather/scatter, so
+ * the strided case uses a small stack gather + LoadN/StoreN; the tail
+ * zero-fill is padded with 1.0 before the kernel. The invalid/divide
+ * accumulators are owned here and written back at the loop exit. */
+#if NPY_HWY_F16
+const hn::ScalableTag<::hwy::float16_t> f16;
+using vec_f16 = hn::Vec<decltype(f16)>;
+
+HWY_ATTR NPY_FINLINE vec_f16
+load_f16(const ::hwy::float16_t* src, npy_intp ssrc, npy_intp len)
 {
-  if (ssrc == 1 && sdst == 1) {
-    simd_log2_neon_HALF_stride1(src, dst, len);
+  const int nlanes = hn::Lanes(f16);
+  if (ssrc == 1) {
+    if (len < nlanes) {
+      return hn::LoadN(f16, src, len);
+    }
+    return hn::LoadU(f16, src);
+  }
+  ::hwy::float16_t tmp[hn::MaxLanes(f16)];
+  const int n = (len < nlanes) ? static_cast<int>(len) : nlanes;
+  for (int j = 0; j < n; ++j) {
+    tmp[j] = src[j * ssrc];
+  }
+  return hn::LoadN(f16, tmp, n);
+}
+
+HWY_ATTR NPY_FINLINE void
+store_f16(vec_f16 v, ::hwy::float16_t* dst, npy_intp sdst, npy_intp len)
+{
+  const int nlanes = hn::Lanes(f16);
+  if (sdst == 1) {
+    if (len < nlanes) {
+      hn::StoreN(v, f16, dst, len);
+    } else {
+      hn::StoreU(v, f16, dst);
+    }
     return;
   }
-  const npy_intp BLOCK_SIZE = 8192;
-  const npy_intp VEC_SIZE = 8;
-  const npy_intp UNROLL = 4;
-  
-  npy_float *tmp_src = (npy_float *)malloc(BLOCK_SIZE * sizeof(npy_float));
-  npy_float *tmp_dst = (npy_float *)malloc(BLOCK_SIZE * sizeof(npy_float));
-  
-    if (!tmp_src || !tmp_dst) {
-      if (tmp_src) free(tmp_src);
-      if (tmp_dst) free(tmp_dst);
-      for (npy_intp i = 0; i < len; i++) {
-        npy_float in1 = npy_half_to_float(src[i * ssrc]);
-        dst[i * sdst] = npy_float_to_half(npy_log2f(in1));
-      }
-    return;
+  ::hwy::float16_t tmp[hn::MaxLanes(f16)];
+  const int n = (len < nlanes) ? static_cast<int>(len) : nlanes;
+  hn::StoreN(v, f16, tmp, n);
+  for (int j = 0; j < n; ++j) {
+    dst[j * sdst] = tmp[j];
   }
-
-  for (npy_intp offset = 0; offset < len; offset += BLOCK_SIZE) {
-    npy_intp block_len = (len - offset > BLOCK_SIZE) ? BLOCK_SIZE : (len - offset);
-    const npy_half *block_src = src + offset * ssrc;
-    npy_half *block_dst = dst + offset * sdst;
-    
-    npy_intp i = 0;
-    if (ssrc == 1) {
-      for (; i + UNROLL * VEC_SIZE <= block_len; i += UNROLL * VEC_SIZE) {
-        __builtin_prefetch(block_src + i + 256, 0, 3);
-        __builtin_prefetch(block_src + i + 512, 0, 3);
-        float16x8_t h[4];
-        for (int u = 0; u < 4; u++)
-          h[u] = vld1q_f16((const float16_t *)(block_src + i + u * 8));
-        for (int u = 0; u < 4; u++) {
-          vst1q_f32(tmp_src + i + u * 8, vcvt_f32_f16(vget_low_f16(h[u])));
-          vst1q_f32(tmp_src + i + u * 8 + 4, vcvt_f32_f16(vget_high_f16(h[u])));
-        }
-      }
-      for (; i + VEC_SIZE <= block_len; i += VEC_SIZE) {
-        __builtin_prefetch(block_src + i + 64, 0, 3);
-        float16x8_t h0 = vld1q_f16((const float16_t *)(block_src + i));
-        vst1q_f32(tmp_src + i, vcvt_f32_f16(vget_low_f16(h0)));
-        vst1q_f32(tmp_src + i + 4, vcvt_f32_f16(vget_high_f16(h0)));
-      }
-    } else {
-      for (; i + UNROLL * VEC_SIZE <= block_len; i += UNROLL * VEC_SIZE) {
-        for (int j = 0; j < UNROLL * VEC_SIZE; j++) {
-          tmp_src[i + j] = npy_half_to_float(block_src[(i + j) * ssrc]);
-        }
-      }
-      for (; i + VEC_SIZE <= block_len; i += VEC_SIZE) {
-        for (int j = 0; j < VEC_SIZE; j++) {
-          tmp_src[i + j] = npy_half_to_float(block_src[(i + j) * ssrc]);
-        }
-      }
-    }
-    for (; i < block_len; i++) {
-      tmp_src[i] = npy_half_to_float(block_src[i * ssrc]);
-    }
-    
-    simd_log2_neon_FLOAT(tmp_src, 1, tmp_dst, 1, block_len);
-    
-    i = 0;
-    if (sdst == 1) {
-      for (; i + UNROLL * VEC_SIZE <= block_len; i += UNROLL * VEC_SIZE) {
-        __builtin_prefetch(block_dst + i + 256, 1, 3);
-        __builtin_prefetch(block_dst + i + 512, 1, 3);
-        float32x4_t f[8];
-        for (int u = 0; u < 8; u++)
-          f[u] = vld1q_f32(tmp_dst + i + u * 4);
-        float16x4_t h[8];
-        for (int u = 0; u < 8; u++)
-          h[u] = vcvt_f16_f32(f[u]);
-        for (int u = 0; u < 4; u++)
-          vst1q_f16((float16_t *)(block_dst + i + u * 8), vcombine_f16(h[u*2], h[u*2+1]));
-      }
-      for (; i + VEC_SIZE <= block_len; i += VEC_SIZE) {
-        __builtin_prefetch(block_dst + i + 64, 1, 3);
-        float32x4_t f0 = vld1q_f32(tmp_dst + i);
-        float32x4_t f1 = vld1q_f32(tmp_dst + i + 4);
-        vst1q_f16((float16_t *)(block_dst + i), vcombine_f16(vcvt_f16_f32(f0), vcvt_f16_f32(f1)));
-      }
-    } else {
-      for (; i + UNROLL * VEC_SIZE <= block_len; i += UNROLL * VEC_SIZE) {
-        for (int j = 0; j < UNROLL * VEC_SIZE; j++) {
-          block_dst[(i + j) * sdst] = npy_float_to_half(tmp_dst[i + j]);
-        }
-      }
-      for (; i + VEC_SIZE <= block_len; i += VEC_SIZE) {
-        for (int j = 0; j < VEC_SIZE; j++) {
-          block_dst[(i + j) * sdst] = npy_float_to_half(tmp_dst[i + j]);
-        }
-      }
-    }
-    for (; i < block_len; i++) {
-      block_dst[i * sdst] = npy_float_to_half(tmp_dst[i]);
-    }
-  }
-  
-free(tmp_src);
-  free(tmp_dst);
 }
 
-#endif // SIMD_ARM
+HWY_ATTR static void
+simd_log2_hwy_HALF(const npy_half* src, npy_intp ssrc,
+      npy_half* dst, npy_intp sdst, npy_intp len)
+{
+  const int nlanes = hn::Lanes(f16);
+  const ::hwy::float16_t* src16 = reinterpret_cast<const ::hwy::float16_t*>(src);
+  ::hwy::float16_t* dst16 = reinterpret_cast<::hwy::float16_t*>(dst);
+  auto inv_acc = hn::MaskFalse(u32);
+  auto div_acc = hn::MaskFalse(u32);
+
+  for (; len > 0; len -= nlanes, src16 += ssrc * nlanes, dst16 += sdst * nlanes) {
+    vec_f16 h = load_f16(src16, ssrc, len);
+    if (len < nlanes) {
+      h = hn::IfThenElse(hn::FirstN(f16, len), h,
+                         hn::Set(f16, ::hwy::float16_t(1.0f)));
+    }
+    vec_f32 x0 = hn::PromoteLowerTo(f32, h);
+    vec_f32 x1 = hn::PromoteUpperTo(f32, h);
+    vec_f32 y0 = log2_f32_kernel(x0, inv_acc, div_acc);
+    vec_f32 y1 = log2_f32_kernel(x1, inv_acc, div_acc);
+    vec_f16 out = hn::Combine(f16, hn::DemoteTo(f16, y1), hn::DemoteTo(f16, y0));
+    store_f16(out, dst16, sdst, len);
+  }
+  if (!hn::AllFalse(u32, inv_acc)) {
+    npy_set_floatstatus_invalid();
+  }
+  if (!hn::AllFalse(u32, div_acc)) {
+    npy_set_floatstatus_divbyzero();
+  }
+}
+#endif  /* NPY_HWY_F16 */
+
+#endif  /* SIMD_ARM */
 // Trigonometric Half
 #if NPY_SIMD && defined(NPY_HAVE_AVX512_SKX) && defined(NPY_CAN_LINK_SVML)
   #define NPY__SVML_IS_ENABLED 1
@@ -1112,23 +842,17 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(FLOAT_log2)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
 {
 #if SIMD_ARM
-    const npy_intp len = dimensions[0];
-    if (len == 1) {
+    npy_intp len = dimensions[0];
+    /* Vectorize only contiguous non-overlapping runs; strided/overlap
+     * falls back to scalar libm (policy note in loops_explog.h). */
+    if (steps[0] == (npy_intp)sizeof(npy_float) &&
+        steps[1] == (npy_intp)sizeof(npy_float) &&
+        !is_mem_overlap(args[0], steps[0], args[1], steps[1], len)) {
+        simd_log2_hwy_FLOAT((npy_float *)args[0], 1, (npy_float *)args[1], 1, len);
+    } else {
         UNARY_LOOP {
             const npy_float in1 = *(npy_float *)ip1;
             *(npy_float *)op1 = npy_log2f(in1);
-        }
-    }
-    else if (!is_mem_overlap(args[0], steps[0], args[1], steps[1], len)) {
-        const npy_float *src = (npy_float*)args[0];
-        npy_float *dst = (npy_float*)args[1];
-        const npy_intp ssrc = steps[0] / sizeof(npy_float);
-        const npy_intp sdst = steps[1] / sizeof(npy_float);
-        simd_log2_neon_FLOAT(src, ssrc, dst, sdst, len);
-    }
-    else {
-        UNARY_LOOP {
-            simd_log2_neon_FLOAT((npy_float *)ip1, 1, (npy_float *)op1, 1, 1);
         }
     }
     return;
@@ -1166,21 +890,14 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_log2)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(data))
 {
 #if SIMD_ARM
-    const npy_intp len = dimensions[0];
-    if (len == 1) {
-        UNARY_LOOP {
-            const npy_double in1 = *(npy_double *)ip1;
-            *(npy_double *)op1 = npy_log2(in1);
-        }
-    }
-    else if (!is_mem_overlap(args[0], steps[0], args[1], steps[1], len)) {
-        const npy_double *src = (npy_double*)args[0];
-        npy_double *dst = (npy_double*)args[1];
-        const npy_intp ssrc = steps[0] / sizeof(npy_double);
-        const npy_intp sdst = steps[1] / sizeof(npy_double);
-        simd_log2_neon_DOUBLE(src, ssrc, dst, sdst, len);
-    }
-    else {
+    npy_intp len = dimensions[0];
+    /* Vectorize only contiguous non-overlapping runs; strided/overlap
+     * falls back to scalar libm (policy note in loops_explog.h). */
+    if (steps[0] == (npy_intp)sizeof(npy_double) &&
+        steps[1] == (npy_intp)sizeof(npy_double) &&
+        !is_mem_overlap(args[0], steps[0], args[1], steps[1], len)) {
+        simd_log2_hwy_DOUBLE((npy_double *)args[0], 1, (npy_double *)args[1], 1, len);
+    } else {
         UNARY_LOOP {
             const npy_double in1 = *(npy_double *)ip1;
             *(npy_double *)op1 = npy_log2(in1);
@@ -1209,28 +926,22 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_log2)
 NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_log2)
 (char **args, npy_intp const *dimensions, npy_intp const *steps, void *NPY_UNUSED(func))
 {
-#if SIMD_ARM
-    const npy_intp len = dimensions[0];
-    if (len == 1) {
-        UNARY_LOOP {
-            const npy_float in1 = npy_half_to_float(*(npy_half *)ip1);
-            *((npy_half *)op1) = npy_float_to_half(npy_log2f(in1));
-        }
-    }
-    else if (!is_mem_overlap(args[0], steps[0], args[1], steps[1], len)) {
-        const npy_half *src = (npy_half*)args[0];
-        npy_half *dst = (npy_half*)args[1];
-        const npy_intp ssrc = steps[0] / sizeof(npy_half);
-        const npy_intp sdst = steps[1] / sizeof(npy_half);
-        simd_log2_neon_HALF(src, ssrc, dst, sdst, len);
-    }
-    else {
+#if SIMD_ARM && NPY_HWY_F16
+    npy_intp len = dimensions[0];
+    /* Vectorize only contiguous non-overlapping runs; strided/overlap
+     * falls back to scalar libm (policy note in loops_explog.h). */
+    if (steps[0] == (npy_intp)sizeof(npy_half) &&
+        steps[1] == (npy_intp)sizeof(npy_half) &&
+        !is_mem_overlap(args[0], steps[0], args[1], steps[1], len)) {
+        simd_log2_hwy_HALF((npy_half *)args[0], 1, (npy_half *)args[1], 1, len);
+    } else {
         UNARY_LOOP {
             const npy_float in1 = npy_half_to_float(*(npy_half *)ip1);
             *((npy_half *)op1) = npy_float_to_half(npy_log2f(in1));
         }
     }
     return;
+
 #elif NPY__SVML_IS_ENABLED
     const npy_half *src = (npy_half*)args[0];
           npy_half *dst = (npy_half*)args[1];
