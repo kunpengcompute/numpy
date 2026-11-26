@@ -2766,13 +2766,36 @@ class TestFPFlagParityExplog:
 class TestNeonDispatchCoverage:
     """Exercise the non-SVE (NEON/ASIMD) Highway exp/exp2 kernels.
 
-    The contiguous-only ARM wrappers dispatch to the SVE FEXPA kernel on
-    SVE hosts, so the ``#else`` Highway f64 kernel and the NEON-specific
-    f32/lookup branches never execute there and would be uncovered by a
-    single SVE coverage run. Run the ufuncs in a subprocess with SVE
-    disabled so the NEON dispatch target is selected; the instrumented
-    extension writes its gcda on exit, covering those branches.
+    exp f64 is NEON-only full-stride (its dispatch file has no SVE target),
+    so its contract-skip kernel runs even on SVE hosts. exp f16 keeps SVE
+    in its own dispatch file, and exp2/log/log2 still dispatch to their SVE
+    FEXPA kernels on SVE hosts, so their ``#else`` Highway f64 kernels and
+    the NEON-specific f32/lookup branches never execute there and would be
+    uncovered by a single SVE coverage run. Run the ufuncs in a subprocess
+    with SVE disabled so the NEON dispatch target is selected; the
+    instrumented extension writes its gcda on exit, covering those branches.
     """
+
+    def test_exp_f64_neon_f16_sve_dispatch(self):
+        """exp f64 dispatches NEON-only; exp f16 keeps the SVE target.
+
+        The dtype-level dispatch split (loops_exp vs loops_exp_half) must
+        route f64 to the ASIMD/NEON target even on SVE hosts, while f16
+        (and the untouched exp2/log/log2) still pick SVE when available.
+        """
+        from numpy._core._multiarray_umath import (
+            __cpu_features__, __cpu_targets_info__)
+        info = __cpu_targets_info__
+        f64_cur = info["exp"]["dd"]["current"]
+        f16_cur = info["exp"]["ee"]["current"]
+        assert "SVE" not in f64_cur.split(), f64_cur
+        if __cpu_features__.get("SVE", False):
+            assert f16_cur == "SVE", f16_cur
+            for uf in ("exp2", "log", "log2"):
+                cur = info[uf]["dd"]["current"]
+                assert cur == "SVE", (uf, cur)
+        else:
+            assert "SVE" not in f16_cur.split(), f16_cur
 
     def test_neon_path_exp_exp2(self):
         from numpy._core._multiarray_umath import __cpu_dispatch__

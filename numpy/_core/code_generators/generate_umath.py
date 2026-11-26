@@ -888,7 +888,7 @@ defdict = {
     Ufunc(1, 1, None,
           docstrings.get('numpy._core.umath.exp'),
           None,
-          TD('efd', dispatch=[('loops_exp', 'efd')]),
+          TD('efd', dispatch=[('loops_exp_half', 'e'), ('loops_exp', 'fd')]),
           TD('fdg' + cmplx, f='exp'),
           TD(P, f='exp'),
           ),

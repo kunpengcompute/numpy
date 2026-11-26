@@ -652,7 +652,8 @@ class TestLogicalNotAarch64:
 
 
 class TestExpLogTrig:
-    """loops_exp.dispatch.cpp, loops_log.dispatch.cpp, loops_log2.dispatch.cpp,
+    """loops_exp.dispatch.cpp, loops_exp_half.dispatch.cpp,
+    loops_log.dispatch.cpp, loops_log2.dispatch.cpp,
     loops_trigonometric.dispatch.cpp, loops_umath_unary.dispatch.cpp"""
 
     @pytest.mark.parametrize("dt", [np.float32, np.float64])
