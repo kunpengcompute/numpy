@@ -1046,6 +1046,15 @@ foreach gen_mtargets : [
 [
     'loops_exp.dispatch.h',
     'src/umath/loops_exp.dispatch.cpp',
+    # exp f64 is NEON-only full-stride: even SVE hosts dispatch to the
+    # ASIMD target (128-bit 2-lane Highway contract-skip kernel), avoiding
+    # the Kunpeng 920 SVE gather bottleneck on strided runs. exp f16 keeps
+    # SVE in its own dispatch file below (meson granularity is per file).
+    (use_highway ? [ASIMD, NEON] : []) + [X86_V4, X86_V3]
+  ],
+  [
+    'loops_exp_half.dispatch.h',
+    'src/umath/loops_exp_half.dispatch.cpp',
     (use_highway ? [SVE, ASIMD, NEON] : []) + [X86_V4, X86_V3]
   ],
   [
