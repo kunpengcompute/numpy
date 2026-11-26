@@ -690,19 +690,26 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(DOUBLE_exp)
     /* NEON-only full-stride: vectorize every element-aligned,
      * non-overlapping stride with the contract-skip kernel via Highway
      * gather/scatter (NEON 2-lane loads/stores sidestep the Kunpeng 920
-     * SVE gather bottleneck). Guard the int64 gather index (Iota * stride)
-     * against overflow; require element-aligned byte strides; exclude zero
-     * output stride (scatter-to-one-address race) and overlap. Other runs
-     * fall back to scalar libm. */
+     * SVE gather bottleneck). Guards: no mem overlap, element-aligned
+     * byte strides, nonzero output stride (scatter-to-one-address race);
+     * other runs fall back to scalar libm. The gather/scatter index is
+     * Iota * stride: with the NEON 2-lane target (MaxLanes == 2) it is
+     * {0, stride} and cannot overflow int64, so no stride bound is
+     * needed; the bound below only compiles for hypothetical wider
+     * targets (and the divisor is guarded against MaxLanes == 1). */
     const npy_intp ssrc = steps[0] / (npy_intp)sizeof(npy_double);
     const npy_intp sdst = steps[1] / (npy_intp)sizeof(npy_double);
-    const npy_intp ibound = INT64_MAX / ((npy_intp)hn::MaxLanes(exp_f64) - 1);
-    if (!is_mem_overlap(args[0], steps[0], args[1], steps[1], len) &&
+    bool guard_ok =
+        !is_mem_overlap(args[0], steps[0], args[1], steps[1], len) &&
         steps[0] % (npy_intp)sizeof(npy_double) == 0 &&
         steps[1] % (npy_intp)sizeof(npy_double) == 0 &&
-        sdst != 0 &&
-        ssrc >= -ibound && ssrc <= ibound &&
-        sdst >= -ibound && sdst <= ibound) {
+        sdst != 0;
+    if constexpr (hn::MaxLanes(exp_f64) > 2) {
+        const npy_intp ibound = INT64_MAX / ((npy_intp)hn::MaxLanes(exp_f64) - 1);
+        guard_ok = guard_ok && ssrc >= -ibound && ssrc <= ibound &&
+            sdst >= -ibound && sdst <= ibound;
+    }
+    if (guard_ok) {
         simd_exp_hwy_DOUBLE((npy_double *)args[0], ssrc, (npy_double *)args[1], sdst, len);
     } else {
         UNARY_LOOP {

@@ -581,39 +581,6 @@ static const struct neon_log_table_entry neon_log_table[V_LOG_N] = {
   { 0x1.6c162fc9cbe02p-1, 0x1.5d1d758e45217p-2 },
 };
 
-static inline uint64x2_t
-neon_exp_lookup_sbits(uint64x2_t i)
-{
-  uint64_t i0 = vgetq_lane_u64(i, 0) & V_EXP_INDEX_MASK;
-  uint64_t i1 = vgetq_lane_u64(i, 1) & V_EXP_INDEX_MASK;
-  return vcombine_u64(vcreate_u64(neon_exp_table[i0]), vcreate_u64(neon_exp_table[i1]));
-}
-
-static inline int neon_has_any_lane_u32(uint32x4_t mask)
-{
-  return vmaxvq_u32(mask) != 0;
-}
-
-static inline int neon_has_any_lane_u64(uint64x2_t mask)
-{
-  return (vgetq_lane_u64(mask, 0) | vgetq_lane_u64(mask, 1)) != 0;
-}
-
-
-// Shared ARM NEON tables, macros, and helpers are in loops_explog.h
-
-static inline int neon_has_all_lanes_u32(uint32x4_t mask)
-{
-  return vminvq_u32(mask) != 0;
-}
-
-static inline int neon_has_all_lanes_u64(uint64x2_t mask)
-{
-  return (vgetq_lane_u64(mask, 0) & vgetq_lane_u64(mask, 1)) != 0;
-}
-
-
-
 #endif // SIMD_ARM
 
 /*
