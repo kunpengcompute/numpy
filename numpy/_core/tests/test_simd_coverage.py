@@ -3060,7 +3060,8 @@ class TestExpF16FullStride:
         raw = np.zeros(n * 3 + 2, dtype=np.uint8)
         vals = np.linspace(-5., 5., n, dtype=np.float16)
         for i in range(n):
-            raw[3 * i:3 * i + 2] = vals[i:i + 1].view(np.uint16).tobytes()
+            raw[3 * i:3 * i + 2] = np.frombuffer(
+                vals[i:i + 1].tobytes(), dtype=np.uint8)
         base = raw[:2].view(np.float16)
         src = np.lib.stride_tricks.as_strided(base, shape=(n,), strides=(3,))
         with np.errstate(all='ignore'):
