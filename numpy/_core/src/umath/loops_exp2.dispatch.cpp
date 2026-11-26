@@ -405,6 +405,11 @@ exp2_f64_sve_fexpa(svfloat64_t x, svbool_t pg)
             if (!svptest_any(pg, svnot_b_z(pg, cheap))) {
                 y = svsel_f64(nan_m, qn, inf_res);
                 y = svsel_f64(small, tiny_res, y);
+                /* nan/small/inf are disjoint and cover every lane here, so
+                   the trailing tiny/nan/inf patches would be same-value
+                   re-selects (svsel raises no flags). Return directly, as
+                   the NEON branch does. */
+                return y;
             } else {
                 svfloat64_t xc
                     = svsel_f64(svorr_z(pg, special, tiny), sv_f64(0.0), x);
@@ -460,7 +465,8 @@ exp2_f64_kernel(vec_e_f64 x)
         auto cheap_m = hn::Or(hn::Or(nan_m, inf_m), small_m);
         /* Constant special results computed on raw x for every lane: the
          * fl(1+x*ln2) FMA and the quietize x+0 both see raw sNaN and raise
-         * INVALID (libm parity, glibc e_exp2.c returns 1.0+x for tiny/NaN).
+         * INVALID (libm parity: exp2 returns fl(1 + x*ln2) for tiny/0 and the
+         * quieted NaN for NaN input).
          * Hoisted so they are shared by the cheap fast path and the final
          * patches and cannot be dead-code-eliminated. */
         vec_e_f64 tiny_res = hn::MulAdd(x, ln2, one);
