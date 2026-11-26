@@ -495,25 +495,62 @@ const hn::ScalableTag<uint64_t> exp_u64;
 using vec_x_f64 = hn::Vec<decltype(exp_f64)>;
 using vec_x_u64 = hn::Vec<decltype(exp_u64)>;
 
-/* Contiguous-only load: the exp wrappers vectorize only stride-1
- * runs (contiguous-only policy), so the helper always sees unit stride;
- * the former strided gather/scatter paths were removed as dead code. */
 template <typename vtype, typename type_t>
 HWY_ATTR NPY_FINLINE vtype
-exp_load_vector(type_t *src, npy_intp len)
+exp_load_vector(type_t *src, npy_intp ssrc, npy_intp len)
 {
     auto D = hn::DFromV<vtype>();
-    if (len < hn::Lanes(D)) return hn::LoadN(D, src, len);
-    return hn::LoadU(D, src);
+    if constexpr (sizeof(type_t) == 2) {
+        /* 16-bit lanes: SVE gather is 32/64-bit only, so build the vector
+         * with scalar inserts (portable across NEON and SVE). */
+        const int nlanes = hn::Lanes(D);
+        if (ssrc == 1) {
+            if (len < nlanes) return hn::LoadN(D, src, len);
+            return hn::LoadU(D, src);
+        }
+        vtype v = hn::Zero(D);
+        const int n = (len < nlanes) ? static_cast<int>(len) : nlanes;
+        for (int i = 0; i < n; i++) v = hn::InsertLane(v, i, src[i * ssrc]);
+        return v;
+    } else {
+        using DI = hn::RebindToSigned<decltype(D)>;
+        DI di;
+        auto indices = hn::Mul(hn::Iota(di, 0), hn::Set(di, ssrc));
+        if (len < hn::Lanes(D)) {
+            if (ssrc == 1) return hn::LoadN(D, src, len);
+            return hn::GatherIndexN(D, src, indices, len);
+        }
+        if (ssrc == 1) return hn::LoadU(D, src);
+        return hn::GatherIndex(D, src, indices);
+    }
 }
 
 template <typename vtype, typename type_t>
 HWY_ATTR NPY_FINLINE void
-exp_store_vector(vtype vec, type_t *dst, npy_intp len)
+exp_store_vector(vtype vec, type_t *dst, npy_intp sdst, npy_intp len)
 {
     auto D = hn::DFromV<vtype>();
-    if (len < hn::Lanes(D)) { hn::StoreN(vec, D, dst, len); return; }
-    hn::StoreU(vec, D, dst);
+    if constexpr (sizeof(type_t) == 2) {
+        const int nlanes = hn::Lanes(D);
+        if (sdst == 1) {
+            if (len < nlanes) { hn::StoreN(vec, D, dst, len); return; }
+            hn::StoreU(vec, D, dst);
+            return;
+        }
+        const int n = (len < nlanes) ? static_cast<int>(len) : nlanes;
+        for (int i = 0; i < n; i++) dst[i * sdst] = hn::ExtractLane(vec, i);
+    } else {
+        using DI = hn::RebindToSigned<decltype(D)>;
+        DI di;
+        auto indices = hn::Mul(hn::Iota(di, 0), hn::Set(di, sdst));
+        if (len < hn::Lanes(D)) {
+            if (sdst == 1) { hn::StoreN(vec, D, dst, len); return; }
+            hn::ScatterIndexN(vec, D, dst, indices, len);
+            return;
+        }
+        if (sdst == 1) { hn::StoreU(vec, D, dst); return; }
+        hn::ScatterIndex(vec, D, dst, indices);
+    }
 }
 
 HWY_ATTR NPY_FINLINE vec_x_f32
@@ -908,9 +945,9 @@ simd_exp_hwy_DOUBLE(const npy_double *src, npy_intp ssrc,
 {
     const int nlanes = hn::Lanes(exp_f64);
     for (; len > 0; len -= nlanes, src += ssrc * nlanes, dst += sdst * nlanes) {
-        vec_x_f64 x = exp_load_vector<vec_x_f64>(src, len);
+        vec_x_f64 x = exp_load_vector<vec_x_f64>(src, ssrc, len);
         vec_x_f64 out = exp_f64_kernel(x);
-        exp_store_vector<vec_x_f64>(out, dst, len);
+        exp_store_vector<vec_x_f64>(out, dst, sdst, len);
     }
 }
 
@@ -931,12 +968,12 @@ simd_exp_hwy_HALF(const npy_half *src, npy_intp ssrc,
     const auto dh = hn::Half<decltype(D16)>();
     for (; len > 0; len -= nlanes, src += ssrc * nlanes, dst += sdst * nlanes) {
         vec_x_f16 h = exp_load_vector<vec_x_f16>(
-            reinterpret_cast<const hwy::float16_t *>(src), len);
+            reinterpret_cast<const hwy::float16_t *>(src), ssrc, len);
         vec_x_f32 lo = exp_f32_kernel(hn::PromoteLowerTo(exp_f32, h));
         vec_x_f32 hi = exp_f32_kernel(hn::PromoteUpperTo(exp_f32, h));
         vec_x_f16 out = hn::Combine(D16, hn::DemoteTo(dh, hi), hn::DemoteTo(dh, lo));
         exp_store_vector<vec_x_f16>(
-            out, reinterpret_cast<hwy::float16_t *>(dst), len);
+            out, reinterpret_cast<hwy::float16_t *>(dst), sdst, len);
     }
 }
 #endif
