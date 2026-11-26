@@ -13,8 +13,10 @@
  * (the Kunpeng 920 SVE gather bottleneck regressed strided f64 runs).
  * Meson dispatch granularity is per file, hence the split.
  *
- * ARM: Highway f32 kernel on promoted f16 halves (contiguous-only wrapper,
- * same contract as before the split). x86: SVML f16 path unchanged.
+ * ARM: Highway f32 kernel on promoted f16 halves (full-stride wrapper:
+ * stride 1 keeps the LoadU/StoreU fast path, other element-aligned strides
+ * use scalar lane insert/extract — no gather hardware, so SVE is kept).
+ * x86: SVML f16 path unchanged.
  */
 
 #if SIMD_ARM
@@ -224,12 +226,32 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_exp)
 {
 #if SIMD_ARM && NPY_HWY_F16
     npy_intp len = dimensions[0];
-    /* Vectorize only contiguous non-overlapping runs; strided/overlap
-     * falls back to scalar libm (policy note in loops_explog.h). */
-    if (steps[0] == (npy_intp)sizeof(npy_half) &&
-        steps[1] == (npy_intp)sizeof(npy_half) &&
-        !is_mem_overlap(args[0], steps[0], args[1], steps[1], len)) {
-        simd_exp_hwy_HALF((npy_half *)args[0], 1, (npy_half *)args[1], 1, len);
+    /* Full-stride: vectorize every element-aligned, non-overlapping
+     * stride. 16-bit load/store use scalar lane insert/extract (SVE
+     * gather is 32/64-bit only), so no gather hardware is involved and
+     * the Kunpeng 920 SVE gather bottleneck does not apply; the SVE
+     * contiguous fast path (LoadU/StoreU) is kept for stride 1. Guards:
+     * no mem overlap, element-aligned byte strides, nonzero output stride
+     * (scatter-to-one-address race), and the int64 lane-index bound;
+     * other runs fall back to scalar libm (policy note in loops_explog.h).
+     * The lane index is i * stride with i < Lanes <= MaxLanes; the bound
+     * below only matters for the wide SVE target (and the divisor is
+     * guarded against MaxLanes == 1). */
+    const npy_intp ssrc = steps[0] / (npy_intp)sizeof(npy_half);
+    const npy_intp sdst = steps[1] / (npy_intp)sizeof(npy_half);
+    bool guard_ok =
+        !is_mem_overlap(args[0], steps[0], args[1], steps[1], len) &&
+        steps[0] % (npy_intp)sizeof(npy_half) == 0 &&
+        steps[1] % (npy_intp)sizeof(npy_half) == 0 &&
+        sdst != 0;
+    const hn::ScalableTag<hwy::float16_t> d16;
+    if constexpr (hn::MaxLanes(d16) > 2) {
+        const npy_intp ibound = INT64_MAX / ((npy_intp)hn::MaxLanes(d16) - 1);
+        guard_ok = guard_ok && ssrc >= -ibound && ssrc <= ibound &&
+            sdst >= -ibound && sdst <= ibound;
+    }
+    if (guard_ok) {
+        simd_exp_hwy_HALF((npy_half *)args[0], ssrc, (npy_half *)args[1], sdst, len);
     } else {
         UNARY_LOOP {
             const npy_float in1 = npy_half_to_float(*(npy_half *)ip1);

@@ -2964,3 +2964,135 @@ class TestExpF64FullStride:
         out, _, _ = self._out_view(100_000, 1)
         np.exp(src, out=out)
         assert_array_equal(out, expected)
+
+
+class TestExpF16FullStride:
+    """Regression guard for the exp f16 full-stride wrapper (scalar lane
+    insert/extract, SVE kept). Mirrors TestExpF64FullStride: negative
+    input/output strides, broadcast input (step 0), zero output stride
+    (same-address exclusion), non-element-aligned byte strides, reversed
+    in-place runs, tail lengths and a large stride-4 run. exp f16 is
+    correctly rounded (promote f32 -> exp -> RNE demote), so the strided
+    vector path, the contiguous vector path and the scalar libm fallback
+    are all bit-identical; purity is checked at the uint16 bit level to
+    also catch NaN sign/payload drift, and no write may land outside the
+    output view.
+    """
+    @staticmethod
+    def _strided(a, s):
+        n = len(a)
+        k = abs(s)
+        buf = np.zeros(n * k, dtype=np.float16)
+        if s > 0:
+            buf[::s] = a
+            return buf[::s], buf, np.arange(n) * s
+        buf[k - 1::k] = a[::-1]
+        pos = (n * k - 1) + np.arange(n) * s
+        return buf[n * k - 1::-k], buf, pos
+
+    @staticmethod
+    def _out_view(n, s, fill=np.float16(-12345.0)):
+        k = abs(s)
+        buf = np.full(n * k, fill, dtype=np.float16)
+        if s > 0:
+            return buf[::s], buf, np.arange(n) * s
+        pos = (n * k - 1) + np.arange(n) * s
+        return buf[n * k - 1::-k], buf, pos
+
+    @pytest.mark.parametrize("sin,sout", [
+        (2, 1), (4, 1), (1, 2), (4, 2),
+        (-1, 1), (-2, 1), (-4, 1), (-1, 2), (-4, 2),
+        (1, -1), (1, -2), (2, -2), (-1, -1), (-2, -4), (-4, -2),
+    ])
+    def test_strided_purity(self, sin, sout):
+        a = np.linspace(-12., 12., 101, dtype=np.float16)
+        with np.errstate(all='ignore'):
+            expected = np.exp(a.copy())
+        src, sbuf, _ = self._strided(a, sin)
+        sbuf_copy = sbuf.copy()
+        out, obuf, opos = self._out_view(101, sout)
+        with np.errstate(all='ignore'):
+            np.exp(src, out=out)
+        assert_array_equal(out.view(np.uint16), expected.view(np.uint16))
+        omask = np.ones(len(obuf), dtype=bool)
+        omask[opos] = False
+        assert np.all(obuf[omask] == np.float16(-12345.0))
+        assert_array_equal(sbuf.view(np.uint16), sbuf_copy.view(np.uint16))
+
+    def test_special_stride_purity(self):
+        # qNaN/sNaN (sign+payload), +-inf, subnormal, zero, max-finite:
+        # strided must be bit-identical to contiguous (same kernel),
+        # including sNaN quietization and NaN payload passthrough.
+        bits = np.array([0x7e00, 0x7c01, 0x7e01, 0xfe00, 0x7c00, 0xfc00,
+                         0x0001, 0x03ff, 0x8000, 0x0000, 0x7bff, 0x3c00,
+                         0xbc00, 0x8001], dtype=np.uint16)
+        a = bits.view(np.float16)
+        with np.errstate(all='ignore'):
+            expected = np.exp(a.copy())
+        src, _, _ = self._strided(a, 3)
+        out, _, _ = self._out_view(len(a), -2)
+        with np.errstate(all='ignore'):
+            np.exp(src, out=out)
+        assert_array_equal(out.view(np.uint16), expected.view(np.uint16))
+
+    def test_broadcast_input(self):
+        src = np.broadcast_to(np.array([2.5], dtype=np.float16), (97,))
+        out = np.empty(97, dtype=np.float16)
+        np.exp(src, out=out)
+        assert_array_equal(out, np.full(97, np.exp(np.float16(2.5)),
+                                        dtype=np.float16))
+
+    def test_zero_output_stride(self):
+        # steps[1] == 0 excluded from the lane-store path (same-address
+        # race); scalar fallback writes sequentially, last element wins.
+        a = np.linspace(-3., 3., 65, dtype=np.float16)
+        base = np.zeros(1, dtype=np.float16)
+        out = np.lib.stride_tricks.as_strided(
+            base, shape=(65,), strides=(0,), writeable=True)
+        np.exp(a, out=out)
+        assert base[0] == np.exp(a[-1])
+
+    def test_nonaligned_byte_stride_fallback(self):
+        # steps[0] == 3 bytes (not a multiple of 2): iterator buffers to a
+        # contiguous temp or the alignment guard falls back to scalar libm;
+        # either way correctly rounded, so bit-identical to the reference.
+        n = 33
+        raw = np.zeros(n * 3 + 2, dtype=np.uint8)
+        vals = np.linspace(-5., 5., n, dtype=np.float16)
+        for i in range(n):
+            raw[3 * i:3 * i + 2] = vals[i:i + 1].view(np.uint16).tobytes()
+        base = raw[:2].view(np.float16)
+        src = np.lib.stride_tricks.as_strided(base, shape=(n,), strides=(3,))
+        with np.errstate(all='ignore'):
+            got = np.exp(src)
+            ref = np.array([np.exp(src[i]) for i in range(n)],
+                           dtype=np.float16)
+        assert_array_equal(got.view(np.uint16), ref.view(np.uint16))
+
+    def test_overlap_reversed_inplace(self):
+        n = 64
+        a = np.linspace(-3., 3., n, dtype=np.float16)
+        expected = np.exp(a.copy())[::-1]
+        x = a.copy()
+        np.exp(x[::-1], out=x)
+        assert_array_equal(x.view(np.uint16), expected.view(np.uint16))
+
+    @pytest.mark.parametrize("n", [1, 2, 3, 7, 8, 9, 15, 16, 17])
+    def test_tail_lengths(self, n):
+        a = np.linspace(-12., 12., n, dtype=np.float16)
+        with np.errstate(all='ignore'):
+            expected = np.exp(a.copy())
+        src, _, _ = self._strided(a, 4)
+        out, _, _ = self._out_view(n, -2)
+        with np.errstate(all='ignore'):
+            np.exp(src, out=out)
+        assert_array_equal(out.view(np.uint16), expected.view(np.uint16))
+
+    def test_large_stride4_purity(self):
+        rng = np.random.default_rng(42)
+        a = rng.uniform(-10., 10., 100_000).astype(np.float16)
+        expected = np.exp(a.copy())
+        src, _, _ = self._strided(a, 4)
+        out, _, _ = self._out_view(100_000, 1)
+        np.exp(src, out=out)
+        assert_array_equal(out.view(np.uint16), expected.view(np.uint16))

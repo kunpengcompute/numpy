@@ -374,10 +374,15 @@ simd_range_reduction(__m512 x, __m512 y, __m512 c1, __m512 c2, __m512 c3)
  *   back to scalar libm. NEON 2-lane gather/scatter sidesteps the Kunpeng
  *   920 SVE gather bottleneck that regressed strided SVE runs 1.4-2.5x,
  *   at the cost of giving up the SVE FEXPA contiguous fast path.
- * - exp f16: contiguous-only, keeps the SVE dispatch target in its own
+ * - exp f16: full-stride, keeps the SVE dispatch target in its own
  *   dispatch file (loops_exp_half.dispatch.cpp) so the f64 NEON-only
  *   target list does not strip f16 of SVE (meson dispatch granularity is
- *   per file). Strided/overlap f16 falls back to scalar libm.
+ *   per file). 16-bit load/store use scalar lane insert/extract (SVE
+ *   gather is 32/64-bit only), so no gather hardware is involved and the
+ *   Kunpeng 920 SVE gather bottleneck does not apply; stride 1 keeps the
+ *   LoadU/StoreU fast path. The wrapper guards overlap, element alignment,
+ *   zero output stride and the int64 lane-index bound; other runs fall
+ *   back to scalar libm.
  * - exp2, log/log2: contiguous-only. The wrappers vectorize
  *   only when both strides equal the element size
  * and the buffers do not overlap; every strided, broadcast, negative or
