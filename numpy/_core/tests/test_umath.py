@@ -5789,25 +5789,28 @@ class TestMultiKthHighwaySelect:
 class TestSinCosPathPurity:
     """Float64 sin/cos must be a pure function of each input value.
 
-    The aarch64 SIMD implementation mixes a polynomial path with a libm
-    fallback for lanes it cannot handle.  The fallback used to be
-    selected for a whole vector - or, stickily, for the rest of the
-    array - as soon as one lane held NaN, infinity, a huge, or a
-    near-boundary value, so the same input value produced different bits
-    depending on its neighbors, the array length, the strides, or
-    operand overlap.  These tests pin the per-lane behavior.
+    f64 sin/cos on aarch64 currently uses the upstream scalar libm loop;
+    the Highway f64 vectorization (a polynomial path mixed with a per-lane
+    libm fallback) was reverted because its special-case handling regressed
+    on special-heavy data. These tests were written to pin the per-lane
+    behavior of that vector path, where one special lane could sticky-
+    switch the fallback for the whole vector so the same input produced
+    different bits depending on its neighbors, the array length, the
+    strides, or operand overlap. They are retained as regression guards:
+    scalar libm is value-pure and bit-exact by construction, and the same
+    guarantees must hold if f64 vectorization is reintroduced.
     """
 
-    # polynomial-path values, per-lane libm fixup values (near a
+    # boundary values that exercised the former vector paths (near a
     # multiple of pi, beyond the Cody-Waite range), zero/tiny, and the
     # special values NaN / +-inf
     VALUES = [
         0.0, -0.0, 1.0, -1.0, 2.0, -2.0, 3.5, 100.0,
         float(np.pi),        # within 1e-10 of a multiple of pi
         1e-300,              # tiny
-        1e-160,              # tiny: r^4 underflow window of the polynomial
+        1e-160,              # tiny: former polynomial r^4 underflow window
         1e8, -1e8,           # beyond the Cody-Waite range
-        1e300, -1e300,       # huge: libm lane, polynomial must stay flag-free
+        1e300, -1e300,       # huge: libm must stay flag-free
         np.nan, np.inf, -np.inf,
     ]
 
@@ -5820,8 +5823,8 @@ class TestSinCosPathPurity:
             for v in self.VALUES:
                 ref = bits(ufunc(np.array([v]))[0])
 
-                # same value in arrays of every length around the vector
-                # width and the unrolled block size
+                # same value in arrays of many lengths (these formerly
+                # spanned the vector width and the unrolled block size)
                 for n in list(range(1, 19)) + [32, 64]:
                     a = np.full(n, 1.0)
                     a[0] = v
@@ -5876,10 +5879,10 @@ class TestSinCosPathPurity:
 
     @pytest.mark.skipif(IS_WASM, reason="fp errors don't work in wasm")
     def test_huge_finite_no_spurious_fp_flags(self):
-        # Huge but finite inputs take the per-lane libm path, which is
-        # mathematically fine and raises no flags; the polynomial that
-        # also runs on those lanes (r*r overflow, ConvertTo saturation)
-        # must not leak spurious overflow/invalid flags into the report.
+        # Huge but finite inputs must evaluate through libm without
+        # raising spurious overflow/invalid flags. (The former vector
+        # polynomial also ran on these lanes and could leak flags via
+        # r*r overflow / ConvertTo saturation; scalar libm is flag-clean.)
         vals = [1e30, -1e30, 1e200, -1e200, 1e300, -1e300]
         for ufunc, ref in ((np.sin, math.sin), (np.cos, math.cos)):
             with np.errstate(all="raise"):
@@ -5892,10 +5895,10 @@ class TestSinCosPathPurity:
 
     @pytest.mark.skipif(IS_WASM, reason="fp errors don't work in wasm")
     def test_tiny_no_spurious_fp_flags(self):
-        # Tiny lanes are blended back to x (sin) or one (cos) after the
-        # polynomial, but the polynomial's r*r / r^4 terms on tiny
-        # arguments must not raise spurious underflow flags, whatever
-        # the tiny lane shares its vector with.
+        # Tiny arguments must not raise spurious underflow flags, whatever
+        # neighbors they share an array with. (The former vector
+        # polynomial's r*r / r^4 terms risked this; scalar libm is
+        # flag-clean.)
         tiny = [1e-160, -1e-160, 1e-300, 1e-120]
         for ufunc in (np.sin, np.cos):
             with np.errstate(all="raise"):
@@ -5906,12 +5909,12 @@ class TestSinCosPathPurity:
 
     def test_values_match_libm_within_tolerance(self):
         # An oracle independent of this implementation: finite values
-        # must agree with libm's sin/cos within the documented 3 ULP
-        # (polynomial lanes; libm lanes - boundary, huge - match
-        # exactly), and NaN / infinities keep their classes.  Guards the
-        # numeric logic of the per-lane fixup and blend branches, which
-        # the path-purity tests above cannot see because they compare
-        # this implementation only with itself.
+        # must agree with libm's sin/cos within the documented 3 ULP, and
+        # NaN / infinities keep their classes. f64 is now scalar libm, so
+        # this holds exactly; the check is retained as a regression guard
+        # for any future re-vectorization. Unlike the path-purity tests
+        # above (which compare this implementation only with itself), it
+        # pins the numeric results against an external reference.
         finite = [v for v in self.VALUES if np.isfinite(v)]
         for ufunc, ref in ((np.sin, math.sin), (np.cos, math.cos)):
             res = ufunc(np.array(finite))
