@@ -12,7 +12,11 @@
 #include "npy_simd_data.h"
 #include "npy_svml.h"
 
-#if defined(__aarch64__) && NPY_SIMD_FMA3
+/* The explog ARM dispatch path requires Highway: exp/exp2 use the Highway
+ * advsimd/SVE kernels, and meson gates the SVE/ASIMD/NEON dispatch targets
+ * of all four explog loops on use_highway (review #4). With
+ * -Ddisable-highway=true the wrappers below fall back to the scalar loops. */
+#if defined(__aarch64__) && NPY_SIMD_FMA3 && NPY_HAVE_HIGHWAY
 #define SIMD_ARM 1
 #endif
 
@@ -357,6 +361,24 @@ simd_range_reduction(__m512 x, __m512 y, __m512 c1, __m512 c2, __m512 c3)
 
 #if SIMD_ARM
 #include <arm_neon.h>
+/* Vectorization policy (exp/exp2/log/log2):
+ * - exp f32: fully scalar libm on ARM (every stride). The AOR f32 kernel
+ *   deviates 1-2 ULP from libm, breaking sub-ULP precision assertions
+ *   (linalg TestDet::test_generalized_sq_cases, decimal=6 tighter than
+ *   f32 ULP at magnitude >= 16). exp f64/f16 keep the contiguous vector
+ *   path (f64 ULP margin at decimal=6 is ~9 orders of magnitude).
+ * - exp f64/f16, exp2, log/log2: contiguous-only. The wrappers vectorize
+ *   only when both strides equal the element size
+ * and the buffers do not overlap; every strided, broadcast, negative or
+ * overlapping run falls back to the scalar libm loop. Rationale: on some
+ * aarch64 cores (e.g. Kunpeng 920) scalar libm is very fast while
+ * gather/scatter is slow, so strided vectorization regressed 1.1-5.9x;
+ * scalar libm is also bit-exact and FP-flag correct by construction.
+ * With stride 1 the Highway load/store helpers are always safe, so the
+ * former hwy_loadable_stride_* gather index-width guards are no longer
+ * needed (the kernels still accept strides, but wrappers only pass 1).
+ * The exact byte-stride comparison (not steps/sizeof == 1) also keeps
+ * non-multiple byte strides from aliasing into the contiguous path. */
 
 #define V_EXP_TABLE_BITS 7
 #define V_EXP_N (1 << V_EXP_TABLE_BITS)

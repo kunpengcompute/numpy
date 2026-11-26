@@ -7,7 +7,11 @@ Focuses on non-contiguous strides, float16, and edge cases for:
 - array mapping/indexing
 - compiled_base (searchsorted)
 """
+import os
 import platform
+import subprocess
+import sys
+import tempfile
 import warnings
 
 import pytest
@@ -2506,23 +2510,47 @@ class TestFPFlagParityExplog:
     Regression guard for the aarch64 NEON explog kernels (defect report
     BUG-2 and its follow-ups): the vectorized paths must raise exactly the
     same RuntimeWarning set as the per-element scalar path, honor
-    ``np.errstate(..., 'raise')``, return bit-identical values for the
-    special inputs (negative, +-0, +-inf, NaN, subnormal), and never warn
-    on clean input. The scalar path (libm + software/hardware half
-    conversion) is the reference on every platform.
+    ``np.errstate(..., 'raise')``, return bit-identical NaN payloads and
+    +-0/+-inf signs, finite lanes within ULP tolerance (the advsimd
+    bias-split paths may cross libm's overflow boundary by <=2 ULP),
+    and never warn on clean input. The scalar path (libm +
+    software/hardware half conversion) is the reference on every
+    platform.
     """
 
     # probes: negative / zero (both signs) / normal / inf (both signs) /
     # NaN / subnormal, tiled to the requested length
     PROBES = {
         np.float64: [-1.0, 0.0, -0.0, 2.0, np.inf, -np.inf, np.nan,
-                     1e-320, -1e-320, 1e300],
+                     1e-320, -1e-320, 1e300, -1e300],
         np.float32: [-1.0, 0.0, -0.0, 2.0, np.inf, -np.inf, np.nan,
-                     np.float32(1e-40), -np.float32(1e-40)],
+                     np.float32(1e-40), -np.float32(1e-40),
+                     np.float32(1e10), -np.float32(1e10),
+                     np.float32(1e30), -np.float32(1e30),
+                     np.float32(-87.68312), np.float32(-87.68311)],
         np.float16: [-1.0, 0.0, -0.0, 2.0, np.inf, -np.inf, np.nan,
                      np.float16(6e-8), -np.float16(6e-8), np.float16(15.5)],
     }
     LENGTHS = [2, 3, 4, 7, 8, 16, 17, 32, 33, 64]
+    # Signaling-NaN probes guard the quietize-on-passthrough contract
+    # (patterns synced with PR #203, plus negative signs): the vector path
+    # must return a quiet NaN with sign + payload preserved and raise
+    # INVALID, exactly as libm does. Scoped to exp/exp2 on this branch;
+    # log/log2 get the same probes with their PR #203 quietize fix.
+    SNAN_PROBES = {
+        np.float64: [np.array([0x7ff0000000000001],
+                              dtype=np.uint64).view(np.float64)[0],
+                     np.array([0xfff0000000000001],
+                              dtype=np.uint64).view(np.float64)[0]],
+        np.float32: [np.array([0x7f800001],
+                              dtype=np.uint32).view(np.float32)[0],
+                     np.array([0xff800001],
+                              dtype=np.uint32).view(np.float32)[0]],
+        np.float16: [np.array([0x7c01],
+                              dtype=np.uint16).view(np.float16)[0],
+                     np.array([0xfc01],
+                              dtype=np.uint16).view(np.float16)[0]],
+    }
     # max deviation of the vector path from the scalar path for normal
     # lanes (polynomial vs libm rounding); special lanes must match bitwise
     ULP = 4
@@ -2547,15 +2575,23 @@ class TestFPFlagParityExplog:
 
     @classmethod
     def _assert_lane_parity(cls, res_arr, res_sca):
-        """special lanes bitwise-equal, normal lanes within ULP ulp"""
+        """NaN/+-0/+-inf lanes bitwise-equal, finite lanes within ULP ulp.
+
+        advsimd contract (2026-11-24): the bias-split special path gives
+        constants + NaN passthrough bit-exactly, but finite boundary
+        lanes (overflow/subnormal-result zones) may deviate by a few ULP
+        instead of routing through libm; inf-vs-finite is tolerated only
+        on aarch64 and only within 2 ULP of the overflow threshold.
+        """
         assert res_arr.shape == res_sca.shape
-        # bit-exactness for special lanes is a contract of the aarch64
-        # NEON kernels (which route specials through the same libm call
-        # as the scalar path); on other platforms vector NaN payloads
-        # legitimately differ from libm's, so only compare values there
+        # bit-exactness for NaN payloads and +-0/+-inf is a contract of
+        # the aarch64 kernels (constant patches + NaN passthrough); on
+        # other platforms vector NaN payloads legitimately differ from
+        # libm's, so only compare values there
         bit_compare = _IS_AARCH64
         uint = {np.float64: np.uint64, np.float32: np.uint32,
                 np.float16: np.uint16}[res_arr.dtype.type]
+        fi = np.finfo(res_arr.dtype)
         for a, b in zip(res_arr.ravel(), res_sca.ravel()):
             if np.isnan(a) or np.isnan(b):
                 assert np.isnan(a) == np.isnan(b), (a, b)
@@ -2567,8 +2603,23 @@ class TestFPFlagParityExplog:
                 if bit_compare:
                     # catches +0.0 vs -0.0, which compare equal
                     assert a.view(uint) == b.view(uint), (a, b)
+            elif np.isinf(a) or np.isinf(b):
+                # inf-vs-finite tolerance is an aarch64 AOR-kernel contract
+                # (bias-split boundary lanes); other platforms keep the
+                # strict inf/finite agreement of the original assert
+                assert bit_compare, (a, b)
+                # one side overflowed to inf, the other stayed finite:
+                # allowed only when the finite lane sits within 2 ULP
+                # of the overflow threshold (same sign)
+                assert np.isinf(a) != np.isinf(b), (a, b)
+                fin, inf = (b, a) if np.isinf(a) else (a, b)
+                assert np.sign(fin) == np.sign(inf), (a, b)
+                # np.spacing(fi.max) is inf (nextafter(max, inf) overflows),
+                # which would make the bound -inf and the assert vacuous;
+                # step one ULP toward zero first to get a finite spacing.
+                assert np.abs(fin) >= fi.max - 2 * np.spacing(
+                    np.nextafter(fi.max, 0)), (a, b)
             else:
-                assert not (np.isinf(a) or np.isinf(b)), (a, b)
                 assert np.abs(a - b) <= cls.ULP * np.spacing(np.abs(b)), (a, b)
 
     @pytest.mark.parametrize("func", [np.log, np.log2])
@@ -2590,7 +2641,7 @@ class TestFPFlagParityExplog:
             np.float32: [127.5, 127.6, 128.0, -126.0, -126.5, -130.0, -149.0],
             np.float16: [16.0, 15.5, 15.9921875, -14.0, -14.5, -24.0, -30.0],
         }[dtype]
-        probes = self.PROBES[dtype] + extra
+        probes = self.PROBES[dtype] + extra + self.SNAN_PROBES[dtype]
         for n in self.LENGTHS:
             arr = np.tile(np.array(probes, dtype=dtype), 8)[:n].copy()
             ws_arr, res_arr = self._warn_set(np.exp2, arr)
@@ -2654,7 +2705,7 @@ class TestFPFlagParityExplog:
             np.float32: [88.0, 88.5, 88.72, 89.0, -87.5, -90.0, -110.0],
             np.float16: [10.0, 11.0, 11.1, -20.0, -30.0],
         }[dtype]
-        probes = self.PROBES[dtype] + extra
+        probes = self.PROBES[dtype] + extra + self.SNAN_PROBES[dtype]
         for n in self.LENGTHS:
             arr = np.tile(np.array(probes, dtype=dtype), 8)[:n].copy()
             ws_arr, res_arr = self._warn_set(np.exp, arr)
@@ -2678,7 +2729,8 @@ class TestFPFlagParityExplog:
     @pytest.mark.parametrize("func", [np.log, np.log2, np.exp2, np.exp])
     @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.float16])
     def test_out_overlap_and_strided(self, func, dtype):
-        probes = self.PROBES[dtype]
+        probes = self.PROBES[dtype] + (
+            self.SNAN_PROBES[dtype] if func in (np.exp, np.exp2) else [])
         # long enough that the strided views engage the NEON main loop
         # (>= 32 lanes) with a strided tail left over; [::3] also
         # exercises the f16 general path
@@ -2707,3 +2759,48 @@ class TestFPFlagParityExplog:
                 buf[3:] = poison
             ws, _ = self._warn_set(func, buf[:3])
             assert ws == set(), (dtype, poison, ws)
+
+
+@pytest.mark.skipif(not _IS_AARCH64, reason="ARM explog dispatch kernels")
+@pytest.mark.thread_unsafe(reason="spawns a subprocess with a modified CPU-feature env")
+class TestNeonDispatchCoverage:
+    """Exercise the non-SVE (NEON/ASIMD) Highway exp/exp2 kernels.
+
+    The contiguous-only ARM wrappers dispatch to the SVE FEXPA kernel on
+    SVE hosts, so the ``#else`` Highway f64 kernel and the NEON-specific
+    f32/lookup branches never execute there and would be uncovered by a
+    single SVE coverage run. Run the ufuncs in a subprocess with SVE
+    disabled so the NEON dispatch target is selected; the instrumented
+    extension writes its gcda on exit, covering those branches.
+    """
+
+    def test_neon_path_exp_exp2(self):
+        from numpy._core._multiarray_umath import __cpu_dispatch__
+        if "SVE" not in __cpu_dispatch__:
+            pytest.skip("SVE not dispatched; NEON path already covered")
+        script = (
+            "import numpy as np\n"
+            "with np.errstate(all='ignore'):\n"
+            "    x = np.array([-700., -1., -1e-320, 0., 1e-320, 1., 2., 10.,\n"
+            "                  700., 1e300, -1e300, np.nan, np.inf, -np.inf],\n"
+            "                 dtype=np.float64)\n"
+            "    for f in (np.exp, np.exp2, np.log, np.log2):\n"
+            "        assert f(x).shape == x.shape\n"
+            "    for dt in (np.float32, np.float16):\n"
+            "        y = x.astype(dt)\n"
+            "        for f in (np.exp, np.exp2):\n"
+            "            assert f(y).shape == y.shape\n"
+        )
+        env = os.environ.copy()
+        env["NPY_DISABLE_CPU_FEATURES"] = "SVE"
+        env.pop("NPY_ENABLE_CPU_FEATURES", None)
+        env["PYTHONWARNINGS"] = "ignore"
+        # ensure the subprocess imports the same (instrumented) build
+        np_parent = os.path.dirname(os.path.dirname(np.__file__))
+        env["PYTHONPATH"] = np_parent + os.pathsep + env.get("PYTHONPATH", "")
+        proc = subprocess.run([sys.executable, "-c", script], env=env,
+                              cwd=tempfile.gettempdir(),
+                              capture_output=True, text=True)
+        assert proc.returncode == 0, (
+            f"NEON-path subprocess failed (rc={proc.returncode}):\n"
+            f"{proc.stderr}")
