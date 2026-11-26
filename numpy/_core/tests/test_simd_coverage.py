@@ -2535,8 +2535,9 @@ class TestFPFlagParityExplog:
     # Signaling-NaN probes guard the quietize-on-passthrough contract
     # (patterns synced with PR #203, plus negative signs): the vector path
     # must return a quiet NaN with sign + payload preserved and raise
-    # INVALID, exactly as libm does. Scoped to exp/exp2 on this branch;
-    # log/log2 get the same probes with their PR #203 quietize fix.
+    # INVALID, exactly as libm does. Applied to exp/exp2/log/log2: log is
+    # scalar libm and log2 keeps the quietize fix (PR #203), so all four
+    # paths match libm's quietize-on-passthrough.
     SNAN_PROBES = {
         np.float64: [np.array([0x7ff0000000000001],
                               dtype=np.uint64).view(np.float64)[0],
@@ -2625,7 +2626,7 @@ class TestFPFlagParityExplog:
     @pytest.mark.parametrize("func", [np.log, np.log2])
     @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.float16])
     def test_log_family_flag_parity(self, func, dtype):
-        probes = self.PROBES[dtype]
+        probes = self.PROBES[dtype] + self.SNAN_PROBES[dtype]
         for n in self.LENGTHS:
             arr = np.tile(np.array(probes, dtype=dtype), 8)[:n].copy()
             ws_arr, res_arr = self._warn_set(func, arr)
@@ -2729,8 +2730,7 @@ class TestFPFlagParityExplog:
     @pytest.mark.parametrize("func", [np.log, np.log2, np.exp2, np.exp])
     @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.float16])
     def test_out_overlap_and_strided(self, func, dtype):
-        probes = self.PROBES[dtype] + (
-            self.SNAN_PROBES[dtype] if func in (np.exp, np.exp2) else [])
+        probes = self.PROBES[dtype] + self.SNAN_PROBES[dtype]
         # long enough that the strided views engage the NEON main loop
         # (>= 32 lanes) with a strided tail left over; [::3] also
         # exercises the f16 general path
