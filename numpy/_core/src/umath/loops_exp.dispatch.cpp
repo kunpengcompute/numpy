@@ -806,25 +806,42 @@ exp_f64_sve_fexpa(svfloat64_t x, const svbool_t pg)
             svnot_b_z(pg, svorr_z(pg, nan_m, inf_m)));
         svbool_t care = svorr_z(pg, svorr_z(pg, nan_m, inf_m), tiny);
         svfloat64_t xs = svsel_f64(care, sv_f64(0.0), x);
+        /* Constant special results computed on raw x for every lane: fl(1+x)
+           and the hardware-quietize x+0 both see raw sNaN and raise INVALID
+           (libm parity). Hoisted so they are shared by the cheap fast path
+           and the final patches; qn feeds the nan_m select, so it is live
+           whenever a NaN lane exists and cannot be dead-code-eliminated. */
+        svfloat64_t tiny_res = svadd_x(pg, sv_f64(1.0), x);
+        svfloat64_t qn = svadd_x(pg, x, sv_f64(0.0));
+        svfloat64_t inf_res = svmax_x(pg, x, sv_f64(0.0));
         svfloat64_t y;
         if (svptest_any(pg, sp_finite)) {
             /* finite OF/UF lanes present: one heavy compute for all lanes
                (clamp + offset + FEXPA + FSCALE), correct on clean lanes too */
             y = special_case(xs, pg, d);
         } else {
-            /* NaN/inf/tiny/zero only: light clean-form compute on sanitized
-               input (finite-special lanes sanitized to 0 as well) */
-            svfloat64_t xc
-                = svsel_f64(svorr_z(pg, special, tiny), sv_f64(0.0), x);
-            y = exp_inline(xc, pg, d);
+            /* NaN/inf/tiny/zero only (no finite-special). If ALL lanes are
+               cheap (NaN/inf/tiny/0), skip FEXPA+polynomial entirely and use
+               constant selects; otherwise light clean-form compute on
+               sanitized input. */
+            svbool_t small
+                = svcmplt_u64(pg, abs_bits, sv_u64(0x3e10000000000000ULL));
+            svbool_t cheap = svorr_z(pg, svorr_z(pg, nan_m, inf_m), small);
+            if (!svptest_any(pg, svnot_b_z(pg, cheap))) {
+                y = svsel_f64(nan_m, qn, inf_res);
+                y = svsel_f64(small, tiny_res, y);
+            } else {
+                svfloat64_t xc
+                    = svsel_f64(svorr_z(pg, special, tiny), sv_f64(0.0), x);
+                y = exp_inline(xc, pg, d);
+            }
         }
-        y = svsel_f64(tiny, svadd_x(pg, sv_f64(1.0), x), y);
-        /* NaN passthrough preserving sign+payload; set the quiet bit so an
-           sNaN is quieted exactly as scalar libm does (qNaN unchanged).  */
-        svfloat64_t qn = svreinterpret_f64(
-            svorr_x(pg, svreinterpret_u64(x), sv_u64(0x0008000000000000ULL)));
+        y = svsel_f64(tiny, tiny_res, y);
+        /* NaN passthrough: x+0 hardware-quietizes sNaN (sign+payload
+           preserved) and raises INVALID, exactly as scalar libm; qNaN
+           unchanged. */
         y = svsel_f64(nan_m, qn, y);
-        y = svsel_f64(inf_m, svmax_x(pg, x, sv_f64(0.0)), y);
+        y = svsel_f64(inf_m, inf_res, y);
         return y;
     }
     return exp_inline(x, pg, d);
@@ -855,7 +872,9 @@ exp_f64_kernel(vec_x_f64 x)
     const vec_x_u64 bound_bits = hn::Set(exp_u64, 0x4086232bdd76683cull); /*708.396*/
     const vec_x_u64 tiny_bits = hn::Set(exp_u64, 0x3e10000000000000ull); /*2^-30*/
     const vec_x_u64 idx_mask = hn::Set(exp_u64, V_EXP_INDEX_MASK);
-    vec_x_u64 abs_bits = hn::And(hn::BitCast(exp_u64, x), abs_mask);
+    const vec_x_u64 quiet_bit = hn::Set(exp_u64, 0x0008000000000000ull);
+    vec_x_u64 bits = hn::BitCast(exp_u64, x);
+    vec_x_u64 abs_bits = hn::And(bits, abs_mask);
     auto special_m = hn::Gt(abs_bits, bound_bits);
     auto tiny_m = hn::And(hn::Lt(abs_bits, tiny_bits),
                           hn::Gt(abs_bits, hn::Zero(exp_u64)));  /* nonzero |x|<2^-30 */
@@ -863,18 +882,34 @@ exp_f64_kernel(vec_x_f64 x)
     if (__builtin_expect(!hn::AllFalse(exp_u64, hn::Or(special_m, tiny_m)), 0)) {
         auto nan_m = hn::Gt(abs_bits, inf_bits);
         auto inf_m = hn::Eq(abs_bits, inf_bits);
+        auto small_m = hn::Lt(abs_bits, tiny_bits);  /* incl 0 */
+        /* cheap = NaN/inf/tiny/0 only; finite-large (cmp_f) needs heavy path */
+        auto cheap_m = hn::Or(hn::Or(nan_m, inf_m), small_m);
+        /* fl(1+x) for tiny/0; the add sees raw sNaN on every lane and raises
+         * INVALID (libm parity). NaN quiet-bit OR preserves sign+payload. */
+        vec_x_f64 tiny_res = hn::Add(one, x);
+        vec_x_f64 nan_res = hn::BitCast(D, hn::Or(bits, quiet_bit));
+        vec_x_f64 inf_res = hn::Max(x, zero);
+        if (__builtin_expect(hn::AllTrue(exp_u64, cheap_m), 0)) {
+            /* All lanes cheap-special: skip polynomial + table + bias split
+             * entirely, constant selects only. */
+            result = hn::IfThenElse(hn::RebindMask(D, nan_m), nan_res, inf_res);
+            result = hn::IfThenElse(hn::RebindMask(D, small_m), tiny_res, result);
+            return result;
+        }
+        /* Mixed path: sanitize + polynomial + bias-split + patch. */
         auto cmp_f = hn::And(special_m, hn::Lt(abs_bits, inf_bits));
         auto care_m = hn::Or(hn::Or(nan_m, inf_m), tiny_m);
         vec_x_f64 xs = hn::IfThenElse(hn::RebindMask(D, care_m), zero, x);
-        /* Clamp finite special lanes to [-746, 710]: beyond these bounds
-         * exp(x) is already saturated (0 / inf), so the clamp preserves
-         * every result and flag, while the reduction remainder r (and
-         * r*r) can no longer overflow for huge |x| (spurious OF on lanes
-         * whose result is the saturated constant). Mirrors the SVE
-         * special_case svmin/svmax clamp. */
-        const vec_x_f64 sp_lo = hn::Set(D, -746.0);
-        const vec_x_f64 sp_hi = hn::Set(D, 710.0);
-        xs = hn::Min(hn::Max(xs, sp_lo), sp_hi);
+        /* Huge |x| (>1024) breaks range reduction (catastrophic cancellation
+         * makes r*r overflow -> spurious OF). Such lanes are cmp2 and take
+         * r_ov, so sanitize them to +/-1024 (sign preserved, |n| still >
+         * ScaleBound) before the polynomial. */
+        auto huge_m = hn::Gt(abs_bits, hn::Set(exp_u64, 0x4090000000000000ull));
+        vec_x_u64 xs_huge = hn::Or(
+            hn::And(bits, hn::Set(exp_u64, 0x8000000000000000ull)),
+            hn::Set(exp_u64, 0x4090000000000000ull));
+        xs = hn::IfThenElse(hn::RebindMask(D, huge_m), hn::BitCast(D, xs_huge), xs);
         vec_x_f64 z = hn::MulAdd(xs, inv_ln2, shift);
         vec_x_u64 u = hn::BitCast(exp_u64, z);
         vec_x_f64 n = hn::Sub(z, shift);
@@ -901,24 +936,33 @@ exp_f64_kernel(vec_x_f64 x)
             vec_x_f64 s2 = hn::BitCast(D, hn::Add(
                 hn::Sub(hn::BitCast(exp_u64, scale), sp_bias2), b));
             auto cmp2 = hn::Gt(hn::Abs(n), scale_bound);
-            auto cmp_neg = hn::And(hn::RebindMask(D, cmp_f), hn::Le(n, zero));
-            auto ov_mask = hn::Or(cmp2, cmp_neg);
-            vec_x_f64 s1_ov = hn::IfThenElse(ov_mask, s1, one);
+            /* r_ov selected only by cmp2 (extreme OF/UF). Gate s1_ov by cmp2
+             * so a discarded r_ov on moderate-negative lanes cannot leak a
+             * spurious UF. */
+            vec_x_f64 s1_ov = hn::IfThenElse(cmp2, s1, one);
             vec_x_f64 r_ov = hn::Mul(s1_ov, s1_ov);
-            vec_x_f64 r_sp = hn::Mul(hn::MulAdd(poly, s2, s2), s1);
+            /* cmp2 lanes select r_ov; sanitize their s2 (inf for huge |x|) so
+             * the discarded r_sp cannot leak a spurious OF. */
+            vec_x_f64 s2_safe = hn::IfThenElse(cmp2, one, s2);
+            vec_x_f64 r_sp = hn::Mul(hn::MulAdd(poly, s2_safe, s2_safe), s1);
             vec_x_f64 sp_val = hn::IfThenElse(cmp2, r_ov, r_sp);
             result = hn::IfThenElse(hn::RebindMask(D, cmp_f), sp_val, result);
+            /* libm raises UF for every subnormal/zero RESULT (even exact).
+             * HIP12 FMUL does not flag exact tininess, so supply UF via an
+             * inexact underflowing product gated on result exponent==0 (value
+             * unchanged: result+0). Non-subnormal lanes multiply 1*1. */
+            vec_x_u64 res_exp = hn::And(hn::BitCast(exp_u64, result), inf_bits);
+            auto sub_m = hn::Eq(res_exp, hn::Zero(exp_u64));
+            vec_x_f64 uf_a = hn::IfThenElse(hn::RebindMask(D, sub_m),
+                                            hn::Set(D, 0x1p-600), one);
+            vec_x_f64 uf_prod = hn::Mul(uf_a, uf_a);
+            vec_x_f64 res_uf = hn::Add(result, uf_prod);
+            result = hn::IfThenElse(hn::RebindMask(D, sub_m), res_uf, result);
         }
-        /* exp(x) = fl(1 + x) for |x|<2^-30 (x^2/2 < 2^-61 below half
-         * ULP); adding subnormal x to 1 rounds normal, no UF. */
-        vec_x_f64 tiny_res = hn::Add(x, one);
+        /* tiny -> fl(1+x); NaN quiet-bit OR; +-inf -> max(x,0). */
         result = hn::IfThenElse(hn::RebindMask(D, tiny_m), tiny_res, result);
-        /* NaN passthrough via x + 0: hardware-quietizes sNaN (sign +
-         * payload preserved) matching libm, as the SVE FEXPA path and
-         * PR #203 log do; qNaN unchanged. INVALID is already raised by
-         * the tiny_res add above, which sees the raw sNaN. */
-        result = hn::IfThenElse(hn::RebindMask(D, nan_m), hn::Add(x, zero), result);
-        result = hn::IfThenElse(hn::RebindMask(D, inf_m), hn::Max(x, zero), result);
+        result = hn::IfThenElse(hn::RebindMask(D, nan_m), nan_res, result);
+        result = hn::IfThenElse(hn::RebindMask(D, inf_m), inf_res, result);
     } else {
         vec_x_f64 z = hn::MulAdd(x, inv_ln2, shift);
         vec_x_u64 u = hn::BitCast(exp_u64, z);
@@ -936,7 +980,6 @@ exp_f64_kernel(vec_x_f64 x)
     }
     return result;
 }
-
 #endif /* NPY_EXPLOG_SVE_FEXPA */
 
 HWY_ATTR static void
