@@ -7,7 +7,11 @@ Focuses on non-contiguous strides, float16, and edge cases for:
 - array mapping/indexing
 - compiled_base (searchsorted)
 """
+import os
 import platform
+import subprocess
+import sys
+import tempfile
 import warnings
 
 import pytest
@@ -2755,3 +2759,48 @@ class TestFPFlagParityExplog:
                 buf[3:] = poison
             ws, _ = self._warn_set(func, buf[:3])
             assert ws == set(), (dtype, poison, ws)
+
+
+@pytest.mark.skipif(not _IS_AARCH64, reason="ARM explog dispatch kernels")
+@pytest.mark.thread_unsafe(reason="spawns a subprocess with a modified CPU-feature env")
+class TestNeonDispatchCoverage:
+    """Exercise the non-SVE (NEON/ASIMD) Highway exp/exp2 kernels.
+
+    The contiguous-only ARM wrappers dispatch to the SVE FEXPA kernel on
+    SVE hosts, so the ``#else`` Highway f64 kernel and the NEON-specific
+    f32/lookup branches never execute there and would be uncovered by a
+    single SVE coverage run. Run the ufuncs in a subprocess with SVE
+    disabled so the NEON dispatch target is selected; the instrumented
+    extension writes its gcda on exit, covering those branches.
+    """
+
+    def test_neon_path_exp_exp2(self):
+        from numpy._core._multiarray_umath import __cpu_dispatch__
+        if "SVE" not in __cpu_dispatch__:
+            pytest.skip("SVE not dispatched; NEON path already covered")
+        script = (
+            "import numpy as np\n"
+            "with np.errstate(all='ignore'):\n"
+            "    x = np.array([-700., -1., -1e-320, 0., 1e-320, 1., 2., 10.,\n"
+            "                  700., 1e300, -1e300, np.nan, np.inf, -np.inf],\n"
+            "                 dtype=np.float64)\n"
+            "    for f in (np.exp, np.exp2, np.log, np.log2):\n"
+            "        assert f(x).shape == x.shape\n"
+            "    for dt in (np.float32, np.float16):\n"
+            "        y = x.astype(dt)\n"
+            "        for f in (np.exp, np.exp2):\n"
+            "            assert f(y).shape == y.shape\n"
+        )
+        env = os.environ.copy()
+        env["NPY_DISABLE_CPU_FEATURES"] = "SVE"
+        env.pop("NPY_ENABLE_CPU_FEATURES", None)
+        env["PYTHONWARNINGS"] = "ignore"
+        # ensure the subprocess imports the same (instrumented) build
+        np_parent = os.path.dirname(os.path.dirname(np.__file__))
+        env["PYTHONPATH"] = np_parent + os.pathsep + env.get("PYTHONPATH", "")
+        proc = subprocess.run([sys.executable, "-c", script], env=env,
+                              cwd=tempfile.gettempdir(),
+                              capture_output=True, text=True)
+        assert proc.returncode == 0, (
+            f"NEON-path subprocess failed (rc={proc.returncode}):\n"
+            f"{proc.stderr}")
