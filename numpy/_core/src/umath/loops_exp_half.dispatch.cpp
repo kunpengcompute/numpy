@@ -15,7 +15,7 @@
  *
  * ARM: Highway f32 kernel on promoted f16 halves (full-stride wrapper:
  * stride 1 keeps the LoadU/StoreU fast path, other element-aligned strides
- * use scalar lane insert/extract — no gather hardware, so SVE is kept).
+ * stage through a contiguous stack temp — no gather hardware, SVE kept).
  * x86: SVML f16 path unchanged.
  */
 
@@ -227,10 +227,11 @@ NPY_NO_EXPORT void NPY_CPU_DISPATCH_CURFX(HALF_exp)
 #if SIMD_ARM && NPY_HWY_F16
     npy_intp len = dimensions[0];
     /* Full-stride: vectorize every element-aligned, non-overlapping
-     * stride. 16-bit load/store use scalar lane insert/extract (SVE
-     * gather is 32/64-bit only), so no gather hardware is involved and
-     * the Kunpeng 920 SVE gather bottleneck does not apply; the SVE
-     * contiguous fast path (LoadU/StoreU) is kept for stride 1. Guards:
+     * stride. 16-bit load/store: stride 1 keeps LoadU/StoreU; other
+     * strides scalar-gather/scatter the owned elements through a
+     * contiguous stack temp + one ld1h/st1h (SVE gather is 32/64-bit
+     * only), so no gather hardware is involved and the Kunpeng 920 SVE
+     * gather bottleneck does not apply. Guards:
      * no mem overlap, element-aligned byte strides, nonzero output stride
      * (scatter-to-one-address race), and the int64 lane-index bound;
      * other runs fall back to scalar libm (policy note in loops_explog.h).
