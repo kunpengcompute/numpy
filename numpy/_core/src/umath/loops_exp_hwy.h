@@ -38,18 +38,33 @@ exp_load_vector(type_t *src, npy_intp ssrc, npy_intp len)
              * load. Replaces the per-lane InsertLane FSU chain (serial
              * ld1rh+cmpeq+dup+merge on Kunpeng 920) with pipelineable
              * scalar memory ops + ld1h. Reads only owned elements (no
-             * overread). The staging loop
-             * is kept scalar (asm ldrh) so GCC does not auto-vectorize it
-             * into a slow SVE gather. */
-            HWY_ALIGN uint16_t temp[hn::MaxLanes(D)];
+             * overread). temp is float16_t (repo staging convention, see
+             * load_f16 in loops_log2); scalar bits cross via aliasing-safe
+             * BitCastScalar, not a type pun. */
+            HWY_ALIGN hwy::float16_t temp[hn::MaxLanes(D)];
+#if defined(__aarch64__) && defined(__ARM_FEATURE_SVE)
+            /* SVE target: keep the gather scalar via asm ldrh so GCC does
+             * not auto-vectorize it into a slow microcoded SVE gather
+             * (Kunpeng 920 SVE1). The "m" input operand declares the memory
+             * read without a full "memory" barrier (a barrier serializes the
+             * loop and costs ~6% on strided special); the wrapper guarantees
+             * src/dst do not overlap and src is not written in this loop. */
             const uint16_t *s = reinterpret_cast<const uint16_t *>(src);
             for (int i = 0; i < nlanes; i++) {
                 uint16_t v;
-                __asm__("ldrh %w0, [%1]" : "=r"(v) : "r"(s));
-                temp[i] = v;
+                __asm__("ldrh %w0, [%1]"
+                        : "=r"(v) : "r"(s), "m"(*(const uint16_t *)s));
+                temp[i] = hwy::BitCastScalar<hwy::float16_t>(v);
                 s += ssrc;
             }
-            return hn::LoadU(D, reinterpret_cast<const hwy::float16_t *>(temp));
+#else
+            /* Portable C scalar staging (non-SVE / non-AArch64): no SVE
+             * gather auto-vectorization risk, plain element copies. */
+            for (int i = 0; i < nlanes; i++) {
+                temp[i] = src[i * ssrc];
+            }
+#endif
+            return hn::LoadU(D, temp);
         }
         vtype v = hn::Zero(D);
         for (int i = 0; i < (int)len; i++) {
@@ -84,19 +99,29 @@ exp_store_vector(vtype vec, type_t *dst, npy_intp sdst, npy_intp len)
         /* General strided fallback: one contiguous vector store to a stack
          * temp, then scalar-scatter the owned elements to dst. Replaces the
          * per-lane ExtractLane (whilelo+lasta+str) loop with st1h +
-         * pipelineable scalar memory ops. Writes only owned elements. The
-         * scatter loop is kept scalar (asm strh) to avoid auto-vectorization
-         * into a slow SVE scatter. */
+         * pipelineable scalar memory ops. Writes only owned elements. temp
+         * is float16_t (repo staging convention); scalar bits cross via
+         * aliasing-safe BitCastScalar, not a type pun. */
         if (len >= nlanes) {
-            HWY_ALIGN uint16_t temp[hn::MaxLanes(D)];
-            hn::StoreU(vec, D, reinterpret_cast<hwy::float16_t *>(temp));
+            HWY_ALIGN hwy::float16_t temp[hn::MaxLanes(D)];
+            hn::StoreU(vec, D, temp);
+#if defined(__aarch64__) && defined(__ARM_FEATURE_SVE)
+            /* SVE target: keep the scatter scalar via asm strh (volatile +
+             * "memory" so the stores are not reordered/eliminated) to avoid
+             * auto-vectorization into a slow SVE scatter. */
             uint16_t *d = reinterpret_cast<uint16_t *>(dst);
             for (int i = 0; i < nlanes; i++) {
-                uint16_t v = temp[i];
+                uint16_t v = hwy::BitCastScalar<uint16_t>(temp[i]);
                 __asm__ volatile("strh %w0, [%1]"
                                  : : "r"(v), "r"(d) : "memory");
                 d += sdst;
             }
+#else
+            /* Portable C scalar staging (non-SVE / non-AArch64). */
+            for (int i = 0; i < nlanes; i++) {
+                dst[i * sdst] = temp[i];
+            }
+#endif
             return;
         }
         for (int i = 0; i < (int)len; i++) {
