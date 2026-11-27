@@ -377,10 +377,11 @@ simd_range_reduction(__m512 x, __m512 y, __m512 c1, __m512 c2, __m512 c3)
  * - exp f16: full-stride, keeps the SVE dispatch target in its own
  *   dispatch file (loops_exp_half.dispatch.cpp) so the f64 NEON-only
  *   target list does not strip f16 of SVE (meson dispatch granularity is
- *   per file). 16-bit load/store use scalar lane insert/extract (SVE
- *   gather is 32/64-bit only), so no gather hardware is involved and the
- *   Kunpeng 920 SVE gather bottleneck does not apply; stride 1 keeps the
- *   LoadU/StoreU fast path. The wrapper guards overlap, element alignment,
+ *   per file). 16-bit load/store: stride 1 keeps LoadU/StoreU; other
+ *   strides scalar-gather/scatter the owned elements through a contiguous
+ *   stack temp + one ld1h/st1h (SVE gather is 32/64-bit only), so no
+ *   gather hardware is involved and the Kunpeng 920 SVE gather bottleneck
+ *   does not apply. The wrapper guards overlap, element alignment,
  *   zero output stride and the int64 lane-index bound; other runs fall
  *   back to scalar libm.
  * - exp2, log/log2: contiguous-only. The wrappers vectorize
